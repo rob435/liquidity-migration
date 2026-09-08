@@ -354,11 +354,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if !batch.foreign.is_empty() {
             batch.untrusted = true;
             self.may_open = false;
-            self.wal.append(&WalRecord::Reconciled {
-                wall_ts_ms: now_ms,
-                findings: std::mem::take(&mut batch.foreign),
-                may_open: false,
-            })?;
+            record_latch(&mut self.wal, now_ms, std::mem::take(&mut batch.foreign))?;
         }
         if batch.resume.is_some() || !batch.rows.is_empty() {
             self.recovery.phase = Phase::Applying(Box::new(batch));

@@ -459,6 +459,38 @@ async fn execution_history_failure_after_a_gap_retains_private_progress_and_latc
     assert!(!may_open);
 }
 
+/// The latch outlives the process and only an operator clears it, so the
+/// journal has to carry it. Incident `mainnet-ac90e31c207bc0da`: the funded
+/// engine went reduce-only under a venue that had stopped answering, and the
+/// only trace until the next boot was a watchdog page.
+#[tokio::test(start_paused = true)]
+async fn latching_entries_off_says_so_in_the_journal() {
+    let (subscriber, _) = Buyer::new("BTCUSDT", u64::MAX, 0.01);
+    let (mut engine, h) = build(allow_all(), vec![Box::new(subscriber)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    *h.executions.lock().unwrap() = None;
+
+    let heard = crate::tests::Heard::default();
+    let guard = tracing::subscriber::set_default(heard.clone());
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 0, false),
+            &mut ScriptOrderFeed::playing(vec![OrderUpdate::StreamReset { recv_ns: 1 }]),
+            tokio::time::sleep(Duration::from_millis(60)),
+        )
+        .await
+        .unwrap();
+    drop(guard);
+
+    let said = heard.about("will not open new positions");
+    assert!(
+        said.iter()
+            .any(|line| line.contains("execution history is unavailable")),
+        "the latch and its finding never reached the journal: {:?}",
+        heard.lines()
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn failed_gap_account_refresh_denies_the_next_entry_immediately() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);

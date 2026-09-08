@@ -1830,6 +1830,72 @@ pub(crate) fn allow_all() -> RiskVerdict {
     RiskVerdict::Allow { qty: f64::NAN }
 }
 
+/// Every log line written while this is installed, as "target: message".
+/// `tracing` keeps no reader of its own, and two of the things worth proving
+/// about this engine are said in the journal and nowhere else: that an engine
+/// with no heartbeat configured says nothing at all, and that one which
+/// latches opening off says so where the person on call reads.
+#[derive(Clone, Default)]
+pub(crate) struct Heard(Arc<Mutex<Vec<String>>>);
+
+impl Heard {
+    pub(crate) fn lines(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .expect("nothing panicked while holding this")
+            .clone()
+    }
+
+    pub(crate) fn about(&self, words: &str) -> Vec<String> {
+        self.lines()
+            .into_iter()
+            .filter(|line| line.contains(words))
+            .collect()
+    }
+
+    pub(crate) fn about_the_heartbeat(&self) -> Vec<String> {
+        self.about("heartbeat")
+    }
+}
+
+impl tracing::Subscriber for Heard {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut said = Said(String::new());
+        event.record(&mut said);
+        self.0
+            .lock()
+            .expect("nothing panicked while holding this")
+            .push(format!("{}: {}", event.metadata().target(), said.0));
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// The words of one log line. Everything else about the event is dropped.
+struct Said(String);
+
+impl tracing::field::Visit for Said {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0 = format!("{value:?}");
+        }
+    }
+}
+
 #[test]
 fn venue_clock_offset_is_venue_minus_the_local_receive_clock() {
     assert_eq!(

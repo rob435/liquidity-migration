@@ -507,11 +507,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 if !protected {
                     self.may_open = false;
                     self.portfolio_dirty = true;
-                    self.wal.append(&WalRecord::Reconciled {
-                        wall_ts_ms: clock::wall_ms(),
-                        findings: vec![finding],
-                        may_open: false,
-                    })?;
+                    record_latch(&mut self.wal, clock::wall_ms(), vec![finding])?;
                     if let Some(terms) = stop.exact {
                         self.start_portfolio_emergency(stop.symbol, terms.reference_price, engine_types::portfolio_control::PortfolioEmergencyReason::ProtectionUnavailable)?;
                     }
@@ -699,11 +695,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if !failures.is_empty() {
             self.may_open = false;
             self.portfolio_dirty = true;
-            self.wal.append(&WalRecord::Reconciled {
-                wall_ts_ms: clock::wall_ms(),
-                findings: failures,
-                may_open: false,
-            })?;
+            record_latch(&mut self.wal, clock::wall_ms(), failures)?;
         }
         repairs.truncate(MAX_ORDERS_PER_BATCH);
         self.queue_native_stops(repairs)?;

@@ -60,36 +60,63 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     `mainnet-ac90e31c207bc0da` below and needs an operator. Until then every
     mainnet handover refuses and every deploy exits non-zero at that gate.
 
-- **2026-09-08 — Incident `mainnet-ac90e31c207bc0da`: mainnet cannot open positions.**
+- **2026-09-08 — Incident `mainnet-ac90e31c207bc0da`: the funded engine is latched reduce-only.**
   - From 15:00:23 UTC the mainnet watchdog pages `CRITICAL
     may-open:liquidity-migration-engine-mainnet.service:
     liquidity-migration-engine-mainnet.service cannot open positions` every
-    30 seconds. The engine unit stays active with a heartbeat under one second,
-    no failed units, deployed `441811eb`, real money armed, and nine positions
-    with their native stops unchanged.
-    [Diagnose run `34242036121`](https://github.com/rob435/liquidity-migration/actions/runs/34242036121),
-    read at 15:01:23 through 15:01:37.
-  - Venue connectivity collapses first. The mainnet private stream drops at
-    14:58:21 and 14:59:16 on `private stream keep-alive unanswered`; both signal
-    workers log `Bybit public keep-alive was unanswered`, a stream gap, and
-    `Bybit public WebSocket dial timed out` between 14:59:00 and 14:59:21, and
-    both report `status: recovering` at 15:01:37; the host clock probe measures
-    `venue clock measurement is inconclusive: RTT 15105ms` at 14:59:12; the
-    account reader is retained for retry twice on `venue rejected (10006): Too
-    many visits. Exceeded the API Rate Limit.` at 14:31:55 and 14:31:56.
-  - Cause is not yet assigned. The heartbeat's `may_open` is
-    `may_open && private_stream_ready`, so one boolean carries both a latched
-    reconciliation halt, which needs an operator, and a private stream that is
-    merely down, which clears itself. `diagnose` read every unit except the two
-    engines, so neither the heartbeat behind the alert nor the engine journal
-    around it reached an on-call session with no host access. It now reads both
-    engine units' systemd state and journal tail and a bounded heartbeat digest
-    carrying `may_open`, `stream_resets`, the rolling-loss verdict, strategy
-    errors and entry-blocker reasons, and never the account identity. Six
-    regressions fail before that change.
+    30 seconds.
+    [Diagnose `34242036121`](https://github.com/rob435/liquidity-migration/actions/runs/34242036121)
+    reads the fleet at 15:01:23 and
+    [diagnose `34243293274`](https://github.com/rob435/liquidity-migration/actions/runs/34243293274)
+    reads both engines at 15:13:02.
+  - Venue connectivity collapses first. The host clock probe measures `venue
+    clock measurement is inconclusive: RTT 15105ms` at 14:59:12. The mainnet
+    private stream drops at 14:58:21 and 14:59:16 on `private stream keep-alive
+    unanswered`; the demo engine's account read fails `venue transport: request
+    did not complete within 10s` at 14:58:59; both signal workers log `Bybit
+    public keep-alive was unanswered`, a gap and `Bybit public WebSocket dial
+    timed out` between 14:59:00 and 14:59:21; the mainnet account reader is
+    retained for retry twice on `venue rejected (10006): Too many visits.
+    Exceeded the API Rate Limit.` at 14:31:55 and 14:31:56.
+  - `may_open` is latched, not stream-dependent. The engine started at 15:10:29
+    logs `an earlier boot stopped this engine opening new positions and nothing
+    here clears that; it will reduce only until somebody looks at the log` and
+    `this engine will not open new positions: the account holds orders or
+    exposure its own log cannot account for`; its heartbeat reads
+    `may_open=false` with `stream_resets=0` and `strategy_errors=[]`, and every
+    sleeve `entries_enabled=false`. The latch was written between 14:59:16 and
+    15:00:23 by the engine that preceded it and survives the restart by design.
+    Which finding it carries is unread: it is in the WAL's `Reconciled` record,
+    which `engine-tools`/`clear` prints under the log lock on the host.
+  - Only an operator clears the latch. Deploy
+    [`34241185290`](https://github.com/rob435/liquidity-migration/actions/runs/34241185290)
+    replaces demo at 15:04:48, soaks 300 seconds, replaces mainnet at 15:10:29
+    and then fails at 15:10:53 on `liquidity-migration-engine-mainnet.service
+    published an unhealthy heartbeat after startup`. Rollback is refused —
+    `441811eb` has different or unavailable runtime inputs from `30feb6d` — so
+    `30feb6d` is installed in both realms and a forward repair is required.
+  - Entries are refused twice over. The restarted engine reduces three
+    positions at 15:10:29 and 15:11:11 — carry ACEUSDT `-4.34152653`, long
+    JUPUSDT `-3.3078038`, long ARBUSDT `-2.65691923` USDT — taking rolling loss
+    to `-10.30624956` against the `10` USDT mainnet limit, so
+    `rolling-loss:liquidity-migration-engine-mainnet.service` is critical
+    independently of the latch and stays so until the 24-hour window rolls off.
+    Six positions remain per realm; demo reads `may_open=true`.
+  - Every latch site now says so in the journal. A `Reconciled
+    { may_open: false }` reached the WAL and, at seven of eight sites, nothing
+    else: boot announced it on the next start, and a running engine went
+    reduce-only silently. `record_latch` writes the record and logs the finding
+    at every site. One regression fails before the change; behaviour is
+    otherwise unchanged, and this ships with the owner's forward repair rather
+    than a deploy of its own.
+  - Not changed, for the owner to decide: `account_recovery.rs` latches on any
+    error from the execution-history leg, a plain transport timeout included,
+    while the account leg retries the identical error. That asymmetry is why
+    demo stayed open and mainnet latched under one network event.
+    `MUTATION_DRAIN_TIMEOUT` is 10 s against a measured 15 s venue round trip.
   - `liquidity-migration-demo-liveness.timer` is inactive from about 14:33,
-    after the deploy that fails its readiness check at 14:34:16, so the demo
-    realm is unwatched and the host watchdog pages `CRITICAL watchdog:demo:
+    after the deploy that failed its readiness check at 14:34:16, so the demo
+    realm went unwatched and the host watchdog paged `CRITICAL watchdog:demo:
     demo watchdog timer is inactive (enabled)` at 14:52:51, 14:55:53 and
     14:59:12. Diagnosed and fixed as `host-51b05439c4f09794` above.
 

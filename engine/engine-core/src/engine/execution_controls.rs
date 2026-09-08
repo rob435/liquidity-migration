@@ -180,15 +180,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         self.may_open = false;
         self.portfolio_dirty = true;
-        self.wal.append(&WalRecord::Reconciled {
-            wall_ts_ms: clock::wall_ms(),
-            may_open: false,
-            findings: vec![format!(
+        record_latch(
+            &mut self.wal,
+            clock::wall_ms(),
+            vec![format!(
                 "reject storm: {} distinct orders rejected within {}ms",
                 self.recent_rejections.len(),
                 limits.reject_window_ms
             )],
-        })?;
+        )?;
         let openings: Vec<_> = self
             .books
             .orders

@@ -292,13 +292,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 }
                 Some(Err(error)) => {
                     self.may_open = false;
-                    self.wal.append(&WalRecord::Reconciled {
-                        wall_ts_ms: clock::wall_ms(),
-                        findings: vec![format!(
+                    record_latch(
+                        &mut self.wal,
+                        clock::wall_ms(),
+                        vec![format!(
                             "execution history is unavailable during recovery: {error}"
                         )],
-                        may_open: false,
-                    })?;
+                    )?;
                     self.publish_history(query, result.account, None)?;
                 }
                 None => self.adopt_recovery_account(query, result.account).await?,
@@ -391,14 +391,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         self.private_stream_ready = false;
                     } else {
                         self.may_open = false;
-                        self.wal.append(&WalRecord::Reconciled {
-                            wall_ts_ms: clock::wall_ms(),
-                            findings: vec![
+                        record_latch(
+                            &mut self.wal,
+                            clock::wall_ms(),
+                            vec![
                                 "venue position drift remains after execution-history recovery"
                                     .into(),
                             ],
-                            may_open: false,
-                        })?;
+                        )?;
                     }
                 }
                 self.adopt_view(view);

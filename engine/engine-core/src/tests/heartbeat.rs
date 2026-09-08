@@ -8,67 +8,6 @@ use super::*;
 // The heartbeat file
 // ---------------------------------------------------------------------------
 
-/// Every log line written while this is installed, as "target: message".
-/// `tracing` keeps no reader of its own, and one of the things worth proving
-/// about the heartbeat is that an engine with none configured says nothing at
-/// all — which needs a reader that would have heard it.
-#[derive(Clone, Default)]
-struct Heard(Arc<Mutex<Vec<String>>>);
-
-impl Heard {
-    fn lines(&self) -> Vec<String> {
-        self.0
-            .lock()
-            .expect("nothing panicked while holding this")
-            .clone()
-    }
-
-    fn about_the_heartbeat(&self) -> Vec<String> {
-        self.lines()
-            .into_iter()
-            .filter(|line| line.contains("heartbeat"))
-            .collect()
-    }
-}
-
-impl tracing::Subscriber for Heard {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-
-    fn event(&self, event: &tracing::Event<'_>) {
-        let mut said = Said(String::new());
-        event.record(&mut said);
-        self.0
-            .lock()
-            .expect("nothing panicked while holding this")
-            .push(format!("{}: {}", event.metadata().target(), said.0));
-    }
-
-    fn enter(&self, _: &tracing::span::Id) {}
-
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
-/// The words of one log line. Everything else about the event is dropped.
-struct Said(String);
-
-impl tracing::field::Visit for Said {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message" {
-            self.0 = format!("{value:?}");
-        }
-    }
-}
-
 /// A tick every few milliseconds, so a test does not sit through the shipping
 /// quarter-second.
 fn quick_tick() -> EngineSection {

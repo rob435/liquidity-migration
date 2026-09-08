@@ -1418,11 +1418,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             };
             if let Err(reason) = orders.validate_record_quantities(&record) {
                 *may_open = false;
-                wal.append(&WalRecord::Reconciled {
-                    wall_ts_ms: clock::wall_ms(),
-                    findings: vec![format!("untrusted amended order state: {reason}")],
-                    may_open: false,
-                })?;
+                record_latch(
+                    wal,
+                    clock::wall_ms(),
+                    vec![format!("untrusted amended order state: {reason}")],
+                )?;
                 wal.barrier()?;
                 return Ok(None);
             }
@@ -1505,11 +1505,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 }
                 *may_open = false;
                 tracing::error!(%finding, "untrusted fill left order and risk state unchanged");
-                wal.append(&WalRecord::Reconciled {
-                    wall_ts_ms: dedup_seen_ms,
-                    findings: vec![finding],
-                    may_open: false,
-                })?;
+                record_latch(wal, dedup_seen_ms, vec![finding])?;
                 wal.barrier()?;
                 return Ok(None);
             }
@@ -1779,11 +1775,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         {
             if !owned_fill {
                 self.may_open = false;
-                self.wal.append(&WalRecord::Reconciled {
-                    wall_ts_ms: dedup_seen_ms,
-                    findings: vec![Self::foreign_fill_line(client_order_id, *symbol)],
-                    may_open: false,
-                })?;
+                record_latch(
+                    &mut self.wal,
+                    dedup_seen_ms,
+                    vec![Self::foreign_fill_line(client_order_id, *symbol)],
+                )?;
                 self.wal.barrier()?;
             }
         }

@@ -110,6 +110,33 @@ impl OrdinaryInput {
 
 const MUTATION_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Latch opening off in the log, and say so in the journal.
+///
+/// The latch outlives the process and only an operator clears it, so a
+/// `Reconciled { may_open: false }` that reaches the WAL and nothing else
+/// leaves whoever is called out with a reduce-only funded engine, a watchdog
+/// page, and no line to read. Boot says it on the next start; a running engine
+/// has to say it when it happens.
+pub(crate) fn record_latch<W: Wal>(
+    wal: &mut W,
+    wall_ts_ms: i64,
+    findings: Vec<String>,
+) -> Result<u64, WalError> {
+    if findings.is_empty() {
+        tracing::error!("this engine will not open new positions until an operator clears it");
+    }
+    for finding in &findings {
+        tracing::error!(
+            "this engine will not open new positions until an operator clears it: {finding}"
+        );
+    }
+    wal.append(&WalRecord::Reconciled {
+        wall_ts_ms,
+        findings,
+        may_open: false,
+    })
+}
+
 /// How long the loop stands off a feed that erred without closing.
 const HICCUP_PAUSE: Duration = Duration::from_millis(1);
 
