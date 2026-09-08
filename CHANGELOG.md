@@ -61,7 +61,8 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     protection. EXODUS/CARRY defaults move from 35% to 10%; LONG ATR requests
     are capped at admission. Closed 24-hour loss includes current account open
     losses. These change execution economics and require separate research.
-  - Mainnet uses shared leverage authority. A proven own-lot reduction may
+  - The owner confirms no hand trading; mainnet keeps sole leverage authority.
+    A proven own-lot reduction may
     pass the opening latch when it grows the physical net behind a hand trade;
     exact owned quantity still bounds it. Preserve existing hand-side venue
     stops; existing virtual stops protect opposing owned lots.

@@ -56,8 +56,9 @@ account_view_max_age_ms = 5000
 # way). Exits use a fresh mark price for the configured IOC collar.
 max_quote_age_ms = 30000
 
-# Shared authority confirms leverage when a flat symbol receives a new entry.
-leverage_authority = "shared"
+# Sole authority caches leverage across flat spells; an observed mismatch
+# revokes that cache. Use "shared" if another actor starts trading this account.
+leverage_authority = "sole"
 
 # ---------------------------------------------------------------------------
 # Capital limits: the fleet's own document, not a copy of its numbers
