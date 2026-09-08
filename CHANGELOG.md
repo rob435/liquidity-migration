@@ -10,6 +10,56 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-08 — Incident `host-51b05439c4f09794`: a failed handover leaves the
+  realm unwatched. The failure path now restores the realm's timers.**
+  - Alert, host scope, `ip-208-84-103-4`: `CRITICAL watchdog:mainnet: mainnet
+    watchdog timer is inactive (enabled)` at 15:11:26, 15:14:25 and 15:17:25 UTC,
+    alongside `RESOLVED watchdog:demo`.
+    `liquidity-migration-mainnet-liveness.service` last runs at 15:09:55, every
+    pass `ok scope=mainnet sanctioned-deploy-in-progress`. The funded engine and
+    worker are active — engine from 15:10:29 on `30feb6df`, worker from 15:10:23,
+    `systemctl --failed` empty — so the funded realm trades unobserved.
+    [Diagnose run `34243766766`](https://github.com/rob435/liquidity-migration/actions/runs/34243766766),
+    read 15:17:25 through 15:17:39.
+  - Cause. [Deploy run `34241185290`](https://github.com/rob435/liquidity-migration/actions/runs/34241185290)
+    (`30feb6df`), `Run VPS mode` 15:04:28-15:10:53. `handover_realm mainnet` →
+    `stop_realm_units mainnet` stops every mainnet unit at 15:10:16, including
+    `liquidity-migration-mainnet-liveness.timer`. `start_realm`
+    (`scripts/vps/deploy_remote.sh`) starts the worker and the owner, then gates
+    on `wait_fresh_heartbeat` for each, and enables the realm's remaining
+    activation units — the liveness timer among them — only after both gates
+    pass. The owner's gate refuses at 15:10:53: `CRITICAL
+    may-open:liquidity-migration-engine-mainnet.service` and `CRITICAL
+    rolling-loss:… rolling loss is 10.05 USDT inside 24h against a 10.00 USDT
+    limit`, then `deploy failed:
+    liquidity-migration-engine-mainnet.service published an unhealthy heartbeat
+    after startup`. `deployment_blockers` exempts `rolling-loss:` only, so the
+    latched `may_open=false` is the blocker and the refusal is correct.
+    `rollback_after_failure` then prints `rollback refused: 441811eb… has
+    different or unavailable runtime inputs from 30feb6df…` and exits. Nothing on
+    that path restores the timers the same function stopped.
+  - Both realms carry it. Demo: run `34238099755`'s readiness failure at
+    14:34:16 leaves `liquidity-migration-demo-liveness.timer` inactive from about
+    14:33, and it comes back only because run `34241185290`'s demo handover
+    succeeds at 15:05:14 — the `RESOLVED watchdog:demo` above. Mainnet has no
+    such recovery: its handover refuses again on every deploy while the
+    reconciliation halt stands, so the funded realm stays blind.
+  - Fix. `restore_realm_timers` re-enables the realm's own manifest timers on the
+    failed-handover path, before `rollback_after_failure` decides anything. It is
+    non-fatal: a restore failure warns and leaves the handover's own error
+    standing. The restored watchdog reports whatever state the realm is actually
+    in, which for mainnet is the `may-open` and `rolling-loss` pages above.
+  - Proof. Six regressions in
+    `tests/scripts/test_failed_handover_keeps_the_watch.py`; five fail before the
+    fix, and the pre-fix trace is the incident's shape —
+    `stop-realm-units mainnet`, `start-realm mainnet`,
+    `rollback-after-failure mainnet`, no restore.
+  - Still required from the owner: this restores the watch, not the engine. The
+    funded engine remains reduce-only with `may_open=false` and its rolling-loss
+    trip on; clearing the latched reconciliation halt is
+    `mainnet-ac90e31c207bc0da` below and needs an operator. Until then every
+    mainnet handover refuses and every deploy exits non-zero at that gate.
+
 - **2026-09-08 — Incident `mainnet-ac90e31c207bc0da`: mainnet cannot open positions.**
   - From 15:00:23 UTC the mainnet watchdog pages `CRITICAL
     may-open:liquidity-migration-engine-mainnet.service:
@@ -41,7 +91,7 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     after the deploy that fails its readiness check at 14:34:16, so the demo
     realm is unwatched and the host watchdog pages `CRITICAL watchdog:demo:
     demo watchdog timer is inactive (enabled)` at 14:52:51, 14:55:53 and
-    14:59:12. Not yet diagnosed.
+    14:59:12. Diagnosed and fixed as `host-51b05439c4f09794` above.
 
 - **2026-09-08 — Restore CARRY daily holding at owner direction.**
   - Render both realms with intraday funding and pre-settlement exits disabled.

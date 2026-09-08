@@ -1106,6 +1106,28 @@ start_realm() {
     done < <(lm_immediate_timer_jobs "$realm")
 }
 
+# `stop_realm_units` takes the realm's own timers down, and `start_realm`
+# reaches them only after the realm's owner and worker publish healthy
+# heartbeats. A handover that aborts at that gate leaves the realm's liveness
+# watchdog stopped while the realm's engine keeps running, so nothing watches
+# the realm the deploy just failed on. Non-fatal: a restore failure must not
+# replace the handover's own error.
+restore_realm_timers() {
+    local realm="$1" unit
+    while IFS= read -r unit; do
+        [ -n "$unit" ] || continue
+        case "$unit" in
+            *.timer)
+                if systemctl enable --now "$unit"; then
+                    echo "watch-restored realm=$realm unit=$unit"
+                else
+                    echo "warning: cannot restore $unit after the failed $realm handover" >&2
+                fi
+                ;;
+        esac
+    done < <(lm_realm_units "$realm")
+}
+
 handover_realm() {
     local realm="$1"
     if ! (
@@ -1116,6 +1138,7 @@ handover_realm() {
             && clear_reconciliation_if_requested "$realm" \
             && start_realm "$realm"
     ); then
+        restore_realm_timers "$realm"
         rollback_after_failure "$realm"
         return 1
     fi
