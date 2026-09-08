@@ -165,16 +165,102 @@ impl engine_types::orders::AccountRecoveryClient for RecoveryClient {
                     progress.rows(&rows)?;
                 }
                 out = crate::account_recovery::append_history(out, rows).await?;
+                // One answered page is progress, rows or no rows. The engine
+                // abandons a history read that leaves this counter still for
+                // MUTATION_DRAIN_TIMEOUT; this sweep is one signed request per
+                // followed symbol, paced at QUOTA_REQUESTS per QUOTA_WINDOW, so
+                // an account with no fills in the window would report nothing
+                // for the whole sweep and never finish one.
+                self.history_progress
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if execution_page_complete(name, page, raw_count)? {
                     break;
                 }
-                self.history_progress
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 page = page.checked_add(1).ok_or_else(|| {
                     VenueError::BadReply("execution history page number exhausted".into())
                 })?;
             }
         }
         crate::account_recovery::finish_history(out).await
+    }
+}
+
+#[cfg(test)]
+mod history_progress_tests {
+    use super::*;
+    use engine_types::orders::AccountRecoveryClient;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Three contracts, shaped like `GET /api/v1/contract/detail`.
+    const DETAIL: &str = r#"{"success":true,"code":0,"data":[
+      {"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT",
+       "contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":400000,
+       "limitMaxVol":2500000,"maxLeverage":500,"apiAllowed":true},
+      {"symbol":"ETH_USDT","baseCoin":"ETH","quoteCoin":"USDT","settleCoin":"USDT",
+       "contractSize":0.01,"priceUnit":0.01,"minVol":1,"maxVol":400000,
+       "limitMaxVol":2500000,"maxLeverage":200,"apiAllowed":true},
+      {"symbol":"SOL_USDT","baseCoin":"SOL","quoteCoin":"USDT","settleCoin":"USDT",
+       "contractSize":1,"priceUnit":0.01,"minVol":1,"maxVol":400000,
+       "limitMaxVol":2500000,"maxLeverage":100,"apiAllowed":true}]}"#;
+
+    /// A sweep over an account with no fills in the window must still report
+    /// progress, one count per answered page. The engine's recovery watchdog
+    /// reads this counter and abandons a read that leaves it still for
+    /// MUTATION_DRAIN_TIMEOUT; the sweep is one paced signed request per
+    /// followed symbol, so on the live 132-symbol MEXC realm a sweep that
+    /// reported only rows never finished a single pass.
+    #[tokio::test]
+    async fn an_empty_sweep_reports_progress_for_every_symbol_it_asks_about() {
+        let symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = served.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut bytes = [0; 1024];
+                    let size = stream.read(&mut bytes).await.unwrap();
+                    assert!(size > 0 && request.len() < 16_384);
+                    request.extend_from_slice(&bytes[..size]);
+                }
+                counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let body = r#"{"success":true,"code":0,"data":{"resultList":[]}}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let client = RecoveryClient {
+            history_progress: Default::default(),
+            rest: RestClient::new(
+                format!("http://{address}"),
+                crate::creds::Credentials::new("mainnet", false, "fixture-key", "fixture-secret"),
+            ),
+            catalog: std::sync::RwLock::new(std::sync::Arc::new(
+                Contracts::parse_raw(DETAIL).unwrap(),
+            )),
+        };
+        let names: Vec<String> = symbols.iter().map(|name| (*name).to_owned()).collect();
+        let history = client.executions(&names, 1, 2000).await.unwrap();
+        server.abort();
+        assert_eq!(history.len(), 0, "the fixture pages carry no executions");
+        assert_eq!(
+            served.load(std::sync::atomic::Ordering::Relaxed),
+            symbols.len(),
+            "the sweep asked once per symbol"
+        );
+        assert_eq!(
+            client
+                .history_progress
+                .load(std::sync::atomic::Ordering::Relaxed),
+            symbols.len() as u64,
+            "a rowless sweep reported no progress and the engine would abandon it"
+        );
     }
 }

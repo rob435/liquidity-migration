@@ -17,6 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "vps-deploy.yml"
+MANIFEST = ROOT / "deploy" / "fleet_manifest.tsv"
 
 
 def _diagnose() -> str:
@@ -43,14 +44,43 @@ def _digest(heartbeat: dict[str, object], tmp_path: Path) -> dict[str, object]:
     return json.loads(result.stdout)
 
 
-def test_both_engine_units_are_read() -> None:
+def _manifest_realms() -> list[str]:
+    """Every realm that owns an engine, from the manifest rather than a list here."""
+    realms = []
+    for line in MANIFEST.read_text(encoding="utf-8").splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        unit, _kind, realm = line.split("|")[:3]
+        if unit.startswith("liquidity-migration-engine") and unit.endswith(".service"):
+            realms.append(realm)
+    return sorted(set(realms))
+
+
+def test_every_engine_unit_is_read() -> None:
     diagnose = _diagnose()
 
+    # This is the only host reading the incident routine may take, so a realm
+    # missing here is a realm the on-call engineer can neither diagnose nor
+    # verify a deploy against. The realms come from the manifest so that adding
+    # one to the fleet and forgetting it here fails rather than going unread.
+    for realm in _manifest_realms():
+        assert f" {realm}" in diagnose[: diagnose.index("do case")], realm
     assert "engine_unit=liquidity-migration-engine.service" in diagnose
-    assert "engine_unit=liquidity-migration-engine-mainnet.service" in diagnose
+    assert 'engine_unit="liquidity-migration-engine-$realm.service"' in diagnose
     assert "engine_state=/var/lib/liquidity-migration-engine" in diagnose
-    assert "engine_state=/var/lib/liquidity-migration-engine-mainnet" in diagnose
+    assert 'engine_state="/var/lib/liquidity-migration-engine-$realm"' in diagnose
     assert '"$engine_state/heartbeat.json"' in diagnose
+
+
+def test_every_realm_watchdog_and_worker_is_read() -> None:
+    diagnose = _diagnose()
+
+    assert "liquidity-migration-host-liveness.service" in diagnose
+    for realm in _manifest_realms():
+        assert f"liquidity-migration-{realm}-liveness.service" in diagnose, realm
+        assert f"liquidity-migration-signal-worker-{realm}.service" in diagnose, realm
+    for realm in _manifest_realms():
+        assert f" {realm}" in diagnose[: diagnose.index('do printf "signal-worker')], realm
 
 
 def test_the_engine_journal_reaches_the_run() -> None:

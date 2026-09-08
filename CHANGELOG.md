@@ -10,6 +10,67 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-08 — Incident `mexc-a361f5d18861421a`: a rowless execution-history sweep reported no progress, so the mexc engine abandoned every recovery pass and could never open.**
+  - Start. The mexc engine boots at 22:38:15 UTC on `62234c95`, logs `mexc
+    private stream logged in and filtered` at 22:38:19, subscribes 132 symbols,
+    and reads healthy at 22:41 with `may_open=true`. At 22:48:29.913234 UTC —
+    600 s after the stream came up, the connected resync interval — the first
+    execution-history request goes out and the engine logs `WARN execution
+    history recovery retained for retry error=venue transport: execution history
+    recovery stopped making progress`, again at 22:48:41.120282, and every
+    ~12 s after (10 s timeout plus the 1 s retry hold). Alert
+    `may-open:liquidity-migration-engine-mexc.service`, `CRITICAL
+    liquidity-migration-engine-mexc.service cannot open positions`.
+  - Fault 1, the incident. `RecoveryClient::executions` sweeps one signed
+    request per followed symbol — `symbol` is required on `PATH_DEALS`, so 132
+    requests on this realm — but counted progress only when
+    `ExecutionHistoryBuilder::push` took a row or when a symbol needed a further
+    page. The account holds no fills in the window, so no row was ever pushed
+    and no symbol ever paged, and the counter stayed at 0 for the whole sweep.
+    `Recovery::start` abandons a history read whose
+    `execution_history_progress()` counter is unchanged for
+    `MUTATION_DRAIN_TIMEOUT` (10 s, `engine/engine-core/src/engine.rs:111`), and
+    since `62234c95` the sweep is paced at `QUOTA_REQUESTS` 16 per
+    `QUOTA_WINDOW` 2 s — ≥16 s of pacing alone before any round trip. Every
+    pass was therefore killed at 10 s while advancing normally. The transport
+    branch clears `private_stream_ready`, and the heartbeat publishes
+    `may_open && private_stream_ready`
+    (`engine/engine-core/src/engine/telemetry.rs:160`), so the realm reported
+    `may_open=false` permanently. No durable latch was written, and the realm
+    held no positions and had sent no orders.
+  - Fault 2, the diagnostic. `mode=diagnose` read no mexc unit at all: its unit
+    list and both `for realm in demo mainnet` loops omitted the realm, so
+    [run `34287792899`](https://github.com/rob435/liquidity-migration/actions/runs/34287792899)
+    printed demo, mainnet and host state and nothing for the realm that was
+    paging. The incident routine's only sanctioned host reading was blind to
+    mexc, and its post-deploy verification could not see the affected unit. The
+    hyperliquid realm that landed the same evening was unread for the same
+    reason.
+  - Change. MEXC counts one progress tick per answered page, rows or no rows, so
+    a sweep that is advancing keeps the read. `diagnose` reads every realm the
+    manifest gives an engine — `mexc` and `hyperliquid` join `demo` and
+    `mainnet` in both realm loops, their watchdog and signal-worker units join
+    the unit list, and the engine unit and state directory are derived from the
+    realm name. No risk, latch, pacing or timeout behaviour is changed.
+  - Proof. Two regressions fail before their fixes and pass after:
+    `an_empty_sweep_reports_progress_for_every_symbol_it_asks_about` in
+    `engine/engine-venue/src/venues/mexc/recovery.rs` reports progress 0 against
+    3 symbols on the old order, and `test_every_engine_unit_is_read` and
+    `test_every_realm_watchdog_and_worker_is_read` in
+    `tests/scripts/test_diagnose_engine_state.py` fail on the old workflow. Both
+    take their realms from `deploy/fleet_manifest.tsv`, so a fifth realm that
+    diagnose does not read fails rather than going unnoticed.
+    Rust 1.90 `cargo fmt`, strict Clippy, 2,188 passing workspace Rust tests and
+    1,743 passing Python tests run in this container; Ruff over the tracked trees
+    and mypy on the changed test pass. Two Rust failures
+    (`failed_tape_decompression_cannot_report_successful_eof`,
+    `runtime_control_cli_bounds_history_memory_and_keeps_rotated_identity_and_torn_refusal`)
+    and twenty-one Python failures reproduce identically on the pristine tree
+    from missing container tooling (`ssh-keygen`, `rsync`, `zstd`); ShellCheck is
+    absent here. CI runs all of them.
+  - Host action. The fix reaches the realm only through a deploy; until then the
+    mexc engine keeps refusing entries and paging on `may-open:`.
+
 - **2026-09-08 — Filter the worker's universe to what the engine's venue lists.**
   - Why. A LONG batch naming a symbol the venue does not list stays pending in
     the engine and holds every later batch from that source. MEXC works around
