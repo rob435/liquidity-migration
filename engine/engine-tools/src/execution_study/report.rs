@@ -38,7 +38,9 @@ pub fn metrics(results: &[OrderResult]) -> Value {
         if let Some(reason) = &result.unavailable {
             *failures.entry(reason.clone()).or_default() += 1;
         }
-        if matches!(order.request.kind, engine_types::OrderKind::Market) {
+        if order.unidentified_fill_rows == 0
+            && matches!(order.request.kind, engine_types::OrderKind::Market)
+        {
             let actual_qty: f64 = order.fills.values().map(|f| f.qty).sum();
             if (actual_qty - order.request.qty).abs() <= order.request.qty * 1e-8
                 && actual_qty > 0.0
@@ -143,6 +145,7 @@ pub fn metrics(results: &[OrderResult]) -> Value {
         let ratio=|a:f64,b:f64|if b>0.0 {Some(a/b)}else{None};
         let percentile=|v:&[u64],p:usize|v.get((v.len().saturating_sub(1))*p/100).map(|n|*n as f64/1e6);
         (key,json!({"orders":orders.len(),"fills":fills,"filled_notional_usdt":notional,
+            "unidentified_fill_rows":orders.iter().map(|o|o.observed.unidentified_fill_rows).sum::<u64>(),
             "maker_notional_fraction":ratio(maker_notional,notional),"known_fee_usdt":fee,
             "known_fee_bp":ratio(fee*1e4,fee_notional),"fills_without_fee":unknown_fees,
             "filled_price_shortfall_bp":ratio(price_cost*1e4,price_weight),
@@ -162,17 +165,18 @@ pub fn metrics(results: &[OrderResult]) -> Value {
 pub fn text(report: &Value) -> Result<String, std::fmt::Error> {
     let mut out=format!("One-sided execution study\nGenerated: {} | commit: {}\nWindow starts: {} | aligned orders: {} | cached: {}\n\n",
         timestamp(report["generated_ns"].as_u64().unwrap_or_default()),report["code_commit"].as_str().unwrap_or("unknown"),timestamp(report["window_start_ns"].as_u64().unwrap_or_default()),report["orders"].as_array().map_or(0,Vec::len),report["cached_orders"]);
-    out.push_str("ACTUAL FILLS (WAL-matched orders; not whole-account P&L)\nSleeve/symbol/action | orders | fills | notional USDT | fee bp | maker %\n");
+    out.push_str("IDENTIFIED ACTUAL FILLS (WAL-matched orders; not whole-account P&L)\nSleeve/symbol/action | orders | fills | notional USDT | fee bp | maker % | unidentified rows\n");
     if let Some(rows) = report["metrics"]["actual"].as_object() {
         for (key, r) in rows {
             writeln!(
                 out,
-                "{key} | {} | {} | {:.2} | {} | {}",
+                "{key} | {} | {} | {:.2} | {} | {} | {}",
                 r["orders"],
                 r["fills"],
                 r["filled_notional_usdt"].as_f64().unwrap_or_default(),
                 number(&r["known_fee_bp"], 1.0),
-                number(&r["maker_notional_fraction"], 100.0)
+                number(&r["maker_notional_fraction"], 100.0),
+                r["unidentified_fill_rows"]
             )?;
         }
     }

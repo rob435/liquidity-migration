@@ -714,7 +714,7 @@ mod tests {
             intent:None,symbol:"XUSDT".into(),sleeve:"long".into(),engine_commit:None,source_segment:1,source_offset:8,
             process_epoch_ms:0,wire_mono_ns:0,decision_ns:Some(1_000_000_000),socket_write_ns:Some(1_000_000_000),transport_rtt_ns:None,
             arrival_mid:100.0,rule:Some(InstrumentRule{tick_size:1.0,qty_step:1.0,min_qty:1.0,min_notional:1.0}),
-            fills:Default::default(),terminal:None,amends:0,cancels:0,
+            fills:Default::default(),unidentified_fill_rows:0,terminal:None,amends:0,cancels:0,
         }
     }
     fn depth(at: u64, bid: f64, ask: f64, qty: f64) -> Depth {

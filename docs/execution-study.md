@@ -47,7 +47,7 @@ Compare execution costs for actual directional order intentions using recorded b
 | Total / saving | Price + fee + missed cost; `saving_vs_cross_bp = cross_cost - candidate_cost`; positive saving favours the candidate |
 | Pairing | Same original order, queue assumption, latency, fee scenario and common mark; requested-notional weighted; openings/reductions, sleeves and UTC days remain separate |
 | Crossing calibration | Fully observed market orders versus `cross` at each latency; mean signed, mean absolute and maximum absolute fill-price error per symbol; compare these errors with any claimed saving |
-| Actual accounting | Deduplicated normal/recovered fills attached to observed orders; original paid fees; unknown fees remain unknown; excludes unmatched native-stop/manual executions and is not a whole-account ledger |
+| Actual accounting | Deduplicated normal/recovered fills attached to observed orders; original paid fees; unknown fees remain unknown; legacy rows without execution ID/time are counted separately and exclude their order from crossing calibration; excludes unmatched native-stop/manual executions and is not a whole-account ledger |
 | Markouts | Signed midpoint move from fill price at +1/+15/+60/+300 s, each within 2 s; actual fills use exchange execution time against recorder wall time; this retains cross-clock uncertainty |
 | Decision features | Book time, bid/ask prices and sizes, spread bp, side lean and signed aggressive-flow score; features use observations available before the decision |
 | Adaptive parameters | Side lean `bid_share - 0.5` for buys, opposite for sells; thresholds ±0.15; signed trade flow decays over 3 s, scales by touch depth and clips to ±4; attacked-side score >0.5 retreats |
@@ -57,6 +57,7 @@ Compare execution costs for actual directional order intentions using recorded b
 - Must report all configured policy/queue/latency cells, including missing observations, partial fills, rejected quotes and missed winning moves.
 - Must keep actual fills and hypothetical fills separate; a better simulated cost does not establish a live fill probability.
 - Must treat every order as an independent marginal counterfactual, with no joint inventory, market response, hidden liquidity, funding P&L or cross-order request quota simulation.
+- Must account for the limitation that recorded tape includes the incumbent's actual orders; this replay cannot remove their market impact.
 - Must keep observed book/flow features causal; a later fill or markout is a label, never a decision input.
 - Must not interpret passive reductions as permission to delay protective exits or strategy deadlines.
 - Must not interpret queue scenarios as guaranteed bounds; aggregate displayed data cannot reconstruct exact venue queue position.

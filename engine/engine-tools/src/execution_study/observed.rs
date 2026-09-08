@@ -159,6 +159,12 @@ fn apply(state: &mut ObservedState, mut row: Row, segment: u64, offset: u64) -> 
             .clone()
             .ok_or("recovered fill lacks order identity")?;
         if let Some(order) = state.orders.get_mut(&id) {
+            if row.exec_id.as_ref().is_none_or(String::is_empty)
+                || row.venue_ts_ms.is_none_or(|at| at <= 0)
+            {
+                order.unidentified_fill_rows += 1;
+                return Ok(());
+            }
             insert_fill(
                 order,
                 ActualFill {
@@ -226,6 +232,7 @@ fn apply(state: &mut ObservedState, mut row: Row, segment: u64, offset: u64) -> 
                     arrival_mid: row.arrival_mid.unwrap_or_default(),
                     rule,
                     fills: BTreeMap::new(),
+                    unidentified_fill_rows: 0,
                     terminal: None,
                     amends: 0,
                     cancels: 0,
@@ -276,8 +283,9 @@ fn apply(state: &mut ObservedState, mut row: Row, segment: u64, offset: u64) -> 
                 ..
             } => {
                 if let Some(order) = state.orders.get_mut(&client_order_id) {
-                    if exec_id.is_empty() || venue_ts_ms < 0 {
-                        return Err("observed fill lacks execution identity/time".into());
+                    if exec_id.is_empty() || venue_ts_ms <= 0 {
+                        order.unidentified_fill_rows += 1;
+                        return Ok(());
                     }
                     let fill = ActualFill {
                         exec_id,
@@ -438,6 +446,32 @@ mod tests {
             .write_all(&corrupt)
             .unwrap();
         assert!(scan(&path, 0, &mut state).is_err());
+    }
+
+    #[test]
+    fn legacy_fill_without_execution_id_does_not_block_later_identified_fills() {
+        let mut state = ObservedState {
+            symbols: vec!["XUSDT".into()],
+            strategies: vec!["long".into()],
+            ..ObservedState::default()
+        };
+        apply(&mut state, serde_json::from_value(order()).unwrap(), 1, 8).unwrap();
+        let mut row = json!({"kind":"order_update","update":{"Fill":{
+            "client_order_id":"order-a","symbol":0,"side":"Buy","qty":1.0,"px":10.0,
+            "fee":0.01,"is_maker":false,"venue_ts_ms":1000,"recv_ns":20
+        }}});
+        apply(
+            &mut state,
+            serde_json::from_value(row.clone()).unwrap(),
+            1,
+            24,
+        )
+        .unwrap();
+        assert!(state.orders["order-a"].fills.is_empty());
+        assert_eq!(state.orders["order-a"].unidentified_fill_rows, 1);
+        row["update"]["Fill"]["exec_id"] = json!("identified");
+        apply(&mut state, serde_json::from_value(row).unwrap(), 1, 32).unwrap();
+        assert_eq!(state.orders["order-a"].fills.len(), 1);
     }
 
     #[test]

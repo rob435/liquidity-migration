@@ -81,6 +81,8 @@ pub struct ObservedOrder {
     pub arrival_mid: f64,
     pub rule: Option<InstrumentRule>,
     pub fills: BTreeMap<String, ActualFill>,
+    #[serde(default)]
+    pub unidentified_fill_rows: u64,
     pub terminal: Option<String>,
     pub amends: u64,
     pub cancels: u64,

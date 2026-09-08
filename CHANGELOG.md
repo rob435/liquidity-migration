@@ -26,6 +26,10 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     orders, waiting 120 s loses 35.28 bp versus crossing at 100 ms; missing
     the trade loses 10.35 bp. These are seen-data diagnostics, not alpha.
   - Recovered tape members verify against the Drive archive manifests.
+    The wider copied family exposes a legacy fill without an execution ID
+    at `engine.wal:149292769`; the initial reader refuses it. Count such
+    rows explicitly without claiming deduplicated fills or calibration;
+    the reproducer fails before this compatibility fix and passes afterward.
     Tests cover finite queue/partial fills, post-only rejection, cancellation
     races, replacement priority, native deadlines, missing observations,
     same-process clock alignment, recovered-fill deduplication, fee absence,
