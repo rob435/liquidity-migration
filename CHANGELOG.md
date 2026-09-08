@@ -49,6 +49,20 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     comparisons unscored, record its file/error, and continue the report for
     other symbols. The complete-command regression fails before this fix;
     it also verifies healthy cached results survive and repaired input retries.
+  - Deploy `06220e56` through run
+    [`34177470521`](https://github.com/rob435/liquidity-migration/actions/runs/34177470521),
+    with 31 healthy demo observations over 300 s before mainnet handover.
+    Final code succeeds at 01:58:13 and 02:02:15 UTC using 8.676 / 1.056 CPU
+    seconds. The second report has 54 aligned orders, 91 identified fills and
+    eleven complete comparisons; all nine earlier complete results are reused
+    unchanged. Thirty-two orders lack frozen instrument rules and eleven CAP
+    orders retain the tape error. The authenticated rates cover thirteen
+    symbols: eleven at 10/3.6 bp, CAP and HEMI at 11/4 bp taker/maker.
+    The 02:05:53 UTC backup checks 257 remote files; live, staged and downloaded
+    report bytes match, with 54 per-order records in the stage. Final host
+    reads verify all four loaded images against the release, healthy workers
+    and nineteen exact full-size native stops. Local / Linux Rust totals are
+    2,035 / 2,037; Python is 1,715 with one root/systemd skip; zero failures.
 
 - **2026-09-07 22:56 UTC — The `capture-disk` page returns, and the read-only
   diagnostic still cannot name the writer holding the disk. The recorders are
@@ -134,10 +148,11 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     IDs. Let the script create `backup/` and retain systemd's `receipts/`
     directory. An isolated root/systemd fixture reproduces the failure with
     the original unit and passes with the corrected unit.
-    No live WAL or remote backup is pruned. Deployed at 01:07:47 UTC in run
+    No live WAL or remote backup is pruned. The initial helper deploy at
+    01:07:47 UTC in run
     [`34174591340`](https://github.com/rob435/liquidity-migration/actions/runs/34174591340)
-    on `a7e96e8`; the reclaim runs inside the backup job, which is failing
-    below, so no staged block is released yet.
+    on `a7e96e8` cannot release blocks through that mount boundary; the final
+    unit correction and measured recovery are recorded below.
   - **The page re-fires at 00:44:49 UTC because the repair was committed, not
     shipped.** Incident `host-ecbac293ecc90d5e`, scope `host`,
     `new_critical_refs=capture-disk,capture-disk:forward-market-binance`. Both
@@ -218,11 +233,9 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     `tests/scripts/test_backup_sealed_wals.py` adds the host's exact error —
     `EXDEV` leaves `(0, 0, 1)`, all three snapshots independent, no `.link-`
     temporary behind — and `EACCES` still raising. The first fails on the
-    previous script with `[Errno 18]` and passes on this one. **This stops the
-    unit failing; it does not reclaim the 31.77 GiB.** Whether the stage stops
-    being its own mount or sealed segments stop being staged at all is an
-    owner decision, and until one lands the recorders' floor is held by
-    duplicated backup and paid for out of tape.
+    previous script with `[Errno 18]` and passes on this one. This fallback
+    keeps backup completion independent of linking; the unit correction below
+    removes the actual mount boundary and recovers the duplicate blocks.
   - **Deployed at 01:42:31 UTC in run
     [`34176429460`](https://github.com/rob435/liquidity-migration/actions/runs/34176429460),
     and the block returns while the duplicate blocks stay.** No backup run has
@@ -236,26 +249,14 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     `wal-quarantine` on 118G there is no headroom left to hold. The funded
     engine is unaffected throughout: `engine-mainnet` active, both workers
     `ready`, `spool_backpressured=false`, no failed engine unit.
-  - **Open, and the owner's call.** Three ways to give the recorders room, in
-    the order they cost: stop the stage being its own mount so the existing
-    reclaim runs (drop `StateDirectory=` from
-    `deploy/systemd/liquidity-migration-backup.service`, which the script's
-    own `install -d -m 0700` already covers); stage only the growing segment
-    and upload sealed ones from the live directory, which is what the stage
-    exists for; or give the stage a filesystem with room. Deleting the staged
-    copies by hand frees 31.77 GiB and the next `rsync` restores them. None of
-    these is a read-only diagnostic, so none is the routine's to choose.
-  - **Open, not this incident's:**
-    `liquidity-migration-execution-study.service` exited `1/FAILURE` at
-    01:08:39 UTC on its first run after the deploy: `engine: tape line 8263:
-    local_receive_ts_ns 1788698566254491806 is before the previous row's
-    1788698566261663423; the tape is receive-time ordered`. Recorded tape
-    inverts by 7.17 ms at that row and the reader treats it as fatal, so the
-    15-minute timer re-fires the failure. Whether the study tolerates,
-    reorders or refuses an out-of-order row decides what it measures; the
-    on-call routine does not choose that.
+  - **Final repair.** Remove only the backup path from the unit's
+    `StateDirectory`; retain the receipts directory. The script creates its
+    own stage. The isolated root/systemd fixture proves identical sealed files
+    share their inode with this unit and remain independent with the original
+    unit, including when the EXDEV fallback is present. The study's separate
+    tape failure is resolved in the execution-study entry above.
   - **Resolved 02:03 UTC: the reclaim ran and the floor is gone.** The unit
-    fix ships in `06220e5`, deployed 01:56:25 UTC in run
+    fix ships in `06220e5`, with `deploy-ok` at 01:56:16 UTC in run
     [`34177470521`](https://github.com/rob435/liquidity-migration/actions/runs/34177470521).
     Diagnose
     [`34178684761`](https://github.com/rob435/liquidity-migration/actions/runs/34178684761)
@@ -275,6 +276,14 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     `/var/lib/liquidity-migration-wal-quarantine` still holds 7 851 503 616
     bytes no current source names; with 59G free that is the owner's call and
     not this incident's.
+    The first corrected backup checks 200 remote files at 01:51:42 UTC,
+    then reports `sealed WAL links=126 released_stage_bytes=33847439360
+    unlinkable_roots=0` at 01:52:56 and succeeds at 01:54:47. The repeat run
+    succeeds at 02:05:53 with 257 matching files, zero differences and zero
+    additional links or unlinkable roots. At 02:09:44, all 126 links remain,
+    the growing WALs are independent, and 57.779 GiB is available. Both disk
+    drop counters remain unchanged since 01:54:47 while receipt times advance.
+    All 131 predeploy WAL paths retain their inode and show no shrinkage.
 
 - **2026-09-07 — Historical source adapters and explicit sparse-data execution.**
   - Separate recorder decoding/Bybit book reconstruction, normalized events,
