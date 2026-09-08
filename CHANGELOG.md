@@ -84,8 +84,8 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
   - Backup starts every 15 minutes with a 10-minute run budget and 30-minute
     completed-copy age alert. Host liveness measures venue clock offset with RTT
     uncertainty. The [storage/standby cutover](docs/infrastructure-layout.md)
-    remains unexecuted: the host has one writable 119 GiB disk and no standby;
-    provider/budget input is required for actual separation.
+    remains unexecuted: the host has one writable 119 GiB disk and no standby.
+    The owner defers buying storage and a second host; these risks remain open.
   - Regressions reproduce missing pong redial, whole-socket book resets,
     00:20 clock delay, hardcoded research fees, exact late-fill crossing,
     wide stops, open-loss and margin admission, shared exits, symbol limits,

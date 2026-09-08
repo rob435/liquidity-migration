@@ -13,7 +13,7 @@ Define the storage separation and standby cutover required to remove the funded 
 | Binance tape | `/var/lib/liquidity-migration/forward-market-binance` | Independent data volume, mounted at the existing path |
 | Backup stage | `/var/lib/liquidity-migration/backup/stage` | Independent data volume; keep rclone configuration outside the tape directories |
 | Second host | Absent | Passive recovery host in a separate failure domain; deployment binaries and a verified restored WAL family |
-| Provisioning | No second writable disk is attached | Provider, monthly budget and new-volume identity require owner input |
+| Provisioning | New storage and a second host are deferred at owner direction | Resume only with a selected provider, budget and new-volume identity |
 | Capacity | A quoted 6.5 MB/s sustained write rate is 561.6 GB/day before compression | Size from retained compressed bytes and measured peak backlog; include two interrupted upload windows plus full staging size |
 | Backup cadence | Installed from `liquidity-migration-backup.timer` | 15-minute starts; 10-minute run budget; alert when the last completed copy is over 30 minutes old |
 | Recovery point | Last completed remote copy, not timer activation | Scheduled copies can still lose the interval plus transfer time; they are not synchronous WAL replication |
@@ -51,4 +51,4 @@ ssh root@208.84.103.4 'du -sx --block-size=1 /var/lib/liquidity-migration/forwar
 ssh root@208.84.103.4 'systemctl list-timers --all liquidity-migration-backup.timer; cat /var/lib/liquidity-migration/receipts/backup.last-success'
 ```
 
-The cutover remains unexecuted until a separate volume and passive host are available. The existing root disk is not a migration target.
+The owner defers this cutover. The single host and disk remain; the existing root disk is not a migration target.
