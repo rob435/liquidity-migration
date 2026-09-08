@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import filecmp
 import os
 import re
@@ -11,9 +12,10 @@ import uuid
 from pathlib import Path
 
 
-def link_sealed(stage: Path, sources: list[Path]) -> tuple[int, int]:
+def link_sealed(stage: Path, sources: list[Path]) -> tuple[int, int, int]:
     linked = 0
     released = 0
+    unlinkable = 0
     for directory in sources:
         if not directory.is_dir() or directory.is_symlink():
             continue
@@ -37,6 +39,18 @@ def link_sealed(stage: Path, sources: list[Path]) -> tuple[int, int]:
             temporary = destination.with_name(f".{destination.name}.link-{uuid.uuid4().hex}")
             try:
                 os.link(source, temporary)
+            except OSError as exc:
+                if exc.errno != errno.EXDEV:
+                    raise
+                # `link` needs one mount, not one filesystem: the kernel
+                # refuses it across a mount boundary even where `st_dev`
+                # matches, which the unit's own `StateDirectory` for the stage
+                # is. A stage that cannot hold a link is not a failed backup —
+                # the off-box copy is already checked by here, and the count
+                # below is what says the duplicate blocks are still there.
+                unlinkable += 1
+                break
+            try:
                 after = source.stat()
                 if (before.st_ino, before.st_size, before.st_mtime_ns) != (
                     after.st_ino, after.st_size, after.st_mtime_ns
@@ -48,7 +62,7 @@ def link_sealed(stage: Path, sources: list[Path]) -> tuple[int, int]:
                     released += staged.st_blocks * 512
             finally:
                 temporary.unlink(missing_ok=True)
-    return linked, released
+    return linked, released, unlinkable
 
 
 def main() -> None:
@@ -56,8 +70,11 @@ def main() -> None:
     parser.add_argument("--stage", required=True, type=Path)
     parser.add_argument("sources", nargs="+", type=Path)
     args = parser.parse_args()
-    linked, released = link_sealed(args.stage, args.sources)
-    print(f"backup: sealed WAL links={linked} released_stage_bytes={released}")
+    linked, released, unlinkable = link_sealed(args.stage, args.sources)
+    print(
+        f"backup: sealed WAL links={linked} released_stage_bytes={released} "
+        f"unlinkable_roots={unlinkable}"
+    )
 
 
 if __name__ == "__main__":

@@ -241,6 +241,7 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 | Sealed WAL segments | After successful remote checksum verification, byte-identical staged copies of numbered segments below the current maximum become hard links to the immutable source on the same filesystem |
 | Growing WAL / other state | Remain independent copies; rsync uses replacement files, never `--inplace`; a later append cannot change the active segment's staged snapshot |
 | Physical disk usage | Linking releases duplicate blocks without pruning the live WAL or cloud history; `du` on the stage alone still counts shared blocks |
+| Stage on its own mount | `link` needs one mount, not one matching `st_dev`: a stage the kernel refuses a link into keeps both copies, counts `unlinkable_roots=` in the run's last line, and leaves the backup successful |
 | Implementation | `scripts/runtime/backup_state.sh`, `scripts/runtime/link_sealed_backup_wals.py`; the existing backup lock covers staging, verification and linking |
 * **Security Invariant**: Backup scripts explicitly reject `*.env` files to prevent credentials from ever leaving the host.
 

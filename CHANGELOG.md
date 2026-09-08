@@ -172,6 +172,47 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     tail bounded per unit, the unit count truncated with a line saying so, and
     `verify_mode` taking the reading. All six fail on the previous
     `deploy_remote.sh` and pass on this one.
+  - **The reading, first run: the reclaim itself is what fails the backup.**
+    Diagnose
+    [`34176153613`](https://github.com/rob435/liquidity-migration/actions/runs/34176153613)
+    at 01:17:51 UTC prints both journals. `liquidity-migration-backup.service`
+    exited `1/FAILURE` at 01:04:05 UTC in
+    `link_sealed_backup_wals.py:39`: `OSError: [Errno 18] Invalid
+    cross-device link: '/var/lib/liquidity-migration-engine/engine.wal.000002'
+    -> '/var/lib/liquidity-migration/backup/stage/var/lib/liquidity-migration-engine/.engine.wal.000002.link-45af26e7'`.
+    The run reached it with the off-box copy already landed and checked — `0
+    differences found`, `198 matching files` at 01:04:04 UTC — so what the
+    failure costs is the receipt (`backup.last-success`, written after the
+    link pass, last stamped 21:20:13 UTC) and the `history` retention delete,
+    not the copy.
+  - **Why `st_dev` did not predict it.** The pass skips a segment whose
+    `st_dev` differs from its staged copy, so the link was attempted on two
+    paths the kernel reports as one filesystem. `link` requires one *mount*:
+    it returns `EXDEV` across a mount boundary on a single superblock, and the
+    unit's `StateDirectory=liquidity-migration/backup` makes the stage its own
+    mount. A `findmnt` of both paths on the host would confirm the boundary;
+    the routine has no SSH key and the diagnostic does not read mounts.
+  - **Fix.** `EXDEV` from `os.link` now ends that source's pass and counts one
+    `unlinkable_roots` in the printed receipt; every other `OSError` still
+    fails the run. The off-box copy, the receipt and history retention no
+    longer depend on a stage the kernel will not link into.
+    `tests/scripts/test_backup_sealed_wals.py` adds the host's exact error —
+    `EXDEV` leaves `(0, 0, 1)`, all three snapshots independent, no `.link-`
+    temporary behind — and `EACCES` still raising. The first fails on the
+    previous script with `[Errno 18]` and passes on this one. **This stops the
+    unit failing; it does not reclaim the 31.77 GiB.** Whether the stage stops
+    being its own mount or sealed segments stop being staged at all is an
+    owner decision, and until one lands the recorders' floor is held by
+    duplicated backup and paid for out of tape.
+  - **Open, not this incident's:**
+    `liquidity-migration-execution-study.service` exited `1/FAILURE` at
+    01:08:39 UTC on its first run after the deploy: `engine: tape line 8263:
+    local_receive_ts_ns 1788698566254491806 is before the previous row's
+    1788698566261663423; the tape is receive-time ordered`. Recorded tape
+    inverts by 7.17 ms at that row and the reader treats it as fatal, so the
+    15-minute timer re-fires the failure. Whether the study tolerates,
+    reorders or refuses an out-of-order row decides what it measures; the
+    on-call routine does not choose that.
 
 - **2026-09-07 — Historical source adapters and explicit sparse-data execution.**
   - Separate recorder decoding/Bybit book reconstruction, normalized events,
