@@ -10,6 +10,54 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-08 — Incident `mainnet-014ec4a90a2fde5f`: a normal worker boot pages
+  the funded realm. The boot repair gap now has its own bound.**
+  - Alert, mainnet scope, `ip-208-84-103-4`: `CRITICAL
+    worker-status:liquidity-migration-signal-worker-mainnet.service reports
+    'degraded': Bybit WebSocket repair gap open for 126s`, fired about 15:55:40
+    UTC and no other reason in the message. The mainnet worker had restarted at
+    15:53:32 in deploy
+    [`34246230385`](https://github.com/rob435/liquidity-migration/actions/runs/34246230385)'s
+    mainnet handover, which then succeeded at 15:54:13.
+  - Not a fault on the host. The gap closed on its own at about 15:56:41, ~189 s
+    after boot.
+    [Diagnose `34247956802`](https://github.com/rob435/liquidity-migration/actions/runs/34247956802),
+    read 15:56:37 through 15:56:47, has the mainnet worker `status=ready`,
+    `bybit_ws_gap_open=false`, `bybit_ws_ticker_coverage_complete=true`,
+    `spool_backpressured=false`, `rest_ticker_failure_count=0`, both cycles
+    completed at 15:56:41, demo the same, `Result=success`, `NRestarts=0`,
+    deployed `ce2b1299`.
+  - Cause, `heartbeat_status` in `engine/signal-worker/src/live.rs`.
+    `SharedState::prepare_epoch` opens a repair gap on every epoch, the boot one
+    included, and the first repair refills an hour of klines for the whole
+    universe. `startup_runtime_status` holds a worker at `starting` only while a
+    cycle has not completed, and with warm durable state after a 7-second
+    handover both 60 s cycles complete inside the first minute. The open boot
+    gap then fell to `transient_recovery_acceptable`'s
+    `TRANSIENT_RECOVERY_MAX_MS` — 2 minutes, sized for one reconnect's window —
+    so at 126 s the verdict was `degraded` and the funded realm's watchdog paged
+    and fired an on-call session. The alert's own text is the proof of the path:
+    a missing cycle, short coverage or a transport reason would each have been
+    named beside the gap.
+  - Same shape as incident `demo-0922e9f30da3bf98` (2026-09-04 16:05 UTC), whose
+    fix closed the ticker-coverage input only; the boot repair gap escaped the
+    grace once the cycles ran.
+  - Fix. `boot_repair_acceptable` grades the first repair of a process — not yet
+    ready, transport healthy, coverage complete, gap open or repair running —
+    as `recovering` for `BOOT_REPAIR_MAX_MS`, 10 minutes. `heartbeat_status`
+    tracks whether the worker has ever reported `ready`, so a later reconnect
+    keeps the 2-minute window. Nothing is hidden: the heartbeat still publishes
+    `bybit_ws_gap_open` and its open-since time throughout.
+  - Cost. A boot repair that never closes on a sound transport now pages at 10
+    minutes instead of about 2. The bound is chosen above the observed ~190 s
+    pass, not measured; incomplete coverage, a refused topic, a disconnect, a
+    frame drought and a stale cycle are all still immediate.
+  - Proof. `a_cold_start_boot_repair_gap_is_recovering_until_its_own_bound` in
+    `engine/signal-worker/src/live/tests.rs` reproduces the 126 s heartbeat and
+    fails with the pre-fix decision — `degraded` where `recovering` is required
+    — then holds the 10-minute bound, the close to `ready`, and the 2-minute
+    window for the next reconnect.
+
 - **2026-09-08 — Incident `host-51b05439c4f09794`: a failed handover leaves the
   realm unwatched. The failure path now restores the realm's timers.**
   - Alert, host scope, `ip-208-84-103-4`: `CRITICAL watchdog:mainnet: mainnet

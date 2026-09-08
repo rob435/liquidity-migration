@@ -34,6 +34,11 @@ const FUNDING_PUBLICATION_LAG_MS: i64 = 5 * 60_000;
 const CARRY_CATCHUP_CHUNK_DAYS: i64 = 1;
 const STARTUP_MAX_MS: i64 = 120 * 60_000;
 const TRANSIENT_RECOVERY_MAX_MS: i64 = 2 * 60_000;
+// Every epoch, the boot one included, opens a repair gap, and the first repair
+// refills an hour of klines for the whole universe rather than one reconnect's
+// window. A chosen bound above the observed ~190 s boot pass, not a measured
+// limit, and far short of STARTUP_MAX_MS so a wedged boot repair still pages.
+const BOOT_REPAIR_MAX_MS: i64 = 10 * 60_000;
 const LANE_COMPLETION_QUEUE_CAPACITY: usize = 1;
 
 #[derive(Clone, Debug)]
@@ -728,7 +733,7 @@ impl LiveRunner {
             ..LaneState::default()
         };
         let mut pending_klines = BTreeMap::<(String, i64), ConfirmedKline>::new();
-        let mut transient_recovery_started_at_ms = None;
+        let mut recovery = RecoveryState::default();
 
         let mut ticker_tick = cadence(self.config.live.ticker_cadence_ms);
         let mut instrument_tick = cadence(self.config.live.instrument_cadence_ms);
@@ -846,7 +851,7 @@ impl LiveRunner {
                         run_started_at_ms,
                         now_ms,
                         self.config.sources.mark_max_age_ms,
-                        &mut transient_recovery_started_at_ms,
+                        &mut recovery,
                     );
                     self.write_heartbeat(status, Some(health))?;
                 }
@@ -2525,6 +2530,32 @@ fn transient_recovery_acceptable(
     now_ms.saturating_sub(started_at_ms) < TRANSIENT_RECOVERY_MAX_MS
 }
 
+/// The boot repair on a sound transport: the gap this process opened at its
+/// first epoch, never yet closed, with coverage already full. It outlives the
+/// cycle warmup the `starting` grace keys on, so it needs its own bound.
+fn boot_repair_acceptable(
+    health: &StreamHealth,
+    repair_running: bool,
+    transport_healthy: bool,
+    reached_ready: bool,
+    started_at_ms: i64,
+    now_ms: i64,
+) -> bool {
+    !reached_ready
+        && transport_healthy
+        && health.ticker_coverage_complete
+        && (health.gap_open || repair_running)
+        && now_ms.saturating_sub(started_at_ms) < BOOT_REPAIR_MAX_MS
+}
+
+/// What one process carries between heartbeats: when the current recovery
+/// started, and whether it has ever been `ready`.
+#[derive(Debug, Default)]
+struct RecoveryState {
+    transient_started_at_ms: Option<i64>,
+    reached_ready: bool,
+}
+
 /// One producer verdict: `starting` for bounded cold fill, `recovering` for a
 /// short repair on an otherwise sound transport, and `degraded` for a fault.
 fn heartbeat_status(
@@ -2534,19 +2565,30 @@ fn heartbeat_status(
     started_at_ms: i64,
     now_ms: i64,
     max_frame_age_ms: i64,
-    recovery_started_at_ms: &mut Option<i64>,
+    recovery: &mut RecoveryState,
 ) -> &'static str {
     let transport_healthy = stream_transport_healthy(health, now_ms, max_frame_age_ms);
     let recovery_acceptable = transient_recovery_acceptable(
         health,
         repair_running,
         transport_healthy,
-        recovery_started_at_ms,
+        &mut recovery.transient_started_at_ms,
+        now_ms,
+    );
+    let boot_repair = boot_repair_acceptable(
+        health,
+        repair_running,
+        transport_healthy,
+        recovery.reached_ready,
+        started_at_ms,
         now_ms,
     );
     let live_status = match runtime_status(health, repair_running, now_ms, max_frame_age_ms) {
-        "ready" => "ready",
-        _ if transport_healthy && recovery_acceptable => "recovering",
+        "ready" => {
+            recovery.reached_ready = true;
+            "ready"
+        }
+        _ if transport_healthy && (recovery_acceptable || boot_repair) => "recovering",
         _ => "degraded",
     };
     startup_runtime_status(

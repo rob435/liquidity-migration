@@ -8,9 +8,9 @@ use super::{
     validate_instrument_source_against_state, validate_source_grid_timestamp,
     validate_source_page_rows, whale_fetch_bounds, FetchedFunding, FetchedFundingBatch,
     FetchedInstruments, FetchedKlineBatch, FetchedKlineJobs, FetchedTickers, FetchedUniverseInputs,
-    FetchedWhales, LaneCompletion, LaneState, LiveRunOptions, LiveRunner, StreamEvent,
-    StreamHealth, TickerSample, LANE_COMPLETION_QUEUE_CAPACITY, STARTUP_MAX_MS,
-    TRANSIENT_RECOVERY_MAX_MS,
+    FetchedWhales, LaneCompletion, LaneState, LiveRunOptions, LiveRunner, RecoveryState,
+    StreamEvent, StreamHealth, TickerSample, BOOT_REPAIR_MAX_MS, LANE_COMPLETION_QUEUE_CAPACITY,
+    STARTUP_MAX_MS, TRANSIENT_RECOVERY_MAX_MS,
 };
 use crate::bybit_ws::{BybitPublicStream, StreamContinuity};
 use crate::config::SignalWorkerConfig;
@@ -153,7 +153,10 @@ fn a_cold_start_still_filling_ticker_coverage_is_starting_not_degraded() {
         ..StreamHealth::default()
     };
     let cycles = [(None, 60_000), (None, 60_000)];
-    let mut old_recovery = Some(started_at_ms + 1);
+    let mut old_recovery = RecoveryState {
+        transient_started_at_ms: Some(started_at_ms + 1),
+        reached_ready: false,
+    };
     assert_eq!(runtime_status(&booting, true, now_ms, 30_000), "degraded");
     assert_eq!(
         heartbeat_status(
@@ -173,7 +176,7 @@ fn a_cold_start_still_filling_ticker_coverage_is_starting_not_degraded() {
         connected: false,
         ..booting.clone()
     };
-    let mut disconnected_recovery = None;
+    let mut disconnected_recovery = RecoveryState::default();
     assert_eq!(
         heartbeat_status(
             &disconnected,
@@ -192,7 +195,7 @@ fn a_cold_start_still_filling_ticker_coverage_is_starting_not_degraded() {
         ticker_topics_quarantined: 1,
         ..booting.clone()
     };
-    let mut refused_recovery = None;
+    let mut refused_recovery = RecoveryState::default();
     assert_eq!(
         heartbeat_status(
             &refused,
@@ -207,7 +210,10 @@ fn a_cold_start_still_filling_ticker_coverage_is_starting_not_degraded() {
         "a refused topic never fills, so it is not warmup"
     );
 
-    let mut expired_startup_recovery = Some(started_at_ms + 1);
+    let mut expired_startup_recovery = RecoveryState {
+        transient_started_at_ms: Some(started_at_ms + 1),
+        reached_ready: false,
+    };
     assert_eq!(
         heartbeat_status(
             &booting,
@@ -221,7 +227,10 @@ fn a_cold_start_still_filling_ticker_coverage_is_starting_not_degraded() {
         "degraded",
         "past the cold-start bound an unfinished backfill is a fault"
     );
-    let mut completed_cycle_recovery = Some(started_at_ms + 1);
+    let mut completed_cycle_recovery = RecoveryState {
+        transient_started_at_ms: Some(started_at_ms + 1),
+        reached_ready: false,
+    };
     assert_eq!(
         heartbeat_status(
             &booting,
@@ -237,6 +246,142 @@ fn a_cold_start_still_filling_ticker_coverage_is_starting_not_degraded() {
         ),
         "degraded",
         "once both cycles have run, incomplete coverage is the live verdict again"
+    );
+}
+
+#[test]
+fn a_cold_start_boot_repair_gap_is_recovering_until_its_own_bound() {
+    // Incident mainnet-014ec4a90a2fde5f: 126 s after the 15:53:32 handover boot
+    // the mainnet worker had a sound transport, complete coverage, both 60 s
+    // cycles already run off warm durable state, and the boot repair gap still
+    // open. The gap closed at ~190 s, but the 2-minute transient window had
+    // already made the verdict `degraded` and paged the funded realm.
+    let started_at_ms = 1_000_000;
+    let now_ms = started_at_ms + 126_000;
+    let boot_repairing = StreamHealth {
+        connected: true,
+        epoch: 1,
+        gap_open: true,
+        gap_open_since_ms: Some(started_at_ms + 2_000),
+        last_frame_ts_ms: Some(now_ms - 1),
+        ticker_capacity: 2,
+        ticker_coverage_complete: true,
+        ticker_topics_accepted: 2,
+        kline_topics_accepted: 2,
+        ..StreamHealth::default()
+    };
+    let cycles = [
+        (Some(started_at_ms + 66_000), 60_000),
+        (Some(started_at_ms + 66_500), 60_000),
+    ];
+    let mut recovery = RecoveryState {
+        transient_started_at_ms: Some(started_at_ms + 4_000),
+        reached_ready: false,
+    };
+    assert_eq!(
+        heartbeat_status(
+            &boot_repairing,
+            true,
+            cycles,
+            started_at_ms,
+            now_ms,
+            30_000,
+            &mut recovery,
+        ),
+        "recovering",
+        "the first repair after boot is cold fill, not a fault"
+    );
+
+    // Its own bound, well short of the 120-minute cold-start bound.
+    let still_repairing = StreamHealth {
+        last_frame_ts_ms: Some(started_at_ms + BOOT_REPAIR_MAX_MS - 1),
+        ..boot_repairing.clone()
+    };
+    assert_eq!(
+        heartbeat_status(
+            &still_repairing,
+            true,
+            [
+                (Some(started_at_ms + BOOT_REPAIR_MAX_MS - 60_000), 60_000),
+                (Some(started_at_ms + BOOT_REPAIR_MAX_MS - 59_000), 60_000),
+            ],
+            started_at_ms,
+            started_at_ms + BOOT_REPAIR_MAX_MS,
+            30_000,
+            &mut recovery,
+        ),
+        "degraded",
+        "a boot repair that will not close is a fault"
+    );
+
+    // Once the repair closes the gap the worker is ready, and the next gap is a
+    // mid-life reconnect on the 2-minute window again.
+    let repaired = StreamHealth {
+        gap_open: false,
+        gap_open_since_ms: None,
+        last_frame_ts_ms: Some(started_at_ms + 190_000),
+        ..boot_repairing.clone()
+    };
+    assert_eq!(
+        heartbeat_status(
+            &repaired,
+            false,
+            cycles,
+            started_at_ms,
+            started_at_ms + 190_000,
+            30_000,
+            &mut recovery,
+        ),
+        "ready"
+    );
+    assert!(recovery.reached_ready);
+    let reconnected = StreamHealth {
+        epoch: 2,
+        gap_open_since_ms: Some(started_at_ms + 200_000),
+        last_frame_ts_ms: Some(started_at_ms + 330_000),
+        ..boot_repairing.clone()
+    };
+    let late_cycles = [
+        (Some(started_at_ms + 300_000), 60_000),
+        (Some(started_at_ms + 300_500), 60_000),
+    ];
+    assert_eq!(
+        heartbeat_status(
+            &reconnected,
+            true,
+            late_cycles,
+            started_at_ms,
+            started_at_ms + 330_000,
+            30_000,
+            &mut recovery,
+        ),
+        "recovering"
+    );
+    let reconnect_expired = StreamHealth {
+        last_frame_ts_ms: Some(started_at_ms + 330_000 + TRANSIENT_RECOVERY_MAX_MS - 1),
+        ..reconnected.clone()
+    };
+    assert_eq!(
+        heartbeat_status(
+            &reconnect_expired,
+            true,
+            [
+                (
+                    Some(started_at_ms + 330_000 + TRANSIENT_RECOVERY_MAX_MS - 60_000),
+                    60_000
+                ),
+                (
+                    Some(started_at_ms + 330_000 + TRANSIENT_RECOVERY_MAX_MS - 59_000),
+                    60_000
+                ),
+            ],
+            started_at_ms,
+            started_at_ms + 330_000 + TRANSIENT_RECOVERY_MAX_MS,
+            30_000,
+            &mut recovery,
+        ),
+        "degraded",
+        "a reconnect gap on a worker that has been ready keeps the 2-minute window"
     );
 }
 
@@ -459,7 +604,10 @@ fn transient_recovery_is_bounded_and_transport_failures_are_immediate() {
         (Some(started_at_ms + 59_000), 60_000),
         (Some(started_at_ms + 59_000), 60_000),
     ];
-    let mut heartbeat_recovery = None;
+    let mut heartbeat_recovery = RecoveryState {
+        transient_started_at_ms: None,
+        reached_ready: true,
+    };
     assert_eq!(
         heartbeat_status(
             &health,
