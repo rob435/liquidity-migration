@@ -10,6 +10,39 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-08 — Incident `mainnet-ac90e31c207bc0da`: mainnet cannot open positions.**
+  - From 15:00:23 UTC the mainnet watchdog pages `CRITICAL
+    may-open:liquidity-migration-engine-mainnet.service:
+    liquidity-migration-engine-mainnet.service cannot open positions` every
+    30 seconds. The engine unit stays active with a heartbeat under one second,
+    no failed units, deployed `441811eb`, real money armed, and nine positions
+    with their native stops unchanged.
+    [Diagnose run `34242036121`](https://github.com/rob435/liquidity-migration/actions/runs/34242036121),
+    read at 15:01:23 through 15:01:37.
+  - Venue connectivity collapses first. The mainnet private stream drops at
+    14:58:21 and 14:59:16 on `private stream keep-alive unanswered`; both signal
+    workers log `Bybit public keep-alive was unanswered`, a stream gap, and
+    `Bybit public WebSocket dial timed out` between 14:59:00 and 14:59:21, and
+    both report `status: recovering` at 15:01:37; the host clock probe measures
+    `venue clock measurement is inconclusive: RTT 15105ms` at 14:59:12; the
+    account reader is retained for retry twice on `venue rejected (10006): Too
+    many visits. Exceeded the API Rate Limit.` at 14:31:55 and 14:31:56.
+  - Cause is not yet assigned. The heartbeat's `may_open` is
+    `may_open && private_stream_ready`, so one boolean carries both a latched
+    reconciliation halt, which needs an operator, and a private stream that is
+    merely down, which clears itself. `diagnose` read every unit except the two
+    engines, so neither the heartbeat behind the alert nor the engine journal
+    around it reached an on-call session with no host access. It now reads both
+    engine units' systemd state and journal tail and a bounded heartbeat digest
+    carrying `may_open`, `stream_resets`, the rolling-loss verdict, strategy
+    errors and entry-blocker reasons, and never the account identity. Six
+    regressions fail before that change.
+  - `liquidity-migration-demo-liveness.timer` is inactive from about 14:33,
+    after the deploy that fails its readiness check at 14:34:16, so the demo
+    realm is unwatched and the host watchdog pages `CRITICAL watchdog:demo:
+    demo watchdog timer is inactive (enabled)` at 14:52:51, 14:55:53 and
+    14:59:12. Not yet diagnosed.
+
 - **2026-09-08 — Restore CARRY daily holding at owner direction.**
   - Render both realms with intraday funding and pre-settlement exits disabled.
     Hold durable quantity targets until the next daily decision; upcoming-book
