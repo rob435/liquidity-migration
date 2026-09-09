@@ -10,6 +10,54 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-09 — Incident `demo-0922e9f30da3bf98`: the demo worker's CARRY cycle stopped completing at the UTC decision roll for ten minutes, paged CRITICAL, and cleared itself. Root cause open; no code changed.**
+  - Start. The demo signal worker boots at 23:47:52 UTC on `d00e82b2` and its
+    last CARRY cycle completes at 00:00:56.980 UTC, four seconds after the
+    daily decision boundary. Nothing completes for the next ten minutes. The
+    demo liveness watchdog pages `CRITICAL
+    liquidity-migration-signal-worker-demo.service reports 'degraded': carry
+    cycle is 196s old (limit 180s)`, ref
+    `worker-status:liquidity-migration-signal-worker-demo.service`, and repeats
+    it every 30 s: `257s old` at 00:05:14, `287s old` at 00:05:44. The limit is
+    3 × `carry_cycle_cadence_ms` 60000
+    (`scripts/runtime/check_fleet_liveness.py:317`); the worker sets its own
+    `degraded` on the same clause (`engine/signal-worker/src/live.rs:2686`).
+  - Reading. [Run `34293507873`](https://github.com/rob435/liquidity-migration/actions/runs/34293507873)
+    (`mode=diagnose`, 00:05:59 UTC) reads the demo worker `status=degraded`,
+    `last_carry_cycle_completed_wall_ts_ms` 00:00:56.980,
+    `last_long_cycle_completed_wall_ts_ms` 00:05:54.884,
+    `last_carry_upcoming_ts_ms` null, `carry_output_sequence` 55179,
+    `spool_backpressured` false with no blocked class,
+    `bybit_ws_ticker_coverage_complete` true, `bybit_ws_gap_open` false. So
+    transport, spool and the LONG lane are all healthy and only the CARRY lane
+    is frozen: `try_carry_watermark`
+    (`engine/signal-worker/src/live.rs:1812`) is called every 60 s from
+    `advance_kline_watermark` — the same call that commits the LONG watermark
+    beside it — and returns without committing. The mainnet (168 carry symbols)
+    and mexc (149) workers cross the same boundary `ready` throughout. All three
+    engines read `may_open=true`, `strategy_errors=[]`, `orders_sent=0`, with
+    demo/mainnet positions unchanged at four each, so nothing traded on the
+    stalled lane.
+  - Recovery. No action was taken. [Run `34293875357`](https://github.com/rob435/liquidity-migration/actions/runs/34293875357)
+    (`mode=diagnose`, 00:10:59 UTC) reads the demo worker `status=ready`,
+    CARRY cycle 00:10:54.894 (5 s old), `last_carry_upcoming_ts_ms`
+    `1788912000000` (the 2026-09-09 decision), `carry_output_sequence` 55399 —
+    220 outputs in the five minutes between the two readings against mainnet's
+    82, the shape of a lane working off a backlog. The alert ref is clear.
+  - Open. Which of `try_carry_watermark`'s early returns held for those ten
+    minutes is not established. The two candidates are the lane gate
+    (`carry_required_lanes_pending`, `engine/signal-worker/src/live.rs:2700`:
+    an in-flight or last-failed funding pass blocks CARRY, and the funding lane
+    is spawned on the same 60000 ms cadence as the kline tick that calls the
+    gate) and the coverage gate (`covered < required`,
+    `engine/signal-worker/src/live.rs:1888`: at the roll `source_through_ms`
+    advances a day and every active symbol must have kline and funding coverage
+    through the new boundary). The one reading that would settle it is the
+    worker's `LaneState` and the gate that returned, at the moment of the
+    stall. Neither is in the heartbeat and `mode=diagnose` prints only the
+    heartbeat subset, so no sanctioned host reading distinguishes them today.
+    The next UTC decision roll is the natural repeat.
+
 - **2026-09-08 — Incident `mexc-a361f5d18861421a`: a rowless execution-history sweep reported no progress, so the mexc engine abandoned every recovery pass and could never open.**
   - Start. The mexc engine boots at 22:38:15 UTC on `62234c95`, logs `mexc
     private stream logged in and filtered` at 22:38:19, subscribes 132 symbols,
