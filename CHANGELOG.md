@@ -188,13 +188,40 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     All three are Rust changes to the worker, so all three deploy with an
     engine handover across all three realms, funded mainnet with four open
     positions included. None is taken here.
-  - Also untaken, and the owner's call. The first page, at 07:08:08, read
-    `ticker coverage incomplete (160/160 rows, 160/160 topics accepted)` — a
-    line that contradicts itself. The counts come from the whole ticker store
-    (`bybit_ws.rs:305-306`) while the verdict counts only rows whose mark is
-    fresh inside `mark_max_age_ms` (`:236-240`), so a full store with stale
-    marks prints as complete-but-incomplete. It cleared by 07:08:37 and is not
-    this stall.
+  - Not cosmetic after all: this verdict now blocks every deploy. The first
+    page, at 07:08:08, read `ticker coverage incomplete (160/160 rows, 160/160
+    topics accepted)` — a line that contradicts itself, because the counts come
+    from the whole ticker store (`bybit_ws.rs:305-306`) while the verdict
+    counts only rows whose mark is fresh inside `mark_max_age_ms`
+    (`:236-240`), so a full store with stale marks prints as
+    complete-but-incomplete. This entry first filed that as presentation and
+    not this stall. It is more than that. At 08:08:27 the same verdict, on the
+    demo worker at `166/166 rows, 166/166 topics accepted`, refused the demo
+    soak 151 s into its required 300 s and with it the whole deploy: `demo soak
+    refused; funded realms remain on their incumbent runtimes` and `deploy
+    failed: demo soak refused; incumbent mainnet restart paths remain pinned`.
+    So a transient mark-freshness dip inside a 300 s window is enough to refuse
+    a fleet deploy, and any deploy is a coin flip against it until the verdict
+    counts what its own message counts or the soak tolerates the dip. The
+    refusal itself gets no entry of its own under the no-spam rule; the defect's
+    severity does, because it gates every repair below.
+  - The page now names its cause, on the host. That deploy reset the host
+    checkout to `5b9b72b` at 08:05:09 before it reached the soak gate, and the
+    watchdog runs Python from that checkout, so the fix is live despite the run
+    failing. [Diagnose run
+    `34327669940`](https://github.com/rob435/liquidity-migration/actions/runs/34327669940)
+    (08:10:24–08:10:52) reads the 08:09:28, 08:09:59 and 08:10:30 runs as
+    `CRITICAL worker-status:liquidity-migration-signal-worker-mexc.service:
+    liquidity-migration-signal-worker-mexc.service reports 'degraded': signal
+    spool refuses new files in class 'current'; LONG cycle is 3936s old (limit
+    180s)`. That is the post-action receipt for the watchdog half and nothing
+    more: the stall itself is untouched at 65 minutes, the spool still holds
+    172 files with `current` at 8 of 8, and `long_output_sequence` is still 18.
+    The funded realms were never handed over — mainnet pid `3558832` and mexc
+    pid `3559376` are still the 03:40 `d835b62` build at `NRestarts=0` with 4
+    and 0 positions; only the demo pair took `5b9b72b` at pid `3630462`. Four
+    liveness units are failed at 08:10:48 — demo, host, mainnet and mexc — each
+    exiting 1 on the refused Telegram send.
   - Concurrent work. The mexc `worker-status:` page also fired incident
     `mexc-a361f5d18861421a`'s routine at 07:08:08 (that id hashes the realm's
     alert keys, not a cause). That session dispatched [deploy run
