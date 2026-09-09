@@ -44,6 +44,14 @@ struct CompletedAmend {
 }
 
 enum CompletedMutation {
+    Leverage {
+        clocks: CompletionClocks,
+        symbol: SymbolId,
+        want: f64,
+        orders: Vec<String>,
+        account: Box<AccountView>,
+        reply: Result<(), VenueError>,
+    },
     SetStop {
         clocks: CompletionClocks,
         stop: stop_runtime::DurableStop,
@@ -61,6 +69,34 @@ impl CompletedMutation {
         command_id: u64,
     ) -> Result<Self, EngineError> {
         match (pending, completion) {
+            (
+                PendingMutation::Leverage {
+                    symbol,
+                    want,
+                    orders,
+                    account,
+                    queued_ns,
+                },
+                MutationCompletion::Leverage {
+                    started_ns,
+                    completed_ns,
+                    reply,
+                    ..
+                },
+            ) => Ok(Self::Leverage {
+                clocks: CompletionClocks {
+                    command_id,
+                    queued_ns,
+                    started_ns,
+                    completed_ns,
+                    rate_wait_ns: None,
+                },
+                symbol,
+                want,
+                orders,
+                account,
+                reply,
+            }),
             (
                 PendingMutation::SetStop { stop, queued_ns },
                 MutationCompletion::SetStop {
@@ -181,12 +217,14 @@ impl CompletedMutation {
             }
             (pending, completion) => {
                 let pending_kind = match pending {
+                    PendingMutation::Leverage { .. } => "leverage",
                     PendingMutation::Orders { .. } => "orders",
                     PendingMutation::Cancels { .. } => "cancels",
                     PendingMutation::Amend { .. } => "amend",
                     PendingMutation::SetStop { .. } => "stop",
                 };
                 let completion_kind = match completion {
+                    MutationCompletion::Leverage { .. } => "leverage",
                     MutationCompletion::Orders { .. } => "orders",
                     MutationCompletion::Cancels { .. } => "cancels",
                     MutationCompletion::Amend { .. } => "amend",
@@ -291,7 +329,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         completion: MutationCompletion,
     ) -> Result<(), EngineError> {
         let command_id = match &completion {
-            MutationCompletion::Orders { command_id, .. }
+            MutationCompletion::Leverage { command_id, .. }
+            | MutationCompletion::Orders { command_id, .. }
             | MutationCompletion::Cancels { command_id, .. }
             | MutationCompletion::Amend { command_id, .. }
             | MutationCompletion::SetStop { command_id, .. } => *command_id,
@@ -303,6 +342,20 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         })?;
 
         match CompletedMutation::bind(pending, completion, command_id)? {
+            CompletedMutation::Leverage {
+                clocks,
+                symbol,
+                want,
+                orders,
+                account,
+                reply,
+            } => {
+                for id in &orders {
+                    self.journal_venue_timing(&clocks, "leverage", id, None, None)?;
+                }
+                self.complete_leverage(symbol, want, orders, *account, reply)
+                    .await
+            }
             CompletedMutation::SetStop {
                 clocks,
                 stop,

@@ -6,6 +6,7 @@ use engine_types::{WalError, WalRecord};
 pub(crate) enum DispatchWrite {
     Stop(Vec<crate::engine::stop_runtime::DurableStop>),
     Portfolio,
+    Leverage(Vec<String>),
     Attempt(Vec<String>),
     Amend(Box<DurableAmend>),
 }

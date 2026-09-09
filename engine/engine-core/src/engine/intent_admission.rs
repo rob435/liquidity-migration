@@ -1204,18 +1204,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let request = &legal.request;
         let intent = &legal.approval.intent;
         let client_order_id = &legal.approval.client_order_id;
-        // Before the durable record, because a leverage that could not be set
-        // means this order must not go at all — and an OrderSent record is
-        // the engine saying it is about to put one on the wire.
-        //
-        // Entries only. An exit at the wrong leverage is still an exit, and
-        // making it wait on a round trip would be the wrong trade.
+        // Validate locally here; administrative I/O needs the durable order
+        // owner and reservation, and must not suspend the account state owner.
         if !intent.reduce_only {
             if let Some(want) = intent.leverage {
-                if self.leverage_at.get(&request.symbol) != Some(&want) {
-                    self.flush_strategy_prefix()?;
-                }
-                if let Err(reason) = self.ensure_leverage(request.symbol, want).await {
+                if let Err(reason) = self.validate_leverage_request(want) {
                     self.refuse(client_order_id, intent, &reason)?;
                     return Ok(None);
                 }

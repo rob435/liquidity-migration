@@ -552,6 +552,7 @@ pub(crate) struct MockVenue {
     account_view_fails: Rc<RefCell<bool>>,
     /// Every leverage the engine actually told the venue about, in order.
     leverages: Rc<RefCell<Vec<(SymbolId, f64)>>>,
+    leverage_release: Option<Arc<tokio::sync::Notify>>,
     /// What the venue's execution history reports. `None` makes the read fail.
     executions: Rc<RefCell<Option<Vec<VenueExecution>>>>,
     /// What each cancel is answered with, in order; an exhausted script
@@ -615,6 +616,7 @@ impl MockVenue {
                 account_readings: Rc::new(RefCell::new(VecDeque::new())),
                 account_view_fails: Rc::new(RefCell::new(false)),
                 leverages: Rc::new(RefCell::new(Vec::new())),
+                leverage_release: None,
                 executions: Rc::new(RefCell::new(Some(Vec::new()))),
                 cancel_replies: Rc::new(RefCell::new(VecDeque::new())),
                 lookup_scripted: false,
@@ -851,6 +853,9 @@ impl VenueGateway for MockVenue {
 
     async fn set_leverage(&mut self, symbol: SymbolId, leverage: f64) -> Result<(), VenueError> {
         self.leverages.lock().unwrap().push((symbol, leverage));
+        if let Some(release) = &self.leverage_release {
+            release.notified().await;
+        }
         Ok(())
     }
 
@@ -1978,6 +1983,27 @@ pub(crate) async fn callback_test_fixture(
 ) {
     let (engine, harness) = build(allow_all(), strategies, &["BTCUSDT"], &[]).await;
     (engine, harness.records)
+}
+
+pub(crate) struct LeverageControl {
+    pub release: Arc<tokio::sync::Notify>,
+    pub calls: Arc<Mutex<Vec<(SymbolId, f64)>>>,
+    pub sends: Arc<Mutex<Vec<OrderRequest>>>,
+}
+
+pub(crate) fn controlled_leverage_venue() -> (MockVenue, LeverageControl) {
+    let (mut venue, sends) = MockVenue::new(tape(), &["BTCUSDT"]);
+    let release = Arc::new(tokio::sync::Notify::new());
+    venue.leverage_release = Some(release.clone());
+    let calls = venue.leverages.clone();
+    (
+        venue,
+        LeverageControl {
+            release,
+            calls,
+            sends,
+        },
+    )
 }
 
 pub(crate) async fn callback_cancellation_fixture(

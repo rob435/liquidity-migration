@@ -337,6 +337,13 @@ struct PreparedOrder {
 }
 
 enum PendingMutation {
+    Leverage {
+        symbol: SymbolId,
+        want: f64,
+        orders: Vec<String>,
+        account: Box<AccountView>,
+        queued_ns: u64,
+    },
     SetStop {
         stop: stop_runtime::DurableStop,
         queued_ns: u64,
@@ -1347,7 +1354,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// says each held position actually runs at. A mismatch means somebody
     /// else wrote leverage on an account we believed only we write — say so
     /// loudly and evict the trust, which makes the next entry in that symbol
-    /// confirm with the venue inline, exactly as shared authority always does.
+    /// confirm with the venue before the next order can be dispatched.
     fn verify_leverage_against_view(&mut self, positions: &[engine_types::risk::PositionView]) {
         for position in positions {
             let (Some(venue_says), Some(we_set)) = (
@@ -1378,14 +1385,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
     }
 
-    /// Make the venue agree that this symbol sits at this leverage, before an
-    /// order that would post margin against it.
-    ///
-    /// Margin is notional divided by leverage, so an order sized at one
-    /// leverage and filled at another does not commit the capital the risk
-    /// kernel priced. Unknown is not "probably fine": every failure here
-    /// refuses the order rather than sending it and hoping.
-    async fn ensure_leverage(&mut self, symbol: SymbolId, want: f64) -> Result<(), String> {
+    fn validate_leverage_request(&self, want: f64) -> Result<(), String> {
         if !want.is_finite() || want <= 0.0 {
             return Err(format!(
                 "the decision asks for leverage {want}, which is not a leverage"
@@ -1396,16 +1396,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 "this decision was sized at leverage {want}, and this venue cannot be told                  what leverage to use — the margin it would post is not the margin it was                  sized at"
             ));
         }
-        if self.leverage_at.get(&symbol).is_some_and(|at| *at == want) {
-            return Ok(());
-        }
-        match self.venue.set_leverage(symbol, want).await {
-            Ok(()) => {
-                self.leverage_at.insert(symbol, want);
-                Ok(())
-            }
-            Err(e) => Err(format!("could not set leverage to {want}: {e}")),
-        }
+        Ok(())
     }
 
     /// Everything a fresh log segment must restate: the state boot rebuilds

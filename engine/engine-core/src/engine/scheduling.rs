@@ -795,6 +795,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         };
         let symbol = order.request.symbol;
         let known_filled = order.filled_exact().map_err(EngineError::State)?;
+        let exact_order = order.request.exact_terms.is_some();
         let name = self.books.market.table.name(symbol).to_string();
         let now_ns = clock::now_ns();
         let identity = |row: &engine_types::orders::OrderLookupRow| {
@@ -815,12 +816,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 )
             }
             Ok(OrderLookup::Terminal { status, row }) if identity(&row) => {
-                if row.filled_qty.value > known_filled {
+                if row.filled_qty.value > known_filled
+                    || (exact_order && row.filled_qty.value != known_filled)
+                {
                     self.recovery.history_requested = true;
                     (
                         again,
                         format!(
-                            "{id} ended at the venue ({status:?}) with fills this log has not seen; recovering execution history"
+                            "{id} ended at the venue ({status:?}) but its fill total disagrees with this log; recovering execution history"
                         ),
                     )
                 } else {

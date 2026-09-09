@@ -33,8 +33,53 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if ids.is_empty() {
             return Ok(false);
         }
-        self.begin_order_attempt(ids)?;
+        self.begin_order_preparation(ids)?;
         Ok(true)
+    }
+
+    fn missing_leverage(&self, id: &str) -> Option<(SymbolId, f64)> {
+        let order = self.dispatches.orders.get(id)?;
+        if order.intent.reduce_only {
+            return None;
+        }
+        let want = order.intent.leverage?;
+        (self.leverage_at.get(&order.request.symbol) != Some(&want))
+            .then_some((order.request.symbol, want))
+    }
+
+    fn leverage_pending(&self) -> bool {
+        self.pending_mutations
+            .values()
+            .any(|pending| matches!(pending, PendingMutation::Leverage { .. }))
+    }
+
+    fn begin_order_preparation(&mut self, mut ids: Vec<String>) -> Result<(), EngineError> {
+        let administration_available = !self.leverage_pending();
+        ids.retain(|id| {
+            self.dispatches.orders.get(id).is_some_and(|order| {
+                !self.busy_symbols.contains_key(&order.request.symbol)
+                    && (administration_available || self.missing_leverage(id).is_none())
+            })
+        });
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let ready: Vec<_> = ids
+            .iter()
+            .filter(|id| self.missing_leverage(id).is_none())
+            .cloned()
+            .collect();
+        if ready.is_empty() {
+            // OrderSent already contains the dependent decision and reservation.
+            // An administrative write cannot overtake that ownership barrier.
+            let barrier = self.begin_dispatch_barrier()?;
+            self.dispatches.begin(DispatchWrite::Leverage(ids), barrier);
+            Ok(())
+        } else {
+            // Do not change the same symbol to the next requested leverage
+            // before dispatching the orders its last confirmation unlocked.
+            self.begin_order_attempt(ready)
+        }
     }
 
     fn begin_order_attempt(&mut self, ids: Vec<String>) -> Result<(), EngineError> {
@@ -69,12 +114,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .dispatches
                 .orders
                 .iter()
-                .filter(|(_, order)| order.phase == OrderDispatchPhase::Queued)
+                .filter(|(id, order)| {
+                    order.phase == OrderDispatchPhase::Queued
+                        && !self.busy_symbols.contains_key(&order.request.symbol)
+                        && (!self.leverage_pending() || self.missing_leverage(id).is_none())
+                })
                 .take(MAX_ORDERS_PER_BATCH)
                 .map(|(id, _)| id.clone())
                 .collect();
             if !queued.is_empty() {
-                self.begin_order_attempt(queued)?;
+                self.begin_order_preparation(queued)?;
             }
         }
         let now = clock::now_ns();
@@ -244,6 +293,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .take()
             .ok_or_else(|| EngineError::State("dispatch barrier result has no owner".into()))?;
         match write {
+            DispatchWrite::Leverage(ids) => self.dispatch_durable_leverage(ids).await?,
             DispatchWrite::Portfolio => self.service_portfolio_controls().await?,
             DispatchWrite::Stop(stops) => self.dispatch_durable_stops(stops)?,
             DispatchWrite::Amend(amend) => self.dispatch_durable_amend(*amend)?,
@@ -252,6 +302,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 let mut timings = Vec::new();
                 for id in ids {
                     if self.refuse_changed_dispatch(&id).await? {
+                        continue;
+                    }
+                    if self.missing_leverage(&id).is_some() {
+                        self.refuse_unsent_dispatch(
+                            &id,
+                            "leverage confirmation changed during durability wait",
+                        )
+                        .await?;
                         continue;
                     }
                     let order = self
@@ -291,6 +349,116 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             self.ready_actions.append(&mut self.dispatches.waiting);
         }
         Ok(())
+    }
+
+    async fn dispatch_durable_leverage(&mut self, ids: Vec<String>) -> Result<(), EngineError> {
+        let mut selected = None;
+        let mut orders = Vec::new();
+        for id in ids {
+            if self.refuse_changed_dispatch(&id).await? {
+                continue;
+            }
+            if let Some(want) = self.missing_leverage(&id) {
+                if selected.is_none() {
+                    selected = Some(want);
+                }
+                if selected == Some(want) {
+                    orders.push(id);
+                }
+            }
+        }
+        if let Some((symbol, want)) = selected {
+            if self.leverage_pending() {
+                return Err(EngineError::State(
+                    "leverage administration has two owners".into(),
+                ));
+            }
+            let queued_ns = clock::now_ns();
+            let command_id = self.venue.dispatch_leverage(symbol, want)?;
+            self.leverage_at.remove(&symbol);
+            self.mark_symbols_busy([symbol]);
+            self.pending_mutations.insert(
+                command_id,
+                PendingMutation::Leverage {
+                    symbol,
+                    want,
+                    orders,
+                    account: Box::new(self.books.account.clone()),
+                    queued_ns,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) async fn complete_leverage(
+        &mut self,
+        symbol: SymbolId,
+        want: f64,
+        orders: Vec<String>,
+        account: AccountView,
+        reply: Result<(), VenueError>,
+    ) -> Result<(), EngineError> {
+        let held_needs_readback = account
+            .positions
+            .iter()
+            .any(|position| position.symbol == symbol && position.leverage != Some(want));
+        let refusal = match reply {
+            Err(VenueError::BadRequest(detail)) => {
+                Some(format!("leverage request was refused locally: {detail}"))
+            }
+            Err(error) => {
+                // Either side of a multi-call administration may have changed.
+                // This is not a negative acknowledgement of that mutation.
+                self.books.account.observed_ns = 0;
+                Some(format!(
+                    "leverage {want} was not confirmed ({error}); account refresh required"
+                ))
+            }
+            Ok(()) if self.books.account != account => {
+                Some("account state changed during leverage administration".into())
+            }
+            Ok(()) if held_needs_readback => {
+                self.books.account.observed_ns = 0;
+                Some("held-position leverage requires a fresh account readback".into())
+            }
+            Ok(()) => None,
+        };
+        let mut authorized = false;
+        for id in orders {
+            // Cancellation or a private terminal event may already have retired
+            // this dependent order. Late administration must never recreate it.
+            if !self
+                .dispatches
+                .orders
+                .get(&id)
+                .is_some_and(|order| order.phase == OrderDispatchPhase::Queued)
+            {
+                continue;
+            }
+            if let Some(reason) = &refusal {
+                self.refuse_unsent_dispatch(&id, reason).await?;
+            } else if !self.refuse_changed_dispatch(&id).await? {
+                authorized = true;
+            }
+        }
+        if authorized {
+            self.leverage_at.insert(symbol, want);
+        } else {
+            self.leverage_at.remove(&symbol);
+        }
+        self.release_symbols([symbol]);
+        Ok(())
+    }
+
+    async fn refuse_unsent_dispatch(&mut self, id: &str, reason: &str) -> Result<(), EngineError> {
+        self.take_update(OrderUpdate::Reject {
+            client_order_id: id.into(),
+            code: 0,
+            reason: format!("never sent: {reason}"),
+        })
+        .await?;
+        self.complete_order_dispatch(id)
     }
 
     async fn refuse_changed_dispatch(&mut self, id: &str) -> Result<bool, EngineError> {
@@ -534,11 +702,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .transpose()
                     .map_err(EngineError::State)?
                     .unwrap_or_else(engine_types::numeric::Exact::zero);
-                if row.filled_qty.value > known {
+                // Legacy orders retain their binary64 fill frontier. Exact
+                // orders need equality: a lower total is conflicting evidence,
+                // not permission to erase fills or retire a reservation.
+                if row.filled_qty.value > known
+                    || (order.request.exact_terms.is_some() && row.filled_qty.value != known)
+                {
                     self.recovery.history_requested = true;
                     self.dispatches.unresolved.insert(
                         id.into(),
-                        "terminal order contains fills outside recovered execution history".into(),
+                        "terminal fill total disagrees with durable execution history".into(),
                     );
                     return Ok(());
                 }
@@ -1021,6 +1194,76 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_lower_exact_terminal_fill_total_cannot_retire_the_order_or_erase_fills() {
+        use engine_types::numeric::{Exact, ExactNumber};
+        for halt in [false, true] {
+            let (mut engine, records) = fixture().await;
+            let id = "contradictory-terminal-fill";
+            let _ = prepared_order_with_terms(&mut engine, id, true);
+            let known = Exact::parse_decimal("0.25").unwrap();
+            recover_lookup_fill(&mut engine, id, "durable-partial-fill", known.clone()).await;
+            engine.recovery.history_requested = false;
+            let deadline_ns = clock::now_ns() + 10_000_000_000;
+            if halt {
+                engine.halt_cancels.insert(
+                    id.into(),
+                    HaltCancelState::Resolving {
+                        deadline_ns,
+                        retry_after_ns: clock::now_ns(),
+                    },
+                );
+            }
+            let lookup = |quantity| OrderLookup::Terminal {
+                status: TerminalOrderStatus::Cancelled,
+                row: OrderLookupRow {
+                    symbol: "BTCUSDT".into(),
+                    client_order_id: id.into(),
+                    venue_order_id: "same-venue-order".into(),
+                    filled_qty: ExactNumber::venue_decimal(quantity).unwrap(),
+                },
+            };
+            for _ in 0..2 {
+                if halt {
+                    engine
+                        .apply_halt_lookup(id, Ok(lookup("0.2")))
+                        .await
+                        .unwrap();
+                    assert!(matches!(engine.halt_cancels.get(id),
+                        Some(HaltCancelState::Resolving { deadline_ns: kept, .. }) if *kept == deadline_ns));
+                } else {
+                    engine.apply_order_lookup(id, lookup("0.2")).await.unwrap();
+                    assert!(engine.dispatches.unresolved.contains_key(id));
+                    assert!(engine.dispatches.orders.contains_key(id));
+                }
+                assert!(engine.recovery.history_requested);
+                assert!(engine.books.orders.orders[id].in_flight());
+                assert_eq!(
+                    engine.books.orders.orders[id].filled_exact().unwrap(),
+                    known
+                );
+            }
+            assert!(!records.lock().unwrap().iter().any(|record| matches!(record,
+                WalRecord::OrderUpdate { update: OrderUpdate::Cancelled { client_order_id, .. }, .. }
+                    if client_order_id == id)));
+            if halt {
+                engine
+                    .apply_halt_lookup(id, Ok(lookup("0.25")))
+                    .await
+                    .unwrap();
+                assert!(!engine.halt_cancels.contains_key(id));
+            } else {
+                engine.apply_order_lookup(id, lookup("0.25")).await.unwrap();
+                assert!(!engine.dispatches.unresolved.contains_key(id));
+            }
+            let replay =
+                crate::inflight::LedgerOfOrders::try_from_records(&records.lock().unwrap())
+                    .unwrap();
+            assert!(!replay.orders[id].in_flight());
+            assert_eq!(replay.orders[id].filled_exact().unwrap(), known);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn an_order_sent_record_also_owns_its_unsent_dispatch_at_the_crash_cut() {
         let (mut engine, records) = fixture().await;
         let intent = Intent {
@@ -1319,3 +1562,6 @@ mod portfolio_tests {
 
 #[cfg(test)]
 mod replay_timing_tests;
+
+#[cfg(test)]
+mod leverage_tests;

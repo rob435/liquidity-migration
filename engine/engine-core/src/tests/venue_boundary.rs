@@ -1,3 +1,5 @@
+#![cfg(feature = "bybit")]
+
 use super::*;
 use engine_types::numeric::Exact;
 use engine_venue::{BybitGateway, BybitOrderFeed, RealmCredentials, VenueRealm};

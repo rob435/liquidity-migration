@@ -13,6 +13,12 @@ const COMPLETION_CAPACITY: usize = 4096;
 
 #[derive(Debug)]
 pub enum MutationCompletion {
+    Leverage {
+        command_id: u64,
+        started_ns: u64,
+        completed_ns: u64,
+        reply: Result<(), VenueError>,
+    },
     SetStop {
         command_id: u64,
         started_ns: u64,
@@ -46,6 +52,11 @@ pub enum MutationCompletion {
 }
 
 enum Command {
+    DispatchLeverage {
+        command_id: u64,
+        symbol: SymbolId,
+        leverage: f64,
+    },
     DispatchStop {
         command_id: u64,
         symbol: SymbolId,
@@ -143,6 +154,20 @@ impl VenueClient {
             },
             completion_rx,
         )
+    }
+
+    pub fn dispatch_leverage(
+        &mut self,
+        symbol: SymbolId,
+        leverage: f64,
+    ) -> Result<u64, VenueError> {
+        let command_id = self.mint_command_id();
+        self.send(Command::DispatchLeverage {
+            command_id,
+            symbol,
+            leverage,
+        })?;
+        Ok(command_id)
     }
 
     pub fn dispatch_orders(&mut self, requests: Vec<OrderRequest>) -> Result<u64, VenueError> {
@@ -447,6 +472,23 @@ async fn run<V: VenueGateway>(
             },
         };
         match command {
+            Command::DispatchLeverage {
+                command_id,
+                symbol,
+                leverage,
+            } => {
+                let started_ns = engine_types::clock::mono_ns();
+                let reply = venue.set_leverage(symbol, leverage).await;
+                let completed_ns = engine_types::clock::mono_ns();
+                let _ = completions
+                    .send(MutationCompletion::Leverage {
+                        command_id,
+                        started_ns,
+                        completed_ns,
+                        reply,
+                    })
+                    .await;
+            }
             Command::SendOrders {
                 command_id,
                 requests,
