@@ -99,6 +99,8 @@ def test_the_digest_carries_the_verdicts_the_watchdog_alerts_on(tmp_path: Path) 
             "rolling_loss_limit_usdt": 162.7,
             "strategy_errors": [{"strategy": "CARRY", "error": "boom"}],
             "stream_resets": 7,
+            "private_stream_ready": False,
+            "private_stream_unready_ms": 240_000,
             "pid": 3272995,
             "uptime_s": 16800,
         },
@@ -113,6 +115,12 @@ def test_the_digest_carries_the_verdicts_the_watchdog_alerts_on(tmp_path: Path) 
     # The counter that separates a private stream still resetting from an
     # engine that has latched entries off and will not clear on its own.
     assert digest["stream_resets"] == 7
+    # `may_open` is the latch alone and `private-stream:` is its own alert, so
+    # the reading that tells a stuck stream from a sweep in progress is the age
+    # the watchdog thresholds on. Without it the digest shows a healthy latch
+    # and no sign of the fault the page names.
+    assert digest["private_stream_ready"] is False
+    assert digest["private_stream_unready_ms"] == 240_000
 
 
 def test_the_digest_bounds_the_long_rows(tmp_path: Path) -> None:
