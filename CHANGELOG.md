@@ -199,11 +199,17 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     `mexc-a361f5d18861421a`'s routine at 07:08:08 (that id hashes the realm's
     alert keys, not a cause). That session dispatched [deploy run
     `34322539866`](https://github.com/rob435/liquidity-migration/actions/runs/34322539866)
-    for `b058e99` at 07:10:38, which restarts the mexc worker. A fresh worker
-    re-reads the spool inventory from disk, so the restart clears the block
-    only if the spool has actually drained; if the engine is still retiring
-    nothing, the new process blocks again on its first eight `current` files
-    and the page returns. The restart is not the fix and is not counted as one.
+    for `b058e99` at 07:10:38. That was expected to restart the mexc worker and
+    did not: the engine tree did not change, so the handover took only the demo
+    pair for its soak, and the deployed-commit row above has mexc still at pid
+    `3559376` on `d835b62`. So no fresh process re-read the spool, the block was
+    never interrupted, and the stall has run unbroken since 07:04:53 — [diagnose
+    run `34324077306`](https://github.com/rob435/liquidity-migration/actions/runs/34324077306)
+    reads the page at `LONG cycle is 1476s old` at 07:29:20, 24 minutes in. A
+    restart would not have been the fix in any case: a fresh worker re-reads the
+    inventory from disk, so it clears the block only if the spool has actually
+    drained, and with the engine retiring nothing the new process would block
+    again on its first eight `current` files.
 
 - **2026-09-09 — Incident id `host-51b05439c4f09794`, 06:46:12 UTC: the fleet's Telegram alert channel is refused with `HTTP 400` on every send, so the mainnet and host watchdogs exit 1 every 30 s and no watchdog page has reached the owner by Telegram since. The engines are untouched. Why the venue refuses is now established as `PEER_ID_INVALID` — the configured alerts chat id is not a peer the bot can reach — and that it took this long was the repository's fault: Telegram names the cause in the refusal's JSON `description`, and `transport_error` threw it away for every plain `HTTPError`, so the journal reads a bare `HTTP 400` an operator cannot act on. That is the same defect the 2026-09-07 entry fixed for the on-call fire path and never applied to the Telegram path. Fixed: the refusal reason is read back bounded, credential-redacted, and printed. Deploy receipt below. The refusal now names the cause and the chat-side fix is the owner's.**
   - The chain. `liquidity-migration-mainnet-liveness` sends its due
