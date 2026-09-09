@@ -11,9 +11,18 @@
 //! REST snapshot to form a complete ladder, so they are not passed off as one;
 //! [`Quote::bid_qty`] and `ask_qty` remain zero — "not stated".
 //!
-//! **The funding rate here is the eight-hourly one**, like Bybit's and unlike
-//! Hyperliquid's hourly figure — the venue settles on a `collectCycle` of 8.
-//! It is reported as the venue states it.
+//! **Funding here is per contract, not venue-wide.** The venue publishes a
+//! `collectCycle` per contract and 8 h, 4 h, 1 h and 24 h are all live, so the
+//! rate on one symbol is not comparable with the rate on another by period.
+//! It is reported as the venue states it and never rescaled.
+//! [`Ticker::next_funding_ms`] is the venue's own next settlement for that
+//! contract: `push.ticker` carries the rate but neither a settlement time nor
+//! a cycle, so the schedule is read from `contract/funding_rate` on connect and
+//! re-read hourly, and the venue's stamp is rolled forward by that contract's
+//! cycle in between. A symbol the funding page did not state carries
+//! `next_funding_ms = 0` — "not stated", the same convention [`Quote::bid_qty`]
+//! uses above. A reader must not treat 0 as a settlement time, and there is no
+//! venue-wide cycle to fall back on.
 //!
 //! The socket lives in its own task, for the same reason every other feed here
 //! does: the engine drops `next_event`'s future several times a second inside a
@@ -24,7 +33,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use engine_public::venues::mexc::public;
+use engine_public::venues::mexc::public::{self, FundingSchedule};
 use engine_public::MexcRealm;
 use engine_types::{
     Feed, FeedError, MarketEvent, MarketFeed, Quote, Subscription, SymbolId, Ticker,
@@ -49,8 +58,12 @@ const BACKOFF_START: Duration = Duration::from_millis(250);
 const BACKOFF_MAX: Duration = Duration::from_secs(8);
 const QUEUE_DEPTH: usize = 4096;
 
-/// Eight hours, the venue's settlement cycle for every contract it lists.
-const FUNDING_INTERVAL_MS: i64 = 8 * 60 * 60 * 1000;
+/// How often the settlement schedule is re-read. One hour is the shortest
+/// `collectCycle` the venue lists, so every contract's stamp stays within one
+/// of its own cycles of the venue's; between reads the cached stamp rolls
+/// forward by that cycle, which needs no read at all. Newly listed contracts
+/// and a cycle the venue changed arrive on this cadence.
+const FUNDING_REFRESH: Duration = Duration::from_secs(60 * 60);
 
 pub struct MexcPublicFeed {
     realm: MexcRealm,
@@ -116,12 +129,16 @@ impl MexcPublicFeed {
     fn start(&mut self) {
         let (events, inbox) = mpsc::channel(QUEUE_DEPTH);
         let (admit_tx, admit_rx) = mpsc::unbounded_channel();
+        let (schedules_tx, schedules) = mpsc::channel(1);
         let worker = Worker {
             realm: self.realm,
             wanted: unique_symbols(&self.subs),
             ids: Arc::clone(&self.ids),
             admissions: admit_rx,
             venue_symbols: HashMap::new(),
+            funding: HashMap::new(),
+            schedules,
+            schedules_tx,
             backoff: Duration::ZERO,
             connected_before: false,
             depth_versions: HashMap::new(),
@@ -206,6 +223,14 @@ struct Worker {
     admissions: mpsc::UnboundedReceiver<Vec<Subscription>>,
     /// The engine's spelling to the venue's, read from the venue itself.
     venue_symbols: HashMap<String, String>,
+    /// The venue's stated settlement schedule, by the venue's symbol.
+    funding: HashMap<String, FundingSchedule>,
+    /// Refreshed schedules, delivered rather than awaited in place: a REST
+    /// round trip held inside [`Worker::pump`]'s `select!` stalls every price
+    /// on the socket for as long as it takes. Holding the sender here is what
+    /// keeps the receiving branch from resolving on a closed channel.
+    schedules: mpsc::Receiver<Vec<(String, FundingSchedule)>>,
+    schedules_tx: mpsc::Sender<Vec<(String, FundingSchedule)>>,
     backoff: Duration,
     connected_before: bool,
     /// Latest unmerged depth version per symbol. It guards ticker-derived
@@ -267,6 +292,13 @@ impl Worker {
             .await
             .map_err(|e| FeedError::Transport(e.to_string()))?;
         self.venue_symbols = pairs.into_iter().collect();
+        // The only endpoint that states a settlement time. Read here, where
+        // there is no cached schedule to fall back on: coming up without one
+        // would report "not stated" for every symbol on the socket.
+        let schedule = public::funding_schedule(self.realm)
+            .await
+            .map_err(|e| FeedError::Transport(e.to_string()))?;
+        self.funding = schedule.into_iter().collect();
         self.depth_versions.clear();
         let (mut socket, _) = connect_async(self.realm.websocket())
             .await
@@ -306,8 +338,29 @@ impl Worker {
     ) -> Result<(), ()> {
         let mut ping = tokio::time::interval(PING_INTERVAL);
         ping.tick().await;
+        let mut schedule_due = tokio::time::interval(FUNDING_REFRESH);
+        // `connect` has just read it.
+        schedule_due.tick().await;
         loop {
             tokio::select! {
+                _ = schedule_due.tick() => {
+                    let realm = self.realm;
+                    let schedules = self.schedules_tx.clone();
+                    tokio::spawn(async move {
+                        match public::funding_schedule(realm).await {
+                            Ok(rows) => {
+                                let _ = schedules.send(rows).await;
+                            }
+                            Err(e) => warn!(
+                                error = %e,
+                                "mexc settlement schedule did not refresh; keeping the last one"
+                            ),
+                        }
+                    });
+                }
+                Some(rows) = self.schedules.recv() => {
+                    self.funding = rows.into_iter().collect();
+                }
                 _ = ping.tick() => {
                     // The venue wants an application-level ping, not a
                     // protocol frame, and closes a connection it has not heard
@@ -446,7 +499,7 @@ impl Worker {
                     mark_px: num("fairPrice").unwrap_or(0.0),
                     index_px: num("indexPrice").unwrap_or(0.0),
                     funding_rate,
-                    next_funding_ms: next_funding_ms(venue_ts_ms),
+                    next_funding_ms: next_funding_ms(self.funding.get(venue_symbol), venue_ts_ms),
                     venue_ts_ms,
                     recv_ns,
                 },
@@ -517,25 +570,66 @@ fn first_chars(text: &str) -> String {
     text.chars().take(160).collect()
 }
 
-/// The next eight-hourly settlement at or after this stamp.
+/// This contract's next settlement, after `venue_ts_ms`.
 ///
-/// The ticker channel does not carry a settlement time — only the REST funding
-/// endpoint does — so it is derived from the cycle the venue publishes for
-/// every contract it lists. Eight hours from the epoch lands on 00:00, 08:00
-/// and 16:00 UTC, which is where MEXC settles.
-fn next_funding_ms(venue_ts_ms: i64) -> i64 {
-    if venue_ts_ms <= 0 {
+/// The venue's own stamp fixes the phase and its `collectCycle` the period.
+/// Neither is derivable from the clock: settlement is not an epoch multiple of
+/// the cycle — `US30_USDT` settles every 24 h at 16:00 UTC — and the cycle
+/// differs between contracts. A contract with no schedule reports 0, "not
+/// stated"; a guessed cycle would be wrong on about half the venue.
+fn next_funding_ms(schedule: Option<&FundingSchedule>, venue_ts_ms: i64) -> i64 {
+    let Some(schedule) = schedule else {
+        return 0;
+    };
+    let cycle = schedule.collect_cycle_ms;
+    let stated = schedule.next_settle_ms;
+    if venue_ts_ms <= 0 || stated <= 0 || cycle <= 0 {
         return 0;
     }
-    (venue_ts_ms / FUNDING_INTERVAL_MS + 1) * FUNDING_INTERVAL_MS
+    if stated > venue_ts_ms {
+        return stated;
+    }
+    // The stamp has settled since it was read. The phase holds, so the next one
+    // is a whole number of cycles on from it.
+    let cycles = (venue_ts_ms - stated) / cycle + 1;
+    stated.saturating_add(cycles.saturating_mul(cycle))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Recorded from `GET /api/v1/contract/funding_rate` on the realm's own
+    /// host, no symbol: one real row at each cycle the venue lists. Real
+    /// bytes, so a renamed field fails here rather than on a live settlement.
+    const FUNDING: &str = r#"{"success":true,"code":0,"data":[
+        {"symbol":"BTC_USDT","fundingRate":6.2e-05,"maxFundingRate":0.0018,
+         "minFundingRate":-0.0018,"collectCycle":8,"nextSettleTime":1788969600000,
+         "timestamp":1788950082772,"idxPrice":79129.8,"fairPrice":79090},
+        {"symbol":"XAU_USDT","fundingRate":3.4e-05,"maxFundingRate":0.03,
+         "minFundingRate":-0.03,"collectCycle":4,"nextSettleTime":1788955200000,
+         "timestamp":1788950082772,"idxPrice":4397.34,"fairPrice":4399.08},
+        {"symbol":"SOPH_USDT","fundingRate":-0.00013,"maxFundingRate":0.03,
+         "minFundingRate":-0.03,"collectCycle":1,"nextSettleTime":1788951600000,
+         "timestamp":1788950082772,"idxPrice":0.00543,"fairPrice":0.00542},
+        {"symbol":"US30_USDT","fundingRate":0,"maxFundingRate":0,"minFundingRate":0,
+         "collectCycle":24,"nextSettleTime":1788969600000,"timestamp":1788950082772,
+         "idxPrice":52548.46,"fairPrice":52551.36}]}"#;
+
+    /// The stamp the page above was read at.
+    const READ_AT: i64 = 1_788_950_082_772;
+    const HOUR: i64 = 60 * 60 * 1000;
+
+    fn funding() -> HashMap<String, FundingSchedule> {
+        public::parse_funding(FUNDING)
+            .unwrap()
+            .into_iter()
+            .collect()
+    }
+
     fn worker() -> Worker {
         let (_tx, rx) = mpsc::unbounded_channel();
+        let (schedules_tx, schedules) = mpsc::channel(1);
         let ids = Arc::new(RwLock::new(HashMap::new()));
         intern(&ids, "BTCUSDT");
         Worker {
@@ -544,6 +638,9 @@ mod tests {
             ids,
             admissions: rx,
             venue_symbols: HashMap::from([("BTCUSDT".to_string(), "BTC_USDT".to_string())]),
+            funding: funding(),
+            schedules,
+            schedules_tx,
             backoff: Duration::ZERO,
             connected_before: false,
             depth_versions: HashMap::new(),
@@ -584,6 +681,9 @@ mod tests {
                 assert_eq!(ticker.index_px, 6861.6);
                 assert_eq!(ticker.funding_rate, 0.0008);
                 assert_eq!(ticker.last_px, 6865.5);
+                // The venue's own stamp for BTC_USDT, looked up by the venue's
+                // spelling of the symbol rather than the engine's.
+                assert_eq!(ticker.next_funding_ms, 1_788_969_600_000);
             }
             ref other => panic!("{other:?}"),
         }
@@ -675,19 +775,82 @@ mod tests {
     }
 
     #[test]
-    fn the_funding_stamp_lands_on_the_venues_eight_hourly_settlement() {
-        // MEXC settles every 8 hours, at 00:00, 08:00 and 16:00 UTC.
-        // 1787492334852 ms is inside one of those cycles.
-        let next = next_funding_ms(1787492334852);
+    fn the_funding_stamp_is_the_venues_own_settlement_for_that_contract() {
+        let schedules = funding();
+        // A 4 h contract settles four hours before the 8 h ones do; the next
+        // eight-hour epoch multiple, 1788969600000, is that much too late.
         assert_eq!(
-            next % FUNDING_INTERVAL_MS,
-            0,
-            "not on an eight-hour boundary"
+            next_funding_ms(schedules.get("XAU_USDT"), READ_AT),
+            1_788_955_200_000
         );
-        assert!(next > 1787492334852);
-        assert!(next - 1787492334852 <= FUNDING_INTERVAL_MS);
-        // A venue stamp we did not get is not a settlement time we can invent.
-        assert_eq!(next_funding_ms(0), 0);
+        assert_eq!(
+            next_funding_ms(schedules.get("BTC_USDT"), READ_AT),
+            1_788_969_600_000
+        );
+        // 24 h from the epoch lands on 00:00 UTC; this contract settles 16:00.
+        let us30 = schedules.get("US30_USDT").copied().unwrap();
+        assert_eq!(
+            next_funding_ms(Some(&us30), READ_AT),
+            1_788_969_600_000,
+            "the venue's stamp, not an epoch multiple"
+        );
+        assert_ne!(us30.next_settle_ms % us30.collect_cycle_ms, 0);
+    }
+
+    #[test]
+    fn a_contract_with_no_stated_schedule_reads_zero_rather_than_a_guessed_cycle() {
+        let schedules = funding();
+        // Not on the page: "not stated", the convention the depth guard uses.
+        assert_eq!(next_funding_ms(schedules.get("ETH_USDT"), READ_AT), 0);
+        assert_eq!(next_funding_ms(None, READ_AT), 0);
+        // No venue stamp on the frame is not a settlement time either.
+        assert_eq!(next_funding_ms(schedules.get("BTC_USDT"), 0), 0);
+    }
+
+    #[test]
+    fn a_settled_stamp_rolls_forward_by_that_contracts_own_cycle() {
+        let schedules = funding();
+        let four_hourly = schedules.get("XAU_USDT");
+        let stated = 1_788_955_200_000;
+        // At the stamp itself funding has settled, so the next one is a cycle
+        // on. Same one until it is reached.
+        assert_eq!(next_funding_ms(four_hourly, stated), stated + 4 * HOUR);
+        assert_eq!(next_funding_ms(four_hourly, stated + 1), stated + 4 * HOUR);
+        assert_eq!(
+            next_funding_ms(four_hourly, stated + 4 * HOUR - 1),
+            stated + 4 * HOUR
+        );
+        assert_eq!(
+            next_funding_ms(four_hourly, stated + 4 * HOUR),
+            stated + 8 * HOUR
+        );
+        // A week of missed refreshes still lands on the venue's own phase.
+        let late = stated + 7 * 24 * HOUR;
+        let next = next_funding_ms(four_hourly, late);
+        assert_eq!((next - stated) % (4 * HOUR), 0);
+        assert!(next > late && next - late <= 4 * HOUR);
+        // The hourly contract rolls by an hour, not by eight.
+        assert_eq!(
+            next_funding_ms(schedules.get("SOPH_USDT"), 1_788_951_600_000),
+            1_788_951_600_000 + HOUR
+        );
+    }
+
+    #[test]
+    fn the_schedule_is_re_read_at_least_as_often_as_the_venue_settles() {
+        // Between reads the stamp only rolls forward on the cached cycle, so a
+        // cadence longer than the shortest cycle the venue lists would carry a
+        // changed cycle past a settlement.
+        let refresh = i64::try_from(FUNDING_REFRESH.as_millis()).unwrap();
+        let shortest = funding()
+            .values()
+            .map(|schedule| schedule.collect_cycle_ms)
+            .min()
+            .unwrap();
+        assert!(
+            refresh <= shortest,
+            "a {refresh} ms refresh is slower than the venue's {shortest} ms cycle"
+        );
     }
 
     #[test]
