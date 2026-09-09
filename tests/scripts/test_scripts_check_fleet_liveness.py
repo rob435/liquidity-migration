@@ -1534,6 +1534,78 @@ def test_transport_errors_never_log_a_secret_url() -> None:
     assert "SECRET" not in rendered
 
 
+def test_a_refused_telegram_alert_names_the_venue_reason(tmp_path: Path, monkeypatch, capsys) -> None:
+    """A 400 from the Bot API must reach the journal with its own description.
+
+    `HTTP 400` alone does not separate a bad chat id from a bad message, and
+    the watchdog exits 1 on every run until an operator acts on it.
+    """
+    row = liveness.FleetUnit(
+        unit="liquidity-migration-engine-mainnet.service",
+        kind="service",
+        realm="mainnet",
+        activation="always",
+        health="active",
+        output_artifact="-",
+    )
+    monkeypatch.setattr(liveness, "load_fleet_manifest", lambda: [row])
+    monkeypatch.setattr(liveness, "unit_states", lambda units: {unit: "inactive" for unit in units})
+    monkeypatch.setattr(liveness, "unit_journal_tail", lambda *_args: "journal")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:PRIVATE-BOT-TOKEN")
+    monkeypatch.setenv("TELEGRAM_ALERT_CHAT_ID", "-1001")
+    monkeypatch.delenv("INCIDENT_ROUTINE_FIRE_URL", raising=False)
+    monkeypatch.delenv("ONCALL_DEADMAN_URL", raising=False)
+
+    response = io.BytesIO(
+        json.dumps({"ok": False, "error_code": 400, "description": "Bad Request: chat not found"}).encode()
+    )
+
+    def refuse(*_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            "https://api.telegram.org/bot123:PRIVATE-BOT-TOKEN/sendMessage", 400, "Bad Request", {}, response
+        )
+
+    monkeypatch.setattr(liveness, "send_telegram_message", refuse)
+    state_file = tmp_path / "state.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["check_fleet_liveness.py", "--account-scope", "mainnet", "--telegram", "--state-file", str(state_file)],
+    )
+
+    assert liveness.main() == 1
+    out = capsys.readouterr().out
+    assert "CRITICAL telegram: cannot deliver alerts (HTTP 400 (Bad Request: chat not found))" in out
+    assert "PRIVATE-BOT-TOKEN" not in out
+    assert not state_file.exists(), "a refused alert must not consume its cooldown"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"ok":false,"error_code":400,"description":' + b'"PRIVATE ' + b"x" * 4096 + b'"}',
+        b"<html>PRIVATE</html>",
+        b'{"ok":false,"error_code":400,"description":42}',
+        b'{"ok":false,"error_code":400}',
+    ],
+    ids=["oversize", "invalid-json", "invalid-description", "no-description"],
+)
+def test_an_unreadable_telegram_rejection_keeps_the_bare_status(body) -> None:
+    """Nothing the Bot API did not clearly say is reported as its reason."""
+
+    class BoundedResponse(io.BytesIO):
+        def read(self, size=-1):
+            assert 0 <= size <= 4097, "error diagnostics must never read an unbounded body"
+            return super().read(size)
+
+    error = urllib.error.HTTPError(
+        "https://api.telegram.org/botPRIVATE/sendMessage", 400, "PRIVATE", {}, BoundedResponse(body)
+    )
+    rendered = liveness.transport_error(error)
+    assert rendered == "HTTP 400"
+    assert "PRIVATE" not in rendered
+
+
 def test_routine_http_rejection_exposes_reason_without_credentials(monkeypatch) -> None:
     token = "sk-ant-oat01-PRIVATE-RUNTIME-TOKEN"
     message = (

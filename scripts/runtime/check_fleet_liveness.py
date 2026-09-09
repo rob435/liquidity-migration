@@ -51,7 +51,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
-from liquidity_migration.ops.telegram import as_block, send_telegram_message  # noqa: E402
+from liquidity_migration.ops.telegram import api_rejection_detail, as_block, send_telegram_message  # noqa: E402
 from liquidity_migration.core.venue_realm import MAINNET_REST_ENDPOINT  # noqa: E402
 from liquidity_migration.policy.oncall_environment import (  # noqa: E402
     NOTIFICATION_KEYS,
@@ -1250,7 +1250,8 @@ def transport_error(error: BaseException) -> str:
         return str(error)
     code = getattr(error, "code", None)
     if isinstance(code, int):
-        return f"HTTP {code}"
+        detail = api_rejection_detail(error)
+        return f"HTTP {code} ({detail})" if detail else f"HTTP {code}"
     return type(error).__name__
 
 

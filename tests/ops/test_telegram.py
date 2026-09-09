@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import json
 import math
 import urllib.error
 import urllib.parse
@@ -312,6 +314,10 @@ def _http_error(code: int, *, hdrs, fp=None) -> urllib.error.HTTPError:
     return urllib.error.HTTPError("https://api.telegram.org/x", code, "err", hdrs=hdrs, fp=fp)
 
 
+def _http_error_with_body(body: bytes, code: int = 400) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError("https://api.telegram.org/x", code, "err", {}, io.BytesIO(body))
+
+
 class _Resp:
     """Stand-in for the urlopen response (exposes .status, is a context mgr)."""
 
@@ -487,6 +493,32 @@ def test_429_retry_returns_false_on_non_2xx_retry(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(telegram.urllib.request, "urlopen", fake_urlopen)
     assert send_telegram_message("hi") is False
     assert calls["n"] == 2
+
+
+def test_rejection_detail_redacts_bounds_and_flattens(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A description is operator-facing text from the venue: it must not carry
+    # the bot token onward, break the journal line, or run unbounded.
+    _set_credentials(monkeypatch, token="123:PRIVATE-BOT-TOKEN", chat_id="c")
+    description = (
+        "Bad Request: chat not found\nbot123:PRIVATE-BOT-TOKEN\x00 "
+        "123:PRIVATE-BOT-TOKEN " + "pad " * 200
+    )
+    error = _http_error_with_body(json.dumps({"ok": False, "description": description}).encode())
+
+    detail = telegram.api_rejection_detail(error)
+    assert detail is not None
+    assert detail.startswith("Bad Request: chat not found ")
+    assert "PRIVATE-BOT-TOKEN" not in detail
+    assert "\n" not in detail and "\x00" not in detail
+    assert len(detail) <= 300
+
+    # A token the host has already rotated is not in the environment to match
+    # on, so the shape is redacted too.
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    rotated = _http_error_with_body(
+        json.dumps({"ok": False, "description": "Unauthorized: bot987:OLD-TOKEN"}).encode()
+    )
+    assert telegram.api_rejection_detail(rotated) == "Unauthorized: [redacted token]"
 
 
 def test_parse_mode_rides_in_the_payload_only_when_asked_for(

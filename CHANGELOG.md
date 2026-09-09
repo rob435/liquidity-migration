@@ -10,6 +10,71 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-09 — Incident id `host-51b05439c4f09794`, 06:46:12 UTC: the fleet's Telegram alert channel is refused with `HTTP 400` on every send, so the mainnet and host watchdogs exit 1 every 30 s and no watchdog page has reached the owner by Telegram since. The engines are untouched. Why the venue refuses is still not established, and that is the repository's fault: Telegram names the cause in the refusal's JSON `description`, and `transport_error` threw it away for every plain `HTTPError`, so the journal reads a bare `HTTP 400` an operator cannot act on. That is the same defect the 2026-09-07 entry fixed for the on-call fire path and never applied to the Telegram path. Fixed: the refusal reason is read back bounded, credential-redacted, and printed. Deploy receipt below. The chat-side cause is the owner's to clear once the next refusal names it.**
+  - The chain. `liquidity-migration-mainnet-liveness` sends its due
+    rolling-loss NOTICE at 06:46:12 and prints `CRITICAL telegram: cannot
+    deliver alerts (HTTP 400)`; `main` returns 1 on a routing failure
+    (`scripts/runtime/check_fleet_liveness.py:1602`), so systemd records
+    `Failed with result 'exit-code'`. A refused send does not save the cooldown
+    state (`:1572`) — correctly, so no page is lost — so the same alert is
+    re-sent and refused every 30 s. `liquidity-migration-host-liveness` reads
+    that failed unit at 06:48:40, pages `CRITICAL watchdog:mainnet: mainnet
+    watchdog last run result is exit-code`, fires this session, and then fails
+    on its own send with the same `HTTP 400`.
+  - Not a mainnet fault. [Diagnose run
+    `34320846180`](https://github.com/rob435/liquidity-migration/actions/runs/34320846180)
+    (06:49:52–06:50:08) reads `systemctl --failed` as exactly two units,
+    `liquidity-migration-host-liveness.service` and
+    `liquidity-migration-mainnet-liveness.service`. The demo watchdog exits 0
+    at 06:49:13 and 06:49:43 on `ok scope=demo warnings-present-no-critical`
+    only because its own alerts are inside cooldown and it attempts no send;
+    the refused chat is the shared alerts route, and demo fails on its next
+    due alert. The last accepted delivery is not established: a send is
+    attempted only when an alert comes due, so the channel may have been dead
+    for hours before 06:46:12.
+  - Nothing is impaired in trading. The same reading has every engine and
+    worker unit active with `NRestarts=0` on `engine_commit=d835b62`; the mexc
+    heartbeat at 06:50:05 reads `may_open=true`, `private_stream_ready=true`,
+    `stream_resets=18`, `strategy_errors=[]`, `entry_blockers=0`. Eighteen
+    resyncs, no `may-open:` page — the `d835b62` split holding, against the
+    seven pages in sixteen resyncs the entry below records.
+  - Cause of the missing reason. Telegram answers a refused `sendMessage` with
+    `{"ok":false,"error_code":400,"description":…}`, and the description is the
+    whole diagnosis: "chat not found" is a wrong or migrated chat id, "bot was
+    kicked from the group chat" is a membership change, "can't parse entities"
+    or "message is too long" would be ours. `transport_error`
+    (`check_fleet_liveness.py:1248`) returned `f"HTTP {code}"` for any error
+    carrying a `.code`, reading nothing.
+  - Fix. `api_rejection_detail` in `liquidity_migration/ops/telegram.py` reads
+    at most 4096 bytes of the refusal, takes `description` alone, redacts the
+    configured bot token and any `bot<id>:<secret>` shape, flattens
+    non-printables to one line and caps it at 300 characters. It returns None —
+    and `transport_error` keeps the bare `HTTP {code}` — whenever the body is
+    not a Bot API refusal carrying a description, so the dead-man and
+    on-call routes are unchanged. The `send_telegram_message` raise contract is
+    untouched: the error type callers catch is still `HTTPError`.
+  - Proof. `test_a_refused_telegram_alert_names_the_venue_reason` runs the
+    mainnet scope against a refusing send and asserts the journal line
+    `CRITICAL telegram: cannot deliver alerts (HTTP 400 (Bad Request: chat not
+    found))`; at the parent commit it fails against the exact production text,
+    `assert '…(HTTP 400 (Bad Request: chat not found))' in '…(HTTP 400)'`.
+    Four bounds cases (oversize, non-JSON, non-string description, no
+    description) hold the bare status, and the telegram unit test covers
+    redaction of a token both in the environment and already rotated out of it.
+    136 liveness and telegram tests pass, and 692 of `tests/scripts`,
+    `tests/ops`, `tests/repo` and `tests/policy` with the same 11 failures the
+    parent commit has in this container (missing rsync, ssh, rclone, numpy,
+    websocket-client). Ruff and mypy clean; no venv or Rust toolchain here, so
+    `scripts/dev.sh check` did not run locally and the change is Python-only.
+  - Still the owner's. The refusal reason itself, once the next send prints it.
+    Its likely home is the alerts chat id in the root-owned realm env under
+    `/etc/liquidity-migration`, which this routine must not read or edit.
+  - Untaken, and the owner's call. A run that fails its send still prints `ok
+    scope=… warnings-present-no-critical` before exiting 1, because that line
+    is derived from the fleet alerts alone and the routing CRITICAL is not one
+    of them. Both lines are true of different things; read together in a
+    journal they contradict, and the next on-call read starts there.
+
 - **2026-09-09 — Incident id `mexc-a361f5d18861421a` fires eight times on a healthy mexc engine, at 00:44:29, ~01:24:29, 01:51:36, 02:11:34, 02:21:45, 02:31:32, 02:41:43 and ~03:21:3x UTC: MEXC's designed 600 s private-stream resync publishes `may_open=false` for the length of its history sweep, and the 30 s watchdog read eight of those windows. Eight false pages in twenty resyncs across two engine generations and two deploys, one on-call session each. The sweep's length is now read off the source rather than guessed — it is one signed request per followed symbol, issued sequentially, so it runs tens of seconds against a 30 s watchdog period, and the catch is close to a coin flip by construction. The current generation paged on five of its seven resyncs and on the last four consecutively, one wake per ten minutes. Nothing was impaired at any point. Fixed: the heartbeat now publishes the operator latch and the private-stream readiness bit as separate fields, and the watchdog pages on a stream that stays unusable past 180 s rather than on a sweep in progress. That fix is deployed as `d835b62` with a healthy receipt. It shipped with its new `private-stream:` reference registered in none of the three places the reference it replaced was in — the table that attaches a unit's journal to a page, the one that holds a realm key across a deploy, and the on-call diagnostic's own heartbeat digest — so a genuinely dead stream would have paged with no journal, re-paged after every deploy, and shown nothing in the only host reading the routine may take. All three are now registered in the repository; the digest half is a workflow file and is already live, but the two `check_fleet_liveness.py` prefixes are still only on `main` — the host runs the `d835b62` watchdog until the next deploy, and no extra funded-fleet restart was spent on them alone because they change nothing until a private stream genuinely stalls. The mechanism is settled on the host: the first resync under the fix, at 03:50:51, was read 12 s in at `stream_resets=1`, `private_stream_ready=false`, `private_stream_unready_ms=7440` and `may_open=true` — the exact sample that paged seven times, now reporting healthy, with no page. The one candidate fix that would move when the engine admits entries is untaken and still the owner's.**
   - Not the incident that id names. `incident_id` is `sha256(scope + the newly
     due alert keys)[:16]` (`scripts/runtime/check_fleet_liveness.py:1170`), so

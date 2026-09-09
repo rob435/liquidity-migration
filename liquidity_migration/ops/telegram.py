@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import json
 import math
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+
+#: Cap on the refusal body read back before it is reported. Telegram's is a
+#: few hundred bytes; anything larger is not the Bot API answering.
+REJECTION_BODY_MAX = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +97,42 @@ def send_telegram_message(
         time.sleep(retry_after)
         with urllib.request.urlopen(request, timeout=cfg.timeout_seconds) as response:
             return 200 <= int(response.status) < 300
+
+
+def api_rejection_detail(error: BaseException, *, config: TelegramConfig | None = None) -> str | None:
+    """The Bot API's own reason for refusing a message, or None when the error
+    is not a Bot API refusal carrying one.
+
+    A refused ``sendMessage`` answers with a JSON ``description`` — "chat not
+    found", "can't parse entities", "message is too long". The status alone
+    does not separate a bad chat id from a bad message, and 400 is the one an
+    operator must act on. The body is bounded and the bot token redacted
+    before this reaches a journal.
+    """
+
+    if not isinstance(error, urllib.error.HTTPError):
+        return None
+    try:
+        with error:
+            body = error.read(REJECTION_BODY_MAX + 1)
+    except (AttributeError, OSError, ValueError):
+        return None
+    if len(body) > REJECTION_BODY_MAX:
+        return None
+    try:
+        payload = json.loads(body)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("description"), str):
+        return None
+    cfg = config or TelegramConfig()
+    token = os.environ.get(cfg.token_env) or ""
+    detail = payload["description"]
+    if token:
+        detail = detail.replace(token, "[redacted]")
+    detail = re.sub(r"bot\d+:[\w-]+", "[redacted token]", detail)
+    detail = " ".join("".join(char if char.isprintable() else " " for char in detail).split())
+    return detail[:300] or None
 
 
 def _rate_limit_retry_seconds(exc: urllib.error.HTTPError, *, cap_seconds: float) -> float | None:
