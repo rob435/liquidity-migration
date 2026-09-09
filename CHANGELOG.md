@@ -97,6 +97,51 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     runs the shipped digest source against the 07:11:03 heartbeat and fails
     `KeyError: 'spool_class_files'` without the change; 106 diagnose and
     liveness tests pass, `ruff check` and mypy clean.
+  - What that reading then said. [Diagnose run
+    `34323854875`](https://github.com/rob435/liquidity-migration/actions/runs/34323854875)
+    at 07:26:58, the first to take it: the mexc worker holds
+    `spool_class_files` `{catchup: 1, current: 8, lifecycle: 161, other: 0}`
+    against caps `{1024, 8, 2048, 1024}` — so the block is the `current`
+    **file** cap exactly, and not bytes, which read 6,168,277 against a
+    369,098,752 soft threshold and a 536,870,912 cap. `spool_files=170`,
+    `spool_bytes=8,176,257`, `replaceable_outputs_coalesced=6517`. The demo
+    worker, up the same 3.5 h, reads `spool_files=1`, `current: 1`,
+    `lifecycle: 0` and 55 coalesces. So the mexc spool is not draining at all:
+    161 undrained `funding_update` files (`store.rs:474` puts that kind in
+    `lifecycle`) have piled up for hours, and the 6,517 coalesces are the
+    worker writing onto paths the engine never retired. The LONG cycle is
+    frozen at 07:04:53 in that same reading, 1393 s.
+  - Where the drain stops, off the source. The engine retires a spool file
+    only after its destination strategy consumes the observation:
+    `identity_eligible` makes an observation ineligible while its destination
+    is blocked (`engine/engine-core/src/signals/mod.rs:87-100`),
+    `update_signal_requests` blocks a destination while
+    `consumer_pending(destination)` holds
+    (`engine/engine-core/src/engine/signal_intake.rs:21-32`), and an
+    observation leaves `signals.observations` only on the destination's own
+    `ConsumeSignalObservation` or `RejectSignalObservation`
+    (`engine/engine-core/src/engine/scheduling.rs:290-337`,
+    `signal_state.rs:706-710`). So a destination whose strategy stops
+    consuming is blocked for good and its class fills; `current` carries
+    `long_feature_batch` beside `carry_feature_batch`, `readiness`,
+    `market_snapshot` and `llm_gate_candidates`, so the LONG lane is refused by
+    a class another destination filled. The engine logs nothing on any of it —
+    its journal holds only the one-per-minute latency counter.
+  - Still not established, and now an engine-side read. Which destination stops
+    consuming on mexc and why. Nothing published says it: the engine heartbeat
+    carries no signal-intake field at all
+    (`engine/engine-core/src/heartbeat.rs:61-163`), and the spool filename is
+    `<sequence>-<sha256>.json` (`signals/spool.rs:233-239`), so the kind and
+    destination are inside the file. The two readings that would settle it are
+    a listing of the worker's spool directory with each file's kind and
+    destination, and a retained-observation count per destination in the engine
+    heartbeat. The first is taken: `64a94cf` adds a read-only listing of
+    `/var/lib/liquidity-migration/signals/<realm>` to the diagnostic — count by
+    kind, and the twelve oldest rows' kind, destination, sequence and
+    availability — which acts from the workflow on the next `mode=diagnose`
+    with no deploy. The second stays untaken and the owner's call: it is a Rust
+    change to the funded engine, so its deploy hands over all three engines
+    including mainnet with four open positions.
   - Also untaken, and the owner's call. The first page, at 07:08:08, read
     `ticker coverage incomplete (160/160 rows, 160/160 topics accepted)` — a
     line that contradicts itself. The counts come from the whole ticker store
