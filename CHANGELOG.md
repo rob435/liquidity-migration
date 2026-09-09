@@ -142,6 +142,52 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     with no deploy. The second stays untaken and the owner's call: it is a Rust
     change to the funded engine, so its deploy hands over all three engines
     including mainnet with four open positions.
+  - Settled, off that listing. [Diagnose run
+    `34324333193`](https://github.com/rob435/liquidity-migration/actions/runs/34324333193)
+    at 07:32 reads `/var/lib/liquidity-migration/signals/mexc` as 172 files:
+    `funding_update` 161, `llm_gate_candidates` 5, `carry_feature_batch` 1,
+    `carry_scorer_catchup` 1, `market_snapshot` 1, `readiness` 1, plus the two
+    named readiness files every realm has. The `current` class arithmetic is
+    exact and needs no inference: `market_snapshot` 1 + `readiness` 1 +
+    `carry_feature_batch` 1 + `llm_gate_candidates` 5 = 8, the cap, with
+    `long_feature_batch` at 0 — so the one current-class writer that still
+    needs a new file is the LONG watermark, and it is the one refused. Demo and
+    mainnet hold two files each, the readiness pair alone; hyperliquid holds
+    none.
+  - The real fault is older than this page, and larger. Every waiting
+    `destination: 0` row dates from last night: `carry_feature_batch` seq 15 at
+    2026-09-08 21:06:57, `market_snapshot` seq 16 at 21:07:00, `readiness` seq
+    17 at 21:07:04, then `funding_update` from 22:05:51 onward, 161 of them.
+    The `destination: 1` rows are this generation's `llm_gate_candidates`, one
+    per hour at 03:41:53, 04:05:53, 05:05:53, 06:05:53 and 07:05:53. So the
+    mexc engine has retired nothing for either destination in over ten hours,
+    across three hand-stops of that engine (21:10, 21:46, 22:09) and every
+    deploy since — the spool is durable and the pile survived all of them. The
+    mexc realm's LONG entries have been enabled over a feed the engine is not
+    consuming. Nothing paged on that for ten hours, because a destination that
+    stops consuming has no alert of its own; today's page is the first symptom,
+    and only because the shared class finally filled.
+  - Why the fifth gate file is the trigger, to the second. The LONG cycle last
+    completed at 07:04:53.362 and the fifth `llm_gate_candidates` became
+    available at 07:05:53.183. That write took `current` from 7 to 8, and every
+    `LongWatermark` after it projects a ninth file into an eight-file class and
+    is refused. The first page followed at 07:08:06, three cadences later.
+  - The contributing repository defect, nameable now. `llm_gate_candidates` is
+    in the `current` class (`store.rs:474`) and is the only current kind absent
+    from the coalescing set (`worker.rs:2892-2898`), so it adds one file per
+    emission where `market_snapshot`, `readiness`, `long_feature_batch` and
+    `carry_feature_batch` are each bounded to one. Four bounded kinds and one
+    unbounded kind share a cap of 8 (`worker.rs:81`), so the class fills by
+    construction once any destination stops consuming, and the lane it starves
+    is whichever one still needs a new file. Three candidate repairs, each with
+    a cost the owner should pick between rather than this routine: coalesce
+    `llm_gate_candidates` like its class-mates, which bounds the class but
+    drops superseded candidate lists; give it its own class and cap, which
+    drops nothing and stops one kind starving another; or leave the classes
+    alone and fix the consumer, which is where the ten-hour fault actually is.
+    All three are Rust changes to the worker, so all three deploy with an
+    engine handover across all three realms, funded mainnet with four open
+    positions included. None is taken here.
   - Also untaken, and the owner's call. The first page, at 07:08:08, read
     `ticker coverage incomplete (160/160 rows, 160/160 topics accepted)` — a
     line that contradicts itself. The counts come from the whole ticker store
