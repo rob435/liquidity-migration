@@ -362,6 +362,7 @@ async fn recovery_once(history_rows: usize) -> Result<u64, Error> {
         group_flush_ms: 250,
         wal_rotate_mb: 0,
         account_view_max_age_ms: 60_000,
+        opening_dispatch_ttl_ms: 10_000,
         max_quote_age_ms: 60_000,
         leverage_authority: LeverageAuthority::Shared,
         signal_spool_path: None,

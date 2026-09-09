@@ -179,6 +179,7 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
         // directory fsync into one unlucky sample.
         wal_rotate_mb: 0,
         account_view_max_age_ms: 60_000,
+        opening_dispatch_ttl_ms: 10_000,
         // Wide, so a long low-rate bench never has its later orders refused
         // against the stamps of its own generated quotes.
         max_quote_age_ms: 600_000,

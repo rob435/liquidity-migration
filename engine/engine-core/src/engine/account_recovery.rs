@@ -306,7 +306,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     )?;
                 }
                 Some(Err(error)) => {
-                    self.may_open = false;
+                    self.latch_closed();
                     record_latch(
                         &mut self.wal,
                         clock::wall_ms(),
@@ -405,7 +405,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         self.recovery.history_generation = None;
                         self.clear_private_stream_ready();
                     } else {
-                        self.may_open = false;
+                        self.latch_closed();
                         record_latch(
                             &mut self.wal,
                             clock::wall_ms(),

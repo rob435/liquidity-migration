@@ -876,6 +876,102 @@ impl BybitGateway {
         self.last_rate_wait_ns = Some(waited);
     }
 
+    /// Every placement path, with the venue task's send permission.
+    /// `None` is a group nothing can refuse locally.
+    async fn send_orders_authorized(
+        &mut self,
+        reqs: &[OrderRequest],
+        authority: Option<(
+            &engine_types::AuthorityEpoch,
+            engine_types::CommandAuthority,
+        )>,
+    ) -> Vec<Result<OrderAck, VenueError>> {
+        // Cleared before any path that can return without reserving, so a
+        // command refused here is never charged the previous one's wait.
+        self.last_rate_wait_ns = None;
+        if reqs.len() > ORDER_CREATES_PER_SECOND {
+            return reqs
+                .iter()
+                .map(|_| {
+                    Err(VenueError::BadRequest(format!(
+                        "Bybit order batch has {} requests; maximum concurrent admission is {ORDER_CREATES_PER_SECOND}",
+                        reqs.len()
+                    )))
+                })
+                .collect();
+        }
+        for req in reqs {
+            if let Err(error) = self.require_one_way(req.symbol).await {
+                return reqs
+                    .iter()
+                    .map(|_| Err(VenueError::BadRequest(error.to_string())))
+                    .collect();
+            }
+        }
+        self.reserve_create_capacity(reqs.len()).await;
+        // The last point at which nothing has been signed. A group whose
+        // permission lapsed while it held the create budget is refused here
+        // instead of sent; the budget it took is released to the window.
+        if let Some(reason) = authority.and_then(|(shared, held)| {
+            engine_types::authority_refusal(shared, held, crate::mono_ns())
+        }) {
+            self.create_limiter
+                .anchor_completion(Instant::now(), reqs.len());
+            return reqs
+                .iter()
+                .map(|_| Err(VenueError::BadRequest(reason.clone())))
+                .collect();
+        }
+        if self.trade.is_some() {
+            let replies = if reqs.len() == 1 {
+                vec![self.send_one(&reqs[0]).await]
+            } else if !trade_batch_preserves_stops(reqs) {
+                let mut replies = Vec::with_capacity(reqs.len());
+                for request in reqs {
+                    replies.push(self.send_one(request).await);
+                }
+                replies
+            } else {
+                self.send_trade_batch(reqs).await
+            };
+            self.create_limiter
+                .anchor_completion(Instant::now(), reqs.len());
+            return replies;
+        }
+        // One-way positions have one position-level Full stop. Preserve each
+        // symbol's submission order so later siblings cannot overtake the stop
+        // state intended by earlier ones, while unrelated symbols still use
+        // independent connections concurrently.
+        let mut chains: HashMap<SymbolId, Vec<(usize, &OrderRequest)>> = HashMap::new();
+        for (index, request) in reqs.iter().enumerate() {
+            chains
+                .entry(request.symbol)
+                .or_default()
+                .push((index, request));
+        }
+        let chains = chains.into_values().map(|chain| async {
+            let mut replies = Vec::with_capacity(chain.len());
+            for (index, request) in chain {
+                let body = self.order_body(request);
+                let reply = match body {
+                    Ok(body) => self.send_one_rest(request, body).await,
+                    Err(error) => Err(error),
+                };
+                replies.push((index, reply));
+            }
+            replies
+        });
+        let mut replies: Vec<_> = futures_util::future::join_all(chains)
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+        self.create_limiter
+            .anchor_completion(Instant::now(), reqs.len());
+        replies.sort_unstable_by_key(|(index, _)| *index);
+        replies.into_iter().map(|(_, reply)| reply).collect()
+    }
+
     async fn inventory_positions(
         &self,
         category: &str,
@@ -1073,77 +1169,21 @@ impl VenueGateway for BybitGateway {
     }
 
     async fn send_orders(&mut self, reqs: &[OrderRequest]) -> Vec<Result<OrderAck, VenueError>> {
-        // Cleared before any path that can return without reserving, so a
-        // command refused here is never charged the previous one's wait.
-        self.last_rate_wait_ns = None;
-        if reqs.len() > ORDER_CREATES_PER_SECOND {
-            return reqs
-                .iter()
-                .map(|_| {
-                    Err(VenueError::BadRequest(format!(
-                        "Bybit order batch has {} requests; maximum concurrent admission is {ORDER_CREATES_PER_SECOND}",
-                        reqs.len()
-                    )))
-                })
-                .collect();
-        }
-        for req in reqs {
-            if let Err(error) = self.require_one_way(req.symbol).await {
-                return reqs
-                    .iter()
-                    .map(|_| Err(VenueError::BadRequest(error.to_string())))
-                    .collect();
-            }
-        }
-        self.reserve_create_capacity(reqs.len()).await;
-        if self.trade.is_some() {
-            let replies = if reqs.len() == 1 {
-                vec![self.send_one(&reqs[0]).await]
-            } else if !trade_batch_preserves_stops(reqs) {
-                let mut replies = Vec::with_capacity(reqs.len());
-                for request in reqs {
-                    replies.push(self.send_one(request).await);
-                }
-                replies
-            } else {
-                self.send_trade_batch(reqs).await
-            };
-            self.create_limiter
-                .anchor_completion(Instant::now(), reqs.len());
-            return replies;
-        }
-        // One-way positions have one position-level Full stop. Preserve each
-        // symbol's submission order so later siblings cannot overtake the stop
-        // state intended by earlier ones, while unrelated symbols still use
-        // independent connections concurrently.
-        let mut chains: HashMap<SymbolId, Vec<(usize, &OrderRequest)>> = HashMap::new();
-        for (index, request) in reqs.iter().enumerate() {
-            chains
-                .entry(request.symbol)
-                .or_default()
-                .push((index, request));
-        }
-        let chains = chains.into_values().map(|chain| async {
-            let mut replies = Vec::with_capacity(chain.len());
-            for (index, request) in chain {
-                let body = self.order_body(request);
-                let reply = match body {
-                    Ok(body) => self.send_one_rest(request, body).await,
-                    Err(error) => Err(error),
-                };
-                replies.push((index, reply));
-            }
-            replies
-        });
-        let mut replies: Vec<_> = futures_util::future::join_all(chains)
-            .await
-            .into_iter()
-            .flatten()
-            .collect();
-        self.create_limiter
-            .anchor_completion(Instant::now(), reqs.len());
-        replies.sort_unstable_by_key(|(index, _)| *index);
-        replies.into_iter().map(|(_, reply)| reply).collect()
+        self.send_orders_authorized(reqs, None).await
+    }
+
+    /// Placements the venue task queued under an authority that may have
+    /// lapsed while this adapter held them back for the per-second create
+    /// budget. Re-read after the reservation and before anything is signed.
+    async fn send_orders_under(
+        &mut self,
+        reqs: &[OrderRequest],
+        authority: Option<(
+            &engine_types::AuthorityEpoch,
+            engine_types::CommandAuthority,
+        )>,
+    ) -> Vec<Result<OrderAck, VenueError>> {
+        self.send_orders_authorized(reqs, authority).await
     }
 
     async fn cancel_order(

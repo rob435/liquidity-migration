@@ -210,9 +210,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if self.dispatches.orders.contains_key(&id) {
             match &result {
                 Ok(lookup) => self.apply_order_lookup(&id, lookup.clone()).await?,
-                Err(error) => {
-                    self.dispatches.unresolved.insert(id.clone(), error.clone());
-                }
+                Err(error) => note_unresolved(
+                    &mut self.dispatches,
+                    &self.authority,
+                    id.clone(),
+                    error.clone(),
+                ),
             }
         }
         if self.working.waiting_to_cross(&id) {
@@ -240,7 +243,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 let known = order.filled_exact().map_err(EngineError::State)?;
                 if row.filled_qty.value != known {
                     self.recovery.history_requested = true;
-                    self.dispatches.unresolved.insert(
+                    note_unresolved(
+                        &mut self.dispatches,
+                        &self.authority,
                         id.into(),
                         "passive cancel fill total differs from recovered executions".into(),
                     );
@@ -280,7 +285,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             task: EngineTask::DispatchDurability,
             detail: "",
         })??;
-        for owner in std::mem::take(&mut self.dispatches.strategy_runtime_retirements) {
+        let retirements = std::mem::take(&mut self.dispatches.strategy_runtime_retirements);
+        if !retirements.is_empty() {
+            // The reducer that decided a queued opening is gone.
+            self.supersede_openings();
+        }
+        for owner in retirements {
             self.host.callbacks.state.forget_process(owner);
         }
         self.ledger.record(
@@ -330,7 +340,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 }
                 if !requests.is_empty() {
                     let queued_ns = clock::now_ns();
-                    let command_id = self.venue.dispatch_orders(requests.clone())?;
+                    // Only a group that adds exposure can be refused at the
+                    // send boundary; an all-reducing group carries no
+                    // authority, so nothing can stop it reaching the venue.
+                    let authority = (crate::venue_runtime::send_class(&requests)
+                        == crate::venue_runtime::DispatchClass::Opening)
+                        .then(|| self.mint_authority());
+                    let command_id = self.venue.dispatch_orders(requests.clone(), authority)?;
                     self.mark_symbols_busy(requests.iter().map(|request| request.symbol));
                     self.pending_mutations.insert(
                         command_id,
@@ -338,6 +354,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             requests,
                             timings,
                             queued_ns,
+                            authority,
                         },
                     );
                     // The venue actor shares this executor; start I/O before route maintenance.
@@ -654,14 +671,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .await;
                     match status {
                         Ok(Ok(lookup)) => self.apply_order_lookup(&id, lookup).await?,
-                        Ok(Err(error)) => {
-                            self.dispatches.unresolved.insert(id, error.to_string());
-                        }
-                        Err(_) => {
-                            self.dispatches
-                                .unresolved
-                                .insert(id, "order lookup timed out".into());
-                        }
+                        Ok(Err(error)) => note_unresolved(
+                            &mut self.dispatches,
+                            &self.authority,
+                            id,
+                            error.to_string(),
+                        ),
+                        Err(_) => note_unresolved(
+                            &mut self.dispatches,
+                            &self.authority,
+                            id,
+                            "order lookup timed out".into(),
+                        ),
                     }
                 }
             }
@@ -709,7 +730,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     || (order.request.exact_terms.is_some() && row.filled_qty.value != known)
                 {
                     self.recovery.history_requested = true;
-                    self.dispatches.unresolved.insert(
+                    note_unresolved(
+                        &mut self.dispatches,
+                        &self.authority,
                         id.into(),
                         "terminal fill total disagrees with durable execution history".into(),
                     );
@@ -732,31 +755,37 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.complete_order_dispatch(id)?;
             }
             OrderLookup::NeverAccepted => {
-                let mut queued = order;
-                queued.phase = OrderDispatchPhase::Queued;
-                self.wal.append(&WalRecord::OrderDispatchQueued {
-                    order: queued.state.clone(),
-                })?;
-                self.dispatches.orders.insert(id.into(), queued);
+                // Only an attempt can be taken back. The log's reader accepts
+                // a queued record only over an attempted one, so a second
+                // "never accepted" for an order already back in the queue
+                // must restate nothing — it would make the log unreadable.
+                if order.phase == OrderDispatchPhase::Attempted {
+                    let mut queued = order;
+                    queued.phase = OrderDispatchPhase::Queued;
+                    self.wal.append(&WalRecord::OrderDispatchQueued {
+                        order: queued.state.clone(),
+                    })?;
+                    self.dispatches.orders.insert(id.into(), queued);
+                }
                 self.dispatches.unresolved.remove(id);
                 // A later recovery pass dispatches only a still-valid reduction;
                 // opening decisions require a fresh callback after restart.
             }
             OrderLookup::Unknown { reason } => {
-                self.dispatches.unresolved.insert(id.into(), reason);
+                note_unresolved(&mut self.dispatches, &self.authority, id.into(), reason)
             }
-            OrderLookup::Unavailable => {
-                self.dispatches.unresolved.insert(
-                    id.into(),
-                    "venue cannot authoritatively look up this client order ID".into(),
-                );
-            }
-            _ => {
-                self.dispatches.unresolved.insert(
-                    id.into(),
-                    "venue order lookup returned another order identity".into(),
-                );
-            }
+            OrderLookup::Unavailable => note_unresolved(
+                &mut self.dispatches,
+                &self.authority,
+                id.into(),
+                "venue cannot authoritatively look up this client order ID".into(),
+            ),
+            _ => note_unresolved(
+                &mut self.dispatches,
+                &self.authority,
+                id.into(),
+                "venue order lookup returned another order identity".into(),
+            ),
         }
         Ok(())
     }
@@ -1565,3 +1594,6 @@ mod replay_timing_tests;
 
 #[cfg(test)]
 mod leverage_tests;
+
+#[cfg(test)]
+mod authority_tests;

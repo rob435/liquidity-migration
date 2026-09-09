@@ -1315,3 +1315,62 @@ async fn independent_account_recovery_uses_requested_ids_and_preserves_protectio
     // The two reads go out together rather than one after the other.
     assert_eq!(server.connections(), 2);
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_superseded_opening_is_refused_after_the_create_budget_and_never_signed() {
+    use engine_types::{AuthorityEpoch, CommandAuthority};
+
+    let server = TestServer::start(|request, prior| {
+        assert_eq!(request.path, "/v5/order/create");
+        ok(&format!(r#"{{"orderId":"ord-{prior}"}}"#))
+    })
+    .await;
+    let mut gw = gateway(&server);
+
+    let epoch = AuthorityEpoch::new();
+    let superseded = CommandAuthority {
+        epoch: epoch.current(),
+        queued_ns: 0,
+        expires_at_ns: u64::MAX,
+    };
+    epoch.advance();
+    let replies = gw
+        .send_orders_under(&[market_order()], Some((&epoch, superseded)))
+        .await;
+    assert!(
+        matches!(&replies[0], Err(VenueError::BadRequest(reason))
+            if reason == "authority: epoch 1 superseded by 2"),
+        "{replies:?}"
+    );
+
+    let expired = CommandAuthority {
+        epoch: epoch.current(),
+        queued_ns: 0,
+        expires_at_ns: 1,
+    };
+    let replies = gw
+        .send_orders_under(&[market_order()], Some((&epoch, expired)))
+        .await;
+    assert!(
+        matches!(&replies[0], Err(VenueError::BadRequest(reason))
+            if reason.starts_with("authority: expired after ")),
+        "{replies:?}"
+    );
+    assert!(
+        server.to_path("/v5/order/create").is_empty(),
+        "a refused opening was signed and sent"
+    );
+
+    // The positive control: nothing but the authority stopped those two.
+    let live = CommandAuthority {
+        epoch: epoch.current(),
+        queued_ns: 0,
+        expires_at_ns: u64::MAX,
+    };
+    gw.send_orders_under(&[market_order()], Some((&epoch, live)))
+        .await
+        .pop()
+        .unwrap()
+        .expect("a live authority was refused locally");
+    assert_eq!(server.to_path("/v5/order/create").len(), 1);
+}

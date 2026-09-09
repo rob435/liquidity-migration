@@ -19,6 +19,17 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.risk.observe_closed_trade(row);
             }
         }
+        // A closed round trip is the only thing that can trip the window;
+        // ageing it only ever lets it go. An opening already queued behind
+        // the trip must not be sent under the permission it lost.
+        let tripped = self
+            .risk
+            .rolling_loss()
+            .is_some_and(|window| window.tripped);
+        if tripped && !self.rolling_loss_tripped {
+            self.supersede_openings();
+        }
+        self.rolling_loss_tripped = tripped;
         if let Some(trades) = self.trades.as_mut() {
             trades.write(&closed);
         }

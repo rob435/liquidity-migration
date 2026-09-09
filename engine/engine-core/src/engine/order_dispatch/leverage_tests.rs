@@ -14,7 +14,8 @@ struct Fixture {
 async fn prepare() -> Fixture {
     let (mut engine, records) = super::tests::fixture().await;
     let (venue, control) = crate::tests::controlled_leverage_venue();
-    (engine.venue, engine.venue_completions) = crate::venue_runtime::VenueClient::spawn(venue);
+    (engine.venue, engine.venue_completions) =
+        crate::venue_runtime::VenueClient::spawn(venue, engine.authority.clone());
     engine.books.market.apply(&MarketEvent::Quote {
         symbol: SymbolId(0),
         quote: engine_types::Quote {

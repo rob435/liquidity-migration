@@ -354,7 +354,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
         if !batch.foreign.is_empty() {
             batch.untrusted = true;
-            self.may_open = false;
+            self.latch_closed();
             record_latch(&mut self.wal, now_ms, std::mem::take(&mut batch.foreign))?;
         }
         if batch.resume.is_some() || !batch.rows.is_empty() {

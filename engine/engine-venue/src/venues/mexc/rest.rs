@@ -235,6 +235,22 @@ impl RestClient {
     /// Signed POST. The signature covers the exact body bytes sent — the
     /// serialized string, not a re-serialization of the value.
     pub(crate) async fn post_signed(&self, path: &str, body: &Value) -> Result<Value, VenueError> {
+        self.post_signed_under(path, body, None).await
+    }
+
+    /// The same, with the caller's authority re-read after the local quota
+    /// wait. That wait is where a queued opening goes stale, and nothing is
+    /// signed until after the second reading, so a refusal here is a request
+    /// that never reached MEXC.
+    pub(crate) async fn post_signed_under(
+        &self,
+        path: &str,
+        body: &Value,
+        authority: Option<(
+            &engine_types::AuthorityEpoch,
+            engine_types::CommandAuthority,
+        )>,
+    ) -> Result<Value, VenueError> {
         let (class, group) = if path.starts_with("/api/v1/private/stoporder/") {
             (OperationClass::Protection, QuotaGroup::StopWrite)
         } else if path == "/api/v1/private/order/cancel_with_external"
@@ -250,6 +266,11 @@ impl RestClient {
         let body =
             serde_json::to_string(body).map_err(|e| VenueError::BadRequest(e.to_string()))?;
         self.admit(class, group).await;
+        if let Some((shared, held)) = authority {
+            if let Some(reason) = engine_types::authority_refusal(shared, held, crate::mono_ns()) {
+                return Err(VenueError::BadRequest(reason));
+            }
+        }
         let ts = wall_ms();
         let sign = rest_signature(self.creds.secret(), self.creds.key(), ts, &body);
         self.http

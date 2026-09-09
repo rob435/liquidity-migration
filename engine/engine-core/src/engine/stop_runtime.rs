@@ -525,7 +525,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         && p.stop_px > 0.0
                 });
                 if !protected {
-                    self.may_open = false;
+                    self.latch_closed();
                     self.portfolio_dirty = true;
                     record_latch(&mut self.wal, clock::wall_ms(), vec![finding])?;
                     if let Some(terms) = stop.exact {
@@ -713,7 +713,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
         }
         if !failures.is_empty() {
-            self.may_open = false;
+            self.latch_closed();
             self.portfolio_dirty = true;
             record_latch(&mut self.wal, clock::wall_ms(), failures)?;
         }

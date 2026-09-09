@@ -137,6 +137,24 @@ pub(crate) fn record_latch<W: Wal>(
     })
 }
 
+/// Record a dispatch the venue never stated the outcome of.
+///
+/// The first such dispatch stops the engine opening, so an opening already
+/// queued in the venue task loses the permission it was admitted under and is
+/// refused at the send boundary rather than sent. Free-standing because the
+/// callers hold other fields of the engine while they say this.
+pub(crate) fn note_unresolved(
+    dispatches: &mut crate::order_dispatch::OrderDispatches,
+    authority: &engine_types::AuthorityEpoch,
+    client_order_id: String,
+    reason: String,
+) {
+    if dispatches.unresolved.is_empty() {
+        authority.advance();
+    }
+    dispatches.unresolved.insert(client_order_id, reason);
+}
+
 /// How long the loop stands off a feed that erred without closing.
 const HICCUP_PAUSE: Duration = Duration::from_millis(1);
 
@@ -352,6 +370,7 @@ enum PendingMutation {
         requests: Vec<OrderRequest>,
         timings: Vec<Option<crate::ctx::CallbackTiming>>,
         queued_ns: u64,
+        authority: Option<engine_types::CommandAuthority>,
     },
     Cancels {
         requests: Vec<(SymbolId, String)>,
@@ -569,6 +588,19 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// recovery succeed. Unlike `may_open`, a healthy reconnect may restore
     /// it without operator action.
     private_stream_ready: bool,
+    /// What every opening queued right now is authorized by. Advanced the
+    /// moment an engine-wide or per-strategy permission an opening was
+    /// admitted under goes away, which is how a command still waiting in the
+    /// venue queue is refused instead of sent. The venue task and the paced
+    /// adapters read the same counter.
+    authority: engine_types::AuthorityEpoch,
+    /// How long an opening may wait in the venue queue before it is refused
+    /// unsent. From `engine.opening_dispatch_ttl_ms`. Exits, cancels and
+    /// stops never expire.
+    opening_dispatch_ttl_ns: u64,
+    /// What the risk kernel's rolling-loss window last reported, so its trip
+    /// is seen once rather than polled.
+    rolling_loss_tripped: bool,
     /// Monotonic stamp of the transition into unready, `None` while ready.
     /// It is what separates a venue's paced re-read, which clears readiness
     /// and restores it within one sweep, from a private stream that never
@@ -1332,9 +1364,39 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// stamp: a stream that resets again before it recovers has not started
     /// a fresh outage, and the age must keep running against the first loss.
     fn clear_private_stream_ready(&mut self) {
+        if self.private_stream_ready {
+            self.supersede_openings();
+        }
         self.private_stream_ready = false;
         self.private_stream_unready_since_ns
             .get_or_insert_with(clock::now_ns);
+    }
+
+    /// Retire every opening still waiting in the venue queue: the permission
+    /// it was admitted under has gone away, and a cancel after the fact is
+    /// not the same thing as never sending it.
+    fn supersede_openings(&mut self) -> u64 {
+        self.authority.advance()
+    }
+
+    /// The authority a command queued now carries.
+    fn mint_authority(&self) -> engine_types::CommandAuthority {
+        let queued_ns = clock::now_ns();
+        engine_types::CommandAuthority {
+            epoch: self.authority.current(),
+            queued_ns,
+            expires_at_ns: queued_ns.saturating_add(self.opening_dispatch_ttl_ns),
+        }
+    }
+
+    /// Boot's comparison against the venue, or a live control, says this
+    /// engine may no longer add exposure. The latch is written into the log
+    /// by the caller; what happens here is the queued openings.
+    fn latch_closed(&mut self) {
+        if self.may_open {
+            self.supersede_openings();
+        }
+        self.may_open = false;
     }
 
     fn restore_private_stream_ready(&mut self) {

@@ -32,7 +32,7 @@ use crate::testpath::temp_path;
 // ------------------------------------------------------------------ the tape
 
 #[derive(Clone, Debug, PartialEq)]
-enum Step {
+pub(crate) enum Step {
     Append(String),
     Barrier,
     Flush,
@@ -44,7 +44,7 @@ enum Step {
     PrivateUpdate,
 }
 
-type Tape = Rc<RefCell<Vec<Step>>>;
+pub(crate) type Tape = Rc<RefCell<Vec<Step>>>;
 
 fn tape() -> Tape {
     Rc::new(RefCell::new(Vec::new()))
@@ -1420,6 +1420,7 @@ fn settings() -> EngineSection {
         group_flush_ms: 250,
         wal_rotate_mb: 256,
         account_view_max_age_ms: 60_000,
+        opening_dispatch_ttl_ms: 10_000,
         // Wide enough that no scripted quote in these tests ever counts as
         // stale; the staleness tests tighten it themselves.
         max_quote_age_ms: 60_000,
@@ -1963,6 +1964,7 @@ mod strategy_checkpoints;
 mod strategy_events;
 mod update_contract;
 mod venue_boundary;
+mod venue_priority;
 mod worked_entries;
 
 pub(crate) async fn lifecycle_test_fixture(
@@ -1989,6 +1991,8 @@ pub(crate) struct LeverageControl {
     pub release: Arc<tokio::sync::Notify>,
     pub calls: Arc<Mutex<Vec<(SymbolId, f64)>>>,
     pub sends: Arc<Mutex<Vec<OrderRequest>>>,
+    /// Every venue call in order, so a test can assert what went first.
+    pub tape: Tape,
 }
 
 pub(crate) fn controlled_leverage_venue() -> (MockVenue, LeverageControl) {
@@ -1996,14 +2000,28 @@ pub(crate) fn controlled_leverage_venue() -> (MockVenue, LeverageControl) {
     let release = Arc::new(tokio::sync::Notify::new());
     venue.leverage_release = Some(release.clone());
     let calls = venue.leverages.clone();
+    let tape = venue.tape.clone();
     (
         venue,
         LeverageControl {
             release,
             calls,
             sends,
+            tape,
         },
     )
+}
+
+/// A venue whose placements park inside the gateway for `delay`. Under paused
+/// time the venue task stays there until the test itself awaits, which is how
+/// a test queues work behind a send that is already on the wire.
+pub(crate) fn delayed_send_venue(
+    delay: Duration,
+) -> (MockVenue, Arc<Mutex<Vec<OrderRequest>>>, Tape) {
+    let (mut venue, sends) = MockVenue::new(tape(), &["BTCUSDT"]);
+    venue.send_delay = delay;
+    let tape = venue.tape.clone();
+    (venue, sends, tape)
 }
 
 pub(crate) async fn callback_cancellation_fixture(
@@ -2034,7 +2052,8 @@ async fn a_stalled_order_lookup_cannot_hold_a_cancel_or_a_reduction() {
     let (mut venue, sends) = MockVenue::new(tape(), &["BTCUSDT"]);
     let started = Arc::new(tokio::sync::Notify::new());
     venue.lookup_started = Some(started.clone());
-    let (mut client, mut completions) = crate::venue_runtime::VenueClient::spawn(venue);
+    let (mut client, mut completions) =
+        crate::venue_runtime::VenueClient::spawn(venue, engine_types::AuthorityEpoch::new());
     let lookup = client
         .dispatch_order_status("BTCUSDT", "ambiguous-order")
         .unwrap();
@@ -2052,19 +2071,22 @@ async fn a_stalled_order_lookup_cannot_hold_a_cancel_or_a_reduction() {
         matches!(cancellation, crate::venue_runtime::MutationCompletion::Cancels { replies, .. } if replies.len() == 1 && replies[0].is_ok())
     );
     client
-        .dispatch_orders(vec![OrderRequest {
-            client_order_id: "protective-reduction".into(),
-            strategy: StrategyId(0),
-            symbol: SymbolId(0),
-            side: Side::Sell,
-            qty: 0.1,
-            kind: OrderKind::Market,
-            stop: None,
-            reduce_only: true,
-            close_position: false,
-            sleeve_effect: None,
-            exact_terms: None,
-        }])
+        .dispatch_orders(
+            vec![OrderRequest {
+                client_order_id: "protective-reduction".into(),
+                strategy: StrategyId(0),
+                symbol: SymbolId(0),
+                side: Side::Sell,
+                qty: 0.1,
+                kind: OrderKind::Market,
+                stop: None,
+                reduce_only: true,
+                close_position: false,
+                sleeve_effect: None,
+                exact_terms: None,
+            }],
+            None,
+        )
         .unwrap();
     let reduction = tokio::time::timeout(Duration::from_millis(100), completions.recv())
         .await

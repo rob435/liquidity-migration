@@ -164,7 +164,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if !self.books.orders.orders.contains_key(id) {
             return Ok(());
         }
-        let Some(limits) = &self.execution_limits else {
+        let Some(limits) = self.execution_limits.clone() else {
             return Ok(());
         };
         let now = clock::now_ns();
@@ -178,7 +178,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if !self.may_open || self.recent_rejections.len() < limits.reject_limit {
             return Ok(());
         }
-        self.may_open = false;
+        self.latch_closed();
         self.portfolio_dirty = true;
         record_latch(
             &mut self.wal,

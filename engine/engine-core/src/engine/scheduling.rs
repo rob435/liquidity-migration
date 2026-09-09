@@ -119,9 +119,15 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.runtime_control_requests.push(request.clone());
         match request.command {
             engine_types::RuntimeControlCommand::SetEntriesEnabled { entries_enabled } => {
-                self.host
+                let was = self
+                    .host
                     .entries_enabled
                     .insert(request.strategy, entries_enabled);
+                // An entry this sleeve decided a moment ago must not go out
+                // under the permission the operator has just withdrawn.
+                if !entries_enabled && was != Some(false) {
+                    self.supersede_openings();
+                }
                 self.feed_one_strategy(
                     request.strategy,
                     &EngineEvent::EntryPermission {

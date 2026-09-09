@@ -218,6 +218,9 @@ pub struct StrategyHost {
     pub events: BTreeMap<(StrategyId, String), StrategyEvent>,
     /// The newest durable runtime entry override per strategy.
     pub entries_enabled: BTreeMap<StrategyId, bool>,
+    /// The engine's opening authority, so a strategy that faults here retires
+    /// the openings it decided that are still waiting in the venue queue.
+    pub authority: engine_types::AuthorityEpoch,
 }
 
 impl StrategyHost {
@@ -282,6 +285,9 @@ impl StrategyHost {
             error,
             "strategy faulted; cancelling its open orders"
         );
+        if !self.callbacks.faults.contains_key(&sid) {
+            self.authority.advance();
+        }
         self.callbacks.faults.insert(sid, error);
         self.timers.restore(sid, &[], 0, 0);
         self.pending.extend(

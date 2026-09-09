@@ -80,6 +80,12 @@ pub struct EngineSection {
     /// way, because the absence of a price is the stalest price there is.
     #[serde(default = "default_max_quote_age_ms")]
     pub max_quote_age_ms: u64,
+    /// How long, in milliseconds, an opening may wait in the venue task's
+    /// queue and the adapter's own quota wait before it is refused unsent
+    /// rather than transmitted against a stale decision. Left out means 10
+    /// seconds. Exits, cancels and stops never expire, whatever this says.
+    #[serde(default = "default_opening_dispatch_ttl_ms")]
+    pub opening_dispatch_ttl_ms: u64,
     /// Who else can change leverage on this account.
     ///
     /// `"shared"` (the default, and the behavior every config before this key
@@ -193,6 +199,10 @@ fn default_max_quote_age_ms() -> u64 {
     30_000
 }
 
+fn default_opening_dispatch_ttl_ms() -> u64 {
+    10_000
+}
+
 /// A config file plus the hash that goes in the log's Boot record.
 #[derive(Clone, Debug)]
 pub struct LoadedConfig {
@@ -270,6 +280,16 @@ symbols = ["BTCUSDT"]
             cfg.engine.max_quote_age_ms, 30_000,
             "a config written before the quote bound existed must still boot, bounded"
         );
+        assert_eq!(
+            cfg.engine.opening_dispatch_ttl_ms, 10_000,
+            "a config written before the send-boundary TTL existed must still boot, bounded"
+        );
+        let named: Config = toml::from_str(&SAMPLE.replace(
+            "account_view_max_age_ms = 4000",
+            "account_view_max_age_ms = 4000\nopening_dispatch_ttl_ms = 250",
+        ))
+        .unwrap();
+        assert_eq!(named.engine.opening_dispatch_ttl_ms, 250);
         assert_eq!(
             cfg.engine.leverage_authority,
             LeverageAuthority::Shared,

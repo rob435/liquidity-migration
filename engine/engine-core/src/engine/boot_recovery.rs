@@ -576,7 +576,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let boot_account_started_ns = account.observed_ns;
         let now = clock::now_ns();
         let recovery_reads = account_recovery::Recovery::new(venue.account_recovery_client());
-        let (venue, venue_completions) = VenueClient::spawn(venue);
+        let authority = engine_types::AuthorityEpoch::new();
+        let rolling_loss_tripped = risk.rolling_loss().is_some_and(|window| window.tripped);
+        let (venue, venue_completions) = VenueClient::spawn(venue, authority.clone());
         let mut engine = Engine {
             refusals: BTreeMap::new(),
             wal,
@@ -603,6 +605,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 global_checkpoints: strategy_global_checkpoints,
                 events: strategy_events,
                 entries_enabled: runtime_entries_enabled,
+                authority: authority.clone(),
             },
             books: Books {
                 portfolio_symbols: instrument_specs.keys().copied().collect(),
@@ -651,6 +654,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             ),
             leverage_at: BTreeMap::new(),
             may_open,
+            authority,
+            opening_dispatch_ttl_ns: settings.opening_dispatch_ttl_ms.saturating_mul(1_000_000),
+            rolling_loss_tripped,
             private_stream_ready: true,
             private_stream_unready_since_ns: None,
             logged_exposure,

@@ -436,48 +436,17 @@ impl MexcGateway {
             } => 1,
         }
     }
-}
 
-#[engine_types::async_trait]
-impl VenueGateway for MexcGateway {
-    fn caps(&self) -> VenueCaps {
-        VenueCaps {
-            // The venue keeps a take-profit/stop-loss record attached to the
-            // position, addressable and movable after the fact. Note what is
-            // NOT proven: MEXC publishes no testnet, so this adapter's stop
-            // path has never run against the venue. `set_stop` states every
-            // undocumented flag explicitly rather than relying on a default.
-            native_position_stop: true,
-            // MEXC has no amend for an ordinary order. The engine does NOT
-            // fall back to cancel-and-replace when told a venue cannot amend —
-            // that is a new order at the back of the queue at a fresh price —
-            // so a resting quote here does not move until it is cancelled.
-            amend_in_place: false,
-            // POST /api/v1/private/position/change_leverage.
-            set_leverage: true,
-            close_position_below_minimum: false,
-        }
-    }
-
-    async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError> {
-        let user_id = self
-            .account_binding
-            .identity_for(self.rest.api_key())?
-            .to_owned();
-        let body = self.rest.get_signed(PATH_ASSETS, &[]).await?;
-        venue_result(&body)?;
-        Ok(AccountIdentity {
-            venue: VENUE_NAME.to_string(),
-            user_id,
-            realm: self.realm.as_str().to_string(),
-        })
-    }
-
-    async fn account_inventory(&mut self) -> Result<AccountInventory, VenueError> {
-        self.account_scan().await
-    }
-
-    async fn send_order(&mut self, req: &OrderRequest) -> Result<OrderAck, VenueError> {
+    /// One placement. `authority` is the venue task's send permission,
+    /// re-read after the local quota wait and before anything is signed.
+    async fn place(
+        &mut self,
+        req: &OrderRequest,
+        authority: Option<(
+            &engine_types::AuthorityEpoch,
+            engine_types::CommandAuthority,
+        )>,
+    ) -> Result<OrderAck, VenueError> {
         let terms = crate::order_wire::terms(req)?;
         let name = self.name_of(req.symbol)?.clone();
         let ceiling = match req.kind {
@@ -563,7 +532,10 @@ impl VenueGateway for MexcGateway {
             })?);
         }
 
-        let reply = self.rest.post_signed(PATH_ORDER_CREATE, &body).await?;
+        let reply = self
+            .rest
+            .post_signed_under(PATH_ORDER_CREATE, &body, authority)
+            .await?;
         let data = venue_result(&reply)?;
         Ok(OrderAck {
             client_order_id: req.client_order_id.clone(),
@@ -571,6 +543,68 @@ impl VenueGateway for MexcGateway {
             sent_ns: 0,
             ack_ns: mono_ns(),
         })
+    }
+}
+
+#[engine_types::async_trait]
+impl VenueGateway for MexcGateway {
+    fn caps(&self) -> VenueCaps {
+        VenueCaps {
+            // The venue keeps a take-profit/stop-loss record attached to the
+            // position, addressable and movable after the fact. Note what is
+            // NOT proven: MEXC publishes no testnet, so this adapter's stop
+            // path has never run against the venue. `set_stop` states every
+            // undocumented flag explicitly rather than relying on a default.
+            native_position_stop: true,
+            // MEXC has no amend for an ordinary order. The engine does NOT
+            // fall back to cancel-and-replace when told a venue cannot amend —
+            // that is a new order at the back of the queue at a fresh price —
+            // so a resting quote here does not move until it is cancelled.
+            amend_in_place: false,
+            // POST /api/v1/private/position/change_leverage.
+            set_leverage: true,
+            close_position_below_minimum: false,
+        }
+    }
+
+    async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError> {
+        let user_id = self
+            .account_binding
+            .identity_for(self.rest.api_key())?
+            .to_owned();
+        let body = self.rest.get_signed(PATH_ASSETS, &[]).await?;
+        venue_result(&body)?;
+        Ok(AccountIdentity {
+            venue: VENUE_NAME.to_string(),
+            user_id,
+            realm: self.realm.as_str().to_string(),
+        })
+    }
+
+    async fn account_inventory(&mut self) -> Result<AccountInventory, VenueError> {
+        self.account_scan().await
+    }
+
+    async fn send_order(&mut self, req: &OrderRequest) -> Result<OrderAck, VenueError> {
+        self.place(req, None).await
+    }
+
+    /// Placements the venue task queued under an authority that may have
+    /// lapsed while this adapter held them back for its own quota. The
+    /// authority is re-read inside the signed POST, after the wait.
+    async fn send_orders_under(
+        &mut self,
+        reqs: &[OrderRequest],
+        authority: Option<(
+            &engine_types::AuthorityEpoch,
+            engine_types::CommandAuthority,
+        )>,
+    ) -> Vec<Result<OrderAck, VenueError>> {
+        let mut replies = Vec::with_capacity(reqs.len());
+        for req in reqs {
+            replies.push(self.place(req, authority).await);
+        }
+        replies
     }
 
     async fn cancel_order(

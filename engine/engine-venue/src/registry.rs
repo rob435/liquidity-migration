@@ -314,6 +314,30 @@ impl VenueGateway for Venue {
         }
     }
 
+    async fn send_orders_under(
+        &mut self,
+        reqs: &[OrderRequest],
+        authority: Option<(
+            &engine_types::AuthorityEpoch,
+            engine_types::CommandAuthority,
+        )>,
+    ) -> Vec<Result<OrderAck, VenueError>> {
+        match self {
+            #[cfg(feature = "bybit")]
+            Venue::Bybit(gw) => gw.send_orders_under(reqs, authority).await,
+            #[cfg(feature = "hyperliquid")]
+            Venue::Hyperliquid(gw) => gw.send_orders_under(reqs, authority).await,
+            #[cfg(feature = "lighter")]
+            Venue::Lighter(gw) => gw.send_orders_under(reqs, authority).await,
+            #[cfg(feature = "mexc")]
+            Venue::Mexc(gw) => gw.send_orders_under(reqs, authority).await,
+            #[cfg(feature = "binance")]
+            Venue::Binance(gw) => gw.send_orders_under(reqs, authority).await,
+            #[cfg(feature = "variational")]
+            Venue::Variational(gw) => gw.send_orders_under(reqs, authority).await,
+        }
+    }
+
     async fn cancel_order(
         &mut self,
         symbol: SymbolId,

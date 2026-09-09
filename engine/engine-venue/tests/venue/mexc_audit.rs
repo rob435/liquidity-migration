@@ -491,3 +491,75 @@ async fn held_position_leverage_names_the_position_and_keeps_the_integer_unchang
         json!({"positionId":"17","leverage":7})
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn an_expired_or_superseded_opening_is_refused_after_quota_admission_and_never_reaches_http()
+{
+    use engine_types::{AuthorityEpoch, CommandAuthority};
+
+    let server = TestServer::start(|request, _| match request.path.as_str() {
+        "/api/v1/contract/detail" => (200, metadata(true)),
+        "/api/v1/private/order/create" => {
+            (200, json!({"success":true,"code":0,"data":"9"}).to_string())
+        }
+        other => panic!("a refused opening reached {other}"),
+    })
+    .await;
+    let mut gateway = gateway(&server);
+    let catalog = gateway
+        .instrument_catalog_client()
+        .unwrap()
+        .fetch()
+        .await
+        .unwrap();
+    gateway.install_instrument_catalog(&catalog).unwrap();
+
+    let epoch = AuthorityEpoch::new();
+    let superseded = CommandAuthority {
+        epoch: epoch.current(),
+        queued_ns: 0,
+        expires_at_ns: u64::MAX,
+    };
+    epoch.advance();
+    let replies = gateway
+        .send_orders_under(&[order(false)], Some((&epoch, superseded)))
+        .await;
+    assert!(
+        matches!(&replies[0], Err(VenueError::BadRequest(reason))
+            if reason == "authority: epoch 1 superseded by 2"),
+        "{replies:?}"
+    );
+
+    let expired = CommandAuthority {
+        epoch: epoch.current(),
+        queued_ns: 0,
+        expires_at_ns: 1,
+    };
+    let replies = gateway
+        .send_orders_under(&[order(false)], Some((&epoch, expired)))
+        .await;
+    assert!(
+        matches!(&replies[0], Err(VenueError::BadRequest(reason))
+            if reason.starts_with("authority: expired after ")),
+        "{replies:?}"
+    );
+
+    assert!(
+        server.to_path("/api/v1/private/order/create").is_empty(),
+        "a refused opening was signed and sent"
+    );
+    // The positive control: the same opening under a live authority is signed
+    // and sent, so the two refusals above were the authority and nothing else.
+    let live = CommandAuthority {
+        epoch: epoch.current(),
+        queued_ns: 0,
+        expires_at_ns: u64::MAX,
+    };
+    gateway
+        .send_orders_under(&[order(false)], Some((&epoch, live)))
+        .await
+        .pop()
+        .unwrap()
+        .expect("a live authority was refused locally");
+    assert_eq!(server.to_path("/api/v1/private/order/create").len(), 1);
+}

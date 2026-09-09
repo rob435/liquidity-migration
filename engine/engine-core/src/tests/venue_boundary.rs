@@ -55,8 +55,10 @@ async fn queued_repricings_reach_bybit_before_any_ack_and_keep_their_results() {
         VenueRealm::Mainnet.credentials_for_test("fixture", "fixture"),
         vec!["BTCUSDT".into()],
     );
-    let (mut client, mut completions) =
-        crate::venue_runtime::VenueClient::spawn(engine_venue::Venue::Bybit(wire));
+    let (mut client, mut completions) = crate::venue_runtime::VenueClient::spawn(
+        engine_venue::Venue::Bybit(wire),
+        engine_types::AuthorityEpoch::new(),
+    );
     let ids: Vec<_> = (0..10)
         .map(|index| {
             client
@@ -68,6 +70,7 @@ async fn queued_repricings_reach_bybit_before_any_ack_and_keep_their_results() {
                         qty: None,
                         exact_terms: None,
                     },
+                    None,
                 )
                 .unwrap()
         })

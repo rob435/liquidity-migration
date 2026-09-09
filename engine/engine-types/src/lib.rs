@@ -11,6 +11,7 @@
 //! own clock (comparable to each other, not to wall time); `*_ms` fields are
 //! venue wall-clock milliseconds.
 
+pub mod authority;
 pub mod clock;
 pub mod execution_allocation;
 pub mod execution_history;
@@ -30,6 +31,7 @@ pub mod strategy_process;
 pub mod wal;
 
 pub use async_trait::async_trait;
+pub use authority::{authority_refusal, AuthorityEpoch, CommandAuthority};
 pub use execution_history::{ExecutionHistory, ExecutionHistoryBuilder};
 pub use ids::{StrategyId, Symbol, SymbolId, SymbolTable, TimerId};
 pub use market::{
@@ -148,6 +150,25 @@ pub trait VenueGateway: Send + 'static {
             out.push(self.send_order(req).await);
         }
         out
+    }
+    /// Place a group whose authority may have lapsed while the adapter held
+    /// it back to stay inside the venue's request quota.
+    ///
+    /// The venue task has already checked the same predicate when it took the
+    /// command; this is the second reading, after the local wait, and it is
+    /// the last point at which nothing has been signed. An adapter that
+    /// refuses here returns one [`VenueError::BadRequest`] per request, which
+    /// is the engine's never-transmitted class.
+    ///
+    /// The default ignores the authority: only an adapter that paces itself
+    /// can hold a command long enough for the answer to change.
+    async fn send_orders_under(
+        &mut self,
+        reqs: &[OrderRequest],
+        authority: Option<(&authority::AuthorityEpoch, authority::CommandAuthority)>,
+    ) -> Vec<Result<OrderAck, VenueError>> {
+        let _ = authority;
+        self.send_orders(reqs).await
     }
     /// Cancel by the engine's own client order id.
     async fn cancel_order(

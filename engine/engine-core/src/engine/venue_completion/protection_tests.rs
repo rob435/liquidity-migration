@@ -102,6 +102,7 @@ async fn filled(
         },
         &mut engine.recovered_exec_ids,
         &mut engine.may_open,
+        &engine.authority,
     )
     .unwrap()
     .unwrap();

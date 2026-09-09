@@ -19,6 +19,7 @@ struct CompletedOrders {
     clocks: CompletionClocks,
     requests: Vec<OrderRequest>,
     timings: Vec<Option<crate::ctx::CallbackTiming>>,
+    authority: Option<engine_types::CommandAuthority>,
     replies: Vec<Result<OrderAck, VenueError>>,
 }
 
@@ -122,6 +123,7 @@ impl CompletedMutation {
                     requests,
                     timings,
                     queued_ns,
+                    authority,
                 },
                 MutationCompletion::Orders {
                     started_ns,
@@ -142,6 +144,7 @@ impl CompletedMutation {
                     clocks,
                     requests,
                     timings,
+                    authority,
                     replies,
                 }))
             }
@@ -376,6 +379,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             clocks,
             requests,
             timings,
+            authority,
             replies,
         } = completed;
         let CompletionClocks {
@@ -391,6 +395,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             command_id,
             queue_ns = started_ns.saturating_sub(queued_ns),
             venue_ns = completed_ns.saturating_sub(started_ns),
+            authority_epoch = authority.map(|held| held.epoch),
             "placement command completed"
         );
         let symbols: Vec<_> = requests.iter().map(|request| request.symbol).collect();
@@ -449,9 +454,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     reason: format!("never sent: {detail}"),
                 }),
                 Err(other) => {
-                    self.dispatches
-                        .unresolved
-                        .insert(request.client_order_id.clone(), other.to_string());
+                    note_unresolved(
+                        &mut self.dispatches,
+                        &self.authority,
+                        request.client_order_id.clone(),
+                        other.to_string(),
+                    );
                     tracing::error!(id = %request.client_order_id, error = %other, "send failed with no answer");
                     self.wal.append(&WalRecord::Note {
                         source: "engine".into(),
@@ -1339,9 +1347,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         self.risk.mark_order_attempted(&client_order_id);
         let queued_ns = clock::now_ns();
-        let command_id =
-            self.venue
-                .dispatch_amend(symbol, client_order_id.clone(), spec.clone())?;
+        let authority = self.mint_authority();
+        let command_id = self.venue.dispatch_amend(
+            symbol,
+            client_order_id.clone(),
+            spec.clone(),
+            Some(authority),
+        )?;
         self.mark_symbols_busy([symbol]);
         self.pending_mutations.insert(
             command_id,
@@ -1427,6 +1439,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             },
             &mut self.recovered_exec_ids,
             &mut self.may_open,
+            &self.authority,
         )?
         else {
             return Ok(());
@@ -1459,7 +1472,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         callback_owners: CallbackOwners<'_>,
         recovered_exec_ids: &mut ExecutionIds,
         may_open: &mut bool,
+        authority: &engine_types::AuthorityEpoch,
     ) -> Result<Option<JournaledUpdate>, EngineError> {
+        // The latch here retires every opening still waiting in the venue
+        // queue, the same as the ones the engine takes on itself.
+        let latch = |may_open: &mut bool| {
+            if *may_open {
+                authority.advance();
+            }
+            *may_open = false;
+        };
         let CallbackOwners {
             names: strategy_names,
             destinations: mut callbacks,
@@ -1470,7 +1492,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 update: update.clone(),
             };
             if let Err(reason) = orders.validate_record_quantities(&record) {
-                *may_open = false;
+                latch(may_open);
                 record_latch(
                     wal,
                     clock::wall_ms(),
@@ -1556,7 +1578,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 if let Some(exec_id) = delivered_exec_id {
                     recovered_exec_ids.insert(exec_id, dedup_seen_ms);
                 }
-                *may_open = false;
+                latch(may_open);
                 tracing::error!(%finding, "untrusted fill left order and risk state unchanged");
                 record_latch(wal, dedup_seen_ms, vec![finding])?;
                 wal.barrier()?;
@@ -1828,7 +1850,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         } = update
         {
             if !owned_fill {
-                self.may_open = false;
+                self.latch_closed();
                 record_latch(
                     &mut self.wal,
                     dedup_seen_ms,

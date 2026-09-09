@@ -398,6 +398,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     self.symbol_admission.installed = true;
                     self.symbol_admission.refresh_required = false;
                     self.symbol_admission.failure = None;
+                    // Ticks, steps and minimums have just been restated. An
+                    // opening still queued was quantized against the old
+                    // table, so it is refused rather than sent.
+                    self.supersede_openings();
                     let names = names_record(&self.host.names, &self.books.market);
                     self.fills.learn(&names);
                 }

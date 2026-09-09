@@ -3,13 +3,45 @@
 use tokio::sync::{mpsc, oneshot};
 
 use engine_types::{
-    AccountIdentity, AccountInventory, AccountView, AmendSpec, InstrumentRule, OrderAck,
-    OrderRequest, Symbol, SymbolId, VenueCaps, VenueError, VenueGateway, VenueMutationTiming,
-    VenueOrder,
+    authority_refusal, AccountIdentity, AccountInventory, AccountView, AmendSpec, AuthorityEpoch,
+    CommandAuthority, InstrumentRule, OrderAck, OrderRequest, Symbol, SymbolId, VenueCaps,
+    VenueError, VenueGateway, VenueMutationTiming, VenueOrder,
 };
 
 const COMMAND_CAPACITY: usize = 4096;
 const COMPLETION_CAPACITY: usize = 4096;
+/// Amends coalesced into one gateway call, as the venue's batch endpoints cap it.
+const MAX_AMEND_BATCH: usize = 10;
+
+/// What a queued mutation is for, and therefore what it may wait behind.
+///
+/// Declaration order is the priority order: risk-off reaches the venue first,
+/// administration last. One mutation is in flight at a time, so this decides
+/// only which of the commands already waiting goes next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DispatchClass {
+    /// Cancels, position stops, and sends whose every request reduces the
+    /// physical position.
+    RiskReducing,
+    Amend,
+    Opening,
+    /// Leverage, symbol admission, and the account reads boot makes.
+    Administration,
+}
+
+/// Which class a group of placements belongs to.
+///
+/// `OrderRequest::reduce_only` is what the planner wrote after deciding the
+/// physical effect, so a virtual sleeve reduction that grows the physical
+/// position reads as an opening here — which is what it is. A batch mixing
+/// openings and reductions is an opening.
+pub fn send_class(requests: &[OrderRequest]) -> DispatchClass {
+    if !requests.is_empty() && requests.iter().all(|request| request.reduce_only) {
+        DispatchClass::RiskReducing
+    } else {
+        DispatchClass::Opening
+    }
+}
 
 #[derive(Debug)]
 pub enum MutationCompletion {
@@ -71,6 +103,11 @@ enum Command {
     SendOrders {
         command_id: u64,
         requests: Vec<OrderRequest>,
+        class: DispatchClass,
+        /// `None` is a command that can never be refused at the send
+        /// boundary. Risk-off must always reach the venue, so the engine
+        /// mints an authority only for a group that opens exposure.
+        authority: Option<CommandAuthority>,
     },
     CancelOrders {
         command_id: u64,
@@ -81,9 +118,11 @@ enum Command {
         symbol: SymbolId,
         client_order_id: String,
         spec: AmendSpec,
+        authority: Option<CommandAuthority>,
     },
     SendOrdersWait {
         requests: Vec<OrderRequest>,
+        class: DispatchClass,
         reply: oneshot::Sender<Vec<Result<OrderAck, VenueError>>>,
     },
     CancelOrdersWait {
@@ -135,7 +174,13 @@ pub struct VenueClient {
 }
 
 impl VenueClient {
-    pub fn spawn<V: VenueGateway>(venue: V) -> (Self, mpsc::Receiver<MutationCompletion>) {
+    /// `authority` is the engine's own epoch; the worker reads the same
+    /// counter the engine advances, so a command it is holding is refused the
+    /// instant the engine loses permission to open.
+    pub fn spawn<V: VenueGateway>(
+        venue: V,
+        authority: AuthorityEpoch,
+    ) -> (Self, mpsc::Receiver<MutationCompletion>) {
         let caps = venue.caps();
         let lookups = venue.order_lookup_client().map(|client| {
             let (send, receive) = mpsc::channel(1);
@@ -144,7 +189,7 @@ impl VenueClient {
         });
         let (command_tx, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (completion_tx, completion_rx) = mpsc::channel(COMPLETION_CAPACITY);
-        tokio::spawn(run(venue, command_rx, completion_tx));
+        tokio::spawn(run(venue, command_rx, completion_tx, authority));
         (
             Self {
                 caps,
@@ -170,11 +215,18 @@ impl VenueClient {
         Ok(command_id)
     }
 
-    pub fn dispatch_orders(&mut self, requests: Vec<OrderRequest>) -> Result<u64, VenueError> {
+    pub fn dispatch_orders(
+        &mut self,
+        requests: Vec<OrderRequest>,
+        authority: Option<CommandAuthority>,
+    ) -> Result<u64, VenueError> {
         let command_id = self.mint_command_id();
+        let class = send_class(&requests);
         self.send(Command::SendOrders {
             command_id,
             requests,
+            class,
+            authority,
         })?;
         Ok(command_id)
     }
@@ -196,6 +248,7 @@ impl VenueClient {
         symbol: SymbolId,
         client_order_id: String,
         spec: AmendSpec,
+        authority: Option<CommandAuthority>,
     ) -> Result<u64, VenueError> {
         let command_id = self.mint_command_id();
         self.send(Command::Amend {
@@ -203,6 +256,7 @@ impl VenueClient {
             symbol,
             client_order_id,
             spec,
+            authority,
         })?;
         Ok(command_id)
     }
@@ -307,8 +361,10 @@ impl VenueGateway for VenueClient {
     async fn send_orders(&mut self, reqs: &[OrderRequest]) -> Vec<Result<OrderAck, VenueError>> {
         let (reply, receive) = oneshot::channel();
         let requests = reqs.to_vec();
+        let class = send_class(&requests);
         if let Err(error) = self.send(Command::SendOrdersWait {
             requests: requests.clone(),
+            class,
             reply,
         }) {
             return requests
@@ -457,20 +513,105 @@ async fn run_lookups(
     }
 }
 
+/// Which class one queued command belongs to.
+fn class_of(command: &Command) -> DispatchClass {
+    match command {
+        Command::SendOrders { class, .. } | Command::SendOrdersWait { class, .. } => *class,
+        Command::CancelOrders { .. }
+        | Command::CancelOrdersWait { .. }
+        | Command::DispatchStop { .. }
+        | Command::SetStop { .. } => DispatchClass::RiskReducing,
+        Command::Amend { .. } | Command::AmendWait { .. } => DispatchClass::Amend,
+        Command::DispatchLeverage { .. }
+        | Command::SetLeverage { .. }
+        | Command::AdmitSymbols { .. }
+        | Command::AccountIdentity(_)
+        | Command::AccountView(_)
+        | Command::WorkingOrders(_)
+        | Command::AccountInventory(_)
+        | Command::Executions { .. } => DispatchClass::Administration,
+    }
+}
+
+/// Whether a cancel or amend names an order whose placement is still waiting
+/// in this ready set. Cancelling an order the venue has not been told about
+/// cannot work, so it waits behind that send — and only behind that send.
+fn depends_on_a_queued_send(command: &Command, ready: &[(u64, Command)]) -> bool {
+    let queued = |id: &str| {
+        ready.iter().any(|(_, other)| match other {
+            Command::SendOrders { requests, .. } | Command::SendOrdersWait { requests, .. } => {
+                requests.iter().any(|request| request.client_order_id == id)
+            }
+            _ => false,
+        })
+    };
+    match command {
+        Command::CancelOrders { requests, .. } | Command::CancelOrdersWait { requests, .. } => {
+            requests.iter().any(|(_, id)| queued(id))
+        }
+        Command::Amend {
+            client_order_id, ..
+        }
+        | Command::AmendWait {
+            client_order_id, ..
+        } => queued(client_order_id),
+        _ => false,
+    }
+}
+
+/// The next command to hand the venue: lowest class, then arrival order,
+/// among those not waiting on a send that is itself still queued.
+///
+/// A send is never blocked, so whenever anything blocks something there is
+/// also something selectable; the second pass exists so no arrangement of the
+/// ready set can leave the worker with nothing to do.
+fn choose(ready: &[(u64, Command)]) -> usize {
+    ready
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, command))| !depends_on_a_queued_send(command, ready))
+        .min_by_key(|(_, (arrival, command))| (class_of(command), *arrival))
+        .or_else(|| {
+            ready
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (arrival, command))| (class_of(command), *arrival))
+        })
+        .map(|(index, _)| index)
+        .unwrap_or_default()
+}
+
 async fn run<V: VenueGateway>(
     mut venue: V,
     mut commands: mpsc::Receiver<Command>,
     completions: mpsc::Sender<MutationCompletion>,
+    epoch: AuthorityEpoch,
 ) {
-    let mut deferred = None;
+    let refusal = |authority: Option<CommandAuthority>| {
+        authority.and_then(|authority| {
+            authority_refusal(&epoch, authority, engine_types::clock::mono_ns())
+        })
+    };
+    let mut ready: Vec<(u64, Command)> = Vec::new();
+    let mut arrival = 0u64;
     loop {
-        let command = match deferred.take() {
-            Some(command) => command,
-            None => match commands.recv().await {
-                Some(command) => command,
+        // Everything already in the channel competes for this turn; only an
+        // empty ready set waits.
+        while let Ok(command) = commands.try_recv() {
+            ready.push((arrival, command));
+            arrival = arrival.wrapping_add(1);
+        }
+        if ready.is_empty() {
+            match commands.recv().await {
+                Some(command) => {
+                    ready.push((arrival, command));
+                    arrival = arrival.wrapping_add(1);
+                    continue;
+                }
                 None => break,
-            },
-        };
+            }
+        }
+        let (_, command) = ready.remove(choose(&ready));
         match command {
             Command::DispatchLeverage {
                 command_id,
@@ -492,9 +633,33 @@ async fn run<V: VenueGateway>(
             Command::SendOrders {
                 command_id,
                 requests,
+                authority,
+                ..
             } => {
+                // The last point at which nothing has been signed. A halt, a
+                // lost stream or a replaced strategy since this was queued
+                // means it is not sent at all; the engine's never-sent path
+                // releases the reservation.
+                if let Some(reason) = refusal(authority) {
+                    let at = engine_types::clock::mono_ns();
+                    let _ = completions
+                        .send(MutationCompletion::Orders {
+                            command_id,
+                            started_ns: at,
+                            completed_ns: at,
+                            rate_wait_ns: None,
+                            replies: requests
+                                .iter()
+                                .map(|_| Err(VenueError::BadRequest(reason.clone())))
+                                .collect(),
+                        })
+                        .await;
+                    continue;
+                }
                 let started_ns = engine_types::clock::mono_ns();
-                let replies = venue.send_orders(&requests).await;
+                let replies = venue
+                    .send_orders_under(&requests, authority.map(|held| (&epoch, held)))
+                    .await;
                 let rate_wait_ns = venue.take_rate_wait_ns();
                 let completed_ns = engine_types::clock::mono_ns();
                 let _ = completions
@@ -532,26 +697,57 @@ async fn run<V: VenueGateway>(
                 symbol,
                 client_order_id,
                 spec,
+                authority,
             } => {
+                if let Some(reason) = refusal(authority) {
+                    let at = engine_types::clock::mono_ns();
+                    let _ = completions
+                        .send(MutationCompletion::Amend {
+                            command_id,
+                            started_ns: at,
+                            completed_ns: at,
+                            timing: None,
+                            rate_wait_ns: None,
+                            reply: Err(VenueError::BadRequest(reason)),
+                        })
+                        .await;
+                    continue;
+                }
                 let mut ids = vec![command_id];
                 let mut requests = vec![(symbol, client_order_id, spec)];
-                while requests.len() < 10 {
-                    match commands.try_recv() {
-                        Ok(Command::Amend {
-                            command_id,
-                            symbol,
-                            client_order_id,
-                            spec,
-                        }) if !requests.iter().any(|(_, id, _)| *id == client_order_id) => {
-                            ids.push(command_id);
-                            requests.push((symbol, client_order_id, spec));
-                        }
-                        Ok(command) => {
-                            deferred = Some(command);
-                            break;
-                        }
-                        Err(_) => break,
+                while requests.len() < MAX_AMEND_BATCH {
+                    let next = ready.iter().position(|(_, waiting)| {
+                        matches!(waiting, Command::Amend { client_order_id, .. }
+                            if !requests.iter().any(|(_, held, _)| held == client_order_id))
+                            && !depends_on_a_queued_send(waiting, &ready)
+                    });
+                    let Some(index) = next else { break };
+                    let Command::Amend {
+                        command_id,
+                        symbol,
+                        client_order_id,
+                        spec,
+                        authority,
+                    } = ready.remove(index).1
+                    else {
+                        unreachable!("the position above matched an amend")
+                    };
+                    if let Some(reason) = refusal(authority) {
+                        let at = engine_types::clock::mono_ns();
+                        let _ = completions
+                            .send(MutationCompletion::Amend {
+                                command_id,
+                                started_ns: at,
+                                completed_ns: at,
+                                timing: None,
+                                rate_wait_ns: None,
+                                reply: Err(VenueError::BadRequest(reason)),
+                            })
+                            .await;
+                        continue;
                     }
+                    ids.push(command_id);
+                    requests.push((symbol, client_order_id, spec));
                 }
                 let started_ns = engine_types::clock::mono_ns();
                 let replies = venue.amend_orders(&requests).await;
@@ -605,7 +801,9 @@ async fn run<V: VenueGateway>(
                     })
                     .await;
             }
-            Command::SendOrdersWait { requests, reply } => {
+            Command::SendOrdersWait {
+                requests, reply, ..
+            } => {
                 let _ = reply.send(venue.send_orders(&requests).await);
             }
             Command::CancelOrdersWait { requests, reply } => {
