@@ -116,6 +116,13 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     `venue_clock_offset_ms` swings from `-831` at 02:22:46 to `-4217` at
     02:32:43, still wide, still unstable, still undiagnosed, and still not this
     page's cause.
+  - Stopping the mexc engine is not the shortcut. `evaluate_units`
+    (`scripts/runtime/check_fleet_liveness.py:196`) pages `CRITICAL
+    unit:liquidity-migration-engine-mexc.service is inactive` for any manifest
+    unit that is not `active`, so a stop trades a page every ten minutes for one
+    every thirty seconds unless `mexc-liveness.timer` is disabled too, which
+    blinds the realm. The realm holding nothing and trading nothing does not
+    make the stop cheap.
   - Impaired: nothing. mexc holds no positions, `orders_sent=0` since the
     23:54:07 start, and its USDT futures wallet reads `equity 0`, so no entry
     could size during the window in any case. The window itself is the engine
