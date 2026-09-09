@@ -159,7 +159,7 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     nothing, the new process blocks again on its first eight `current` files
     and the page returns. The restart is not the fix and is not counted as one.
 
-- **2026-09-09 — Incident id `host-51b05439c4f09794`, 06:46:12 UTC: the fleet's Telegram alert channel is refused with `HTTP 400` on every send, so the mainnet and host watchdogs exit 1 every 30 s and no watchdog page has reached the owner by Telegram since. The engines are untouched. Why the venue refuses is still not established, and that is the repository's fault: Telegram names the cause in the refusal's JSON `description`, and `transport_error` threw it away for every plain `HTTPError`, so the journal reads a bare `HTTP 400` an operator cannot act on. That is the same defect the 2026-09-07 entry fixed for the on-call fire path and never applied to the Telegram path. Fixed: the refusal reason is read back bounded, credential-redacted, and printed. Deploy receipt below. The chat-side cause is the owner's to clear once the next refusal names it.**
+- **2026-09-09 — Incident id `host-51b05439c4f09794`, 06:46:12 UTC: the fleet's Telegram alert channel is refused with `HTTP 400` on every send, so the mainnet and host watchdogs exit 1 every 30 s and no watchdog page has reached the owner by Telegram since. The engines are untouched. Why the venue refuses is now established as `PEER_ID_INVALID` — the configured alerts chat id is not a peer the bot can reach — and that it took this long was the repository's fault: Telegram names the cause in the refusal's JSON `description`, and `transport_error` threw it away for every plain `HTTPError`, so the journal reads a bare `HTTP 400` an operator cannot act on. That is the same defect the 2026-09-07 entry fixed for the on-call fire path and never applied to the Telegram path. Fixed: the refusal reason is read back bounded, credential-redacted, and printed. Deploy receipt below. The refusal now names the cause and the chat-side fix is the owner's.**
   - The chain. `liquidity-migration-mainnet-liveness` sends its due
     rolling-loss NOTICE at 06:46:12 and prints `CRITICAL telegram: cannot
     deliver alerts (HTTP 400)`; `main` returns 1 on a routing failure
@@ -215,9 +215,22 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     parent commit has in this container (missing rsync, ssh, rclone, numpy,
     websocket-client). Ruff and mypy clean; no venv or Rust toolchain here, so
     `scripts/dev.sh check` did not run locally and the change is Python-only.
-  - Still the owner's. The refusal reason itself, once the next send prints it.
-    Its likely home is the alerts chat id in the root-owned realm env under
-    `/etc/liquidity-migration`, which this routine must not read or edit.
+  - The reason, now printed. [Deploy run
+    `34322539866`](https://github.com/rob435/liquidity-migration/actions/runs/34322539866)
+    (dispatched 07:10:38, succeeded 07:28:04) put the fix on the host, and the
+    07:28:28 mexc watchdog run reads `CRITICAL telegram: cannot deliver alerts
+    (HTTP 400 (Bad Request: PEER_ID_INVALID))`. `PEER_ID_INVALID` is Telegram
+    refusing the destination itself, not the message: the configured alerts
+    chat id is not a peer this bot can reach — a wrong or stale id, a chat the
+    bot was removed from, or a supergroup migration that changed the id. It is
+    not a rate limit, not a parse error and nothing about our payload, so no
+    repository change can clear it. The route has been dead since at least
+    06:46:12 and the last accepted delivery is still not established.
+  - Still the owner's, and now actionable. Repointing the alerts chat id. Its
+    home is the root-owned realm env under `/etc/liquidity-migration`, which
+    this routine must not read or edit. Until it is repointed every watchdog
+    page is written to the journal and reaches nobody by Telegram; the on-call
+    fire path is unaffected and is the only route still delivering.
   - Untaken, and the owner's call. A run that fails its send still prints `ok
     scope=… warnings-present-no-critical` before exiting 1, because that line
     is derived from the fleet alerts alone and the routing CRITICAL is not one
