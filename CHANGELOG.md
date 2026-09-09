@@ -11,7 +11,8 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
 - **2026-09-09 — Incident `demo-0922e9f30da3bf98`: the demo worker's CARRY cycle stopped completing at the UTC decision roll for ten minutes, paged CRITICAL, and cleared itself. Root cause open; no code changed.**
-  - Start. The demo signal worker boots at 23:47:52 UTC on `d00e82b2` and its
+  - Start. The demo signal worker boots at 23:47:52 UTC in the `c6adead4`
+    handover (deploy [run `34291380453`](https://github.com/rob435/liquidity-migration/actions/runs/34291380453)) and its
     last CARRY cycle completes at 00:00:56.980 UTC, four seconds after the
     daily decision boundary. Nothing completes for the next ten minutes. The
     demo liveness watchdog pages `CRITICAL
