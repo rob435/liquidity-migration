@@ -200,6 +200,7 @@ def build_metrics(report: dict[str, Any], trades: list[dict[str, Any]], equity: 
     return_frac = net_change / capital if capital > 0 else None
     return {
         "span_days": span_days,
+        "evidence": evidence_qualification(report),
         "market_events": report["market_events"],
         "orders_sent": report["orders_sent"],
         "reconciliation": report["reconciliation"],
@@ -212,6 +213,31 @@ def build_metrics(report: dict[str, Any], trades: list[dict[str, Any]], equity: 
         # the number is withheld rather than printed.
         "annualised_return_frac": (return_frac * 365.0 / span_days) if return_frac is not None and span_days >= 1.0 else None,
         "tape": report["tape"],
+    }
+
+
+def evidence_qualification(report: dict[str, Any]) -> dict[str, Any]:
+    """Whether the venue's economics can grade a strategy at all.
+
+    A stop or liquidation fill priced at the mark because the book side was
+    empty (`fills_without_book`) is the simulator inventing a price, and a
+    reconciliation that disagrees means the two ledgers do not describe one
+    account. Either makes the run a diagnostic, not evidence; it is reported,
+    never silently folded into net.
+    """
+    venue = report["venue"]
+    forced = int(venue.get("fills_without_book", 0))
+    agrees = report["reconciliation"].get("agrees")
+    reasons: list[str] = []
+    if forced > 0:
+        reasons.append(f"{forced} stop/liquidation fill(s) priced at the mark with no book side to walk")
+    if agrees is False:
+        reasons.append("engine and venue closed-trip ledgers disagree")
+    return {
+        "unqualified_forced_fills": forced,
+        "reconciliation_agrees": agrees,
+        "economics_qualified": not reasons,
+        "reasons": reasons,
     }
 
 
@@ -236,6 +262,9 @@ def print_summary(m: dict[str, Any]) -> None:
         f"max drawdown {fmt(e['max_drawdown_frac'])}; sharpe {fmt(e['sharpe_daily_annualised'], 2)}" + (f" ({e['sharpe_note']})" if e["sharpe_note"] else ""),
         f"reconciliation: engine {fmt(r['engine_closed_net_usdt'], 6)} vs venue {fmt(r['venue_closed_net_usdt'], 6)}; agrees {fmt(r['agrees'])}",
     ]
+    q = m["evidence"]
+    if not q["economics_qualified"]:
+        lines.append("UNQUALIFIED economics: " + "; ".join(q["reasons"]) + " — this run is a diagnostic, not strategy evidence")
     print("\n".join(lines))
 
 

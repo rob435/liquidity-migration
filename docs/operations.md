@@ -36,7 +36,7 @@ Entry-point wrapper for all operational workflows. Prefix `liquidity-migration-`
 | **MEXC preflight** | `scripts/ops.sh real-money preflight-mexc` | Read-only | Validates the MEXC credential file, its arming switch, and the mexc worker source. |
 | **Hyperliquid preflight** | `scripts/ops.sh real-money preflight-hyperliquid` | Read-only | Validates the Hyperliquid credential file (address shape, API wallet key shape, no other venue's keys), its arming switch, and the hyperliquid worker source. |
 | **Verify Identity** | `scripts/ops.sh verify-account-identity --environment <demo\|mainnet\|mexc\|hyperliquid>` | Read-only | Authenticates the realm's GET-only probe and binds it to `EXPECTED_ENGINE_ACCOUNT_USER_ID`; a mismatch prints the id the credentials answered as. |
-| **Canary Order** | `scripts/ops.sh canary-order --environment <demo\|mexc\|hyperliquid> --symbol SYMBOL --expected-user-id ID [--execute]` | Mutating with `--execute` | One bounded live order lifecycle through the realm's own credential file: one venue-minimum post-only order 0.5% under the bid, cancelled, the account proved clean twice. The engine accepts it on the Bybit demo and on `live-canary` realms only; `hyperliquid_mainnet` is the one `live-canary` realm today, and `mexc_mainnet` is `live-proven`, so it is refused there. |
+| **Canary Order** | `scripts/ops.sh canary-order --environment <demo\|mexc\|hyperliquid> --symbol SYMBOL --expected-user-id ID [--execute]` | Mutating with `--execute` | One bounded live order lifecycle through the realm's own credential file: one venue-minimum post-only order 0.5% under the bid, cancelled, the account proved clean twice. The engine accepts it on the Bybit demo and on `live-canary` realms only; `mexc_mainnet` and `hyperliquid_mainnet` are both `live-canary` today, so `demo`, `mexc` and `hyperliquid` are all accepted. `CANARY_REALMS` in `scripts/ops.sh` is the practice realm plus every funded realm the table holds at `posture=stopped`. |
 | **Storage** | `scripts/ops.sh storage [plan]` | Read-only | Prints the reclaimer's receipt and `status.json`. `plan` re-measures the budget and reports the candidates without pruning, uploading or unlinking. |
 | **Deploy** | `scripts/ops.sh deploy [mode]` | Mutating | Executes exact-commit deployment (`deploy`, `rollback`, `verify`, `stop-mainnet`, `disarm-mainnet`, `stop-mexc`, `disarm-mexc`, `stop-hyperliquid`, `disarm-hyperliquid`). |
 
@@ -191,15 +191,36 @@ EXPECTED_COMMIT=<40-hex-commit> scripts/ops.sh deploy
 | Pull request, code change | Python and Rust debug gates | None |
 | Pull request, docs only | None | None |
 | Push to `main` | Python and Rust debug gates | None; the local pre-push gate remains required |
-| Dispatch `deploy` | Python gate, Rust debug gate, release artifact, VPS deploy | Installs the exact `main` SHA after every gate succeeds |
-| Dispatch `qualify` | Rust debug gate, release tests, soak, benchmark | None |
+| Dispatch `deploy` | Python gate, Rust debug gate, candidate qualification (`release_artifact.py smoke`: a release-profile recovery and functional smoke run on the exact candidate binaries, with `qualification.json`, `qualification.log` and `binaries.sha256` packed into the archive), VPS deploy | Installs the exact `main` SHA after every gate succeeds. Every install path verifies the archive with `release_artifact.py verify --require-candidate`, so a binary qualified from the same source but compiled or featured differently cannot reuse another archive's receipt |
+| Dispatch `qualify` | Rust debug gate, release tests, soak, benchmark, paired latency study | None; on-demand latency research qualification only |
 | Dispatch `verify`, `rollback` | No build | Reads or restores production through the pinned VPS job |
 | Dispatch `diagnose`, `disarm-mainnet`, `disarm-mexc`, `disarm-hyperliquid` | No build | Reads incident state or persistently disarms one funded realm |
+
+#### Candidate qualification receipt
+
+`scripts/release_artifact.py` is the only producer and the only reader of a
+deployable archive.
+
+| Property | Value |
+| :--- | :--- |
+| Produced by | `python3 scripts/release_artifact.py smoke --commit <sha> --output <tarball>`, in the `rust-artifact` job of `.github/workflows/vps-deploy.yml` |
+| Workload (`checks`) | `release-recovery-tests`, `account-state-smoke`, `candidate-engine-smoke`, `binary-smoke`: release-profile `cargo test --release --locked --lib --tests` over `engine-core`, `engine-risk`, `engine-wal`, `engine-types`, `engine-public`, `engine-venue`; `account_state_soak --operations 100000 --live-ids 1024 --history-rows 0,1000 --repeats 1`; the packaged `engine bench --events 200 --rate 100 --every 20 --symbols BTCUSDT` |
+| Receipts in the archive | `qualification.json`, `qualification.log`, `binaries.sha256` beside `engine`, `engine-tools`, `signal-worker` |
+| Manifest | `schema_version` 2, `qualification_kind` (`candidate-smoke` or `full`), `commit`, `profile`, `rustc`, `target`, `platform`, `checks`, `binaries`, `log_sha256`, `wal_compatibility: "not_assessed"` |
+| `build_contract` | `cargo_lock_sha256`, `toolchain_sha256`, `feature_policy: "workspace-default-features-from-pinned-source"`, `target`, `profile: "release"`, `compiler_flag_overrides: false`, exact `build_arguments`. Qualification refuses to start under `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER` or any set `CARGO_PROFILE_RELEASE_*`, and re-derives and compares the contract after the workload |
+| Verified by | `release_artifact.py verify --require-candidate` in the `vps` job, `stage_release_binaries` in `scripts/deploy_vps_live.sh`, and `release_artifact unpack --require-candidate` in `build_engine` of `scripts/vps/deploy_remote.sh` |
+| Refused with `--require-candidate` | No `qualification.json`; `schema_version` 1; a missing or malformed `build_contract`; a lockfile, toolchain, target, profile, feature-policy or build-argument difference; incomplete `checks` for the stated `qualification_kind` |
+| Still accepted without the flag | `schema_version` 1 and the pre-qualification checksum-only archive, so the `8c92c964` rollback path pinned in [STATE.md](../STATE.md) stays usable |
+| Scope | Functional recovery and smoke evidence on the exact candidate bytes. Not latency, profitability, installed-byte or WAL-generation compatibility evidence; `mode=qualify` remains the separate on-demand latency research qualification |
 
 - **Must** keep account state, credentials and private operational evidence outside the public repository.
 - **Must** run `scripts/dev.sh check` before a direct push to `main`.
 - **Must** use `deploy` only for a release candidate; ordinary commits do not
   create deployments.
+- **Must Never** install a release artifact without its candidate qualification
+  receipt: every deploy path verifies with `--require-candidate`, and a
+  source-qualified binary compiled or featured differently is a different
+  candidate.
 - **Must Never** run a self-hosted Actions worker on the funded trading VPS.
 - **Must Never** expose a self-hosted worker to pull requests from a public
   repository or grant a build-only worker production credentials.
@@ -298,6 +319,48 @@ scripts/ops.sh deploy disarm-hyperliquid
 `stop-mainnet`, `stop-mexc` and `stop-hyperliquid` stop the same units without
 touching the switch. No mode flattens exposure.
 
+### 4. Execution host loss and replacement
+
+Bring a replacement host onto a funded account without ever having two writers
+on it.
+
+| Property | Implemented behavior |
+| :--- | :--- |
+| Lease file | `/run/lock/liquidity-migration/<venue>-<realm>-user-<account id>.lock`, e.g. `bybit-mainnet-user-<id>.lock` (`LEASE_DIRECTORY` in `engine-venue/src/lease.rs`) |
+| Mechanism | Kernel `flock(LOCK_EX \| LOCK_NB)` on that inode, plus an inode re-proof after the open. Every adapter uses the same directory, name format and sequence |
+| Expiry | None. No heartbeat, no timeout: the kernel drops the lock when the holder's last descriptor closes, on clean exit and crash alike |
+| Scope | Process ownership **on one host**. `/run` is that host's own tmpfs, so a second host holding the same credentials contends for nothing. The lease is not failover fencing and must not be read as any |
+| Fencing that does exist | Only what the operator does: the old host powered off, or the venue credential rotated and the old key deleted at the venue |
+| Venue-side dead-man | None in use. No funded realm arms a venue cancel-all or cancel-on-disconnect. Hyperliquid's `scheduledCancel` appears in `venues/hyperliquid/lookup.rs` and `ws.rs` only as a terminal order status the engine reads; nothing in `engine-venue/src/venues` sends the action that arms it. A venue-side cancel-all or disconnect-cancel would remove protective triggers while leaving positions open, so arming one is a decision, not a safety net |
+
+- **Must Never** start an engine on a replacement host until the previous
+  writer is fenced by power-off or by credential rotation at the venue.
+- **Must Never** treat an absent or stale lease file on the new host as
+  evidence that the old host stopped trading.
+- **Must** re-establish account identity and the exposure the WAL last knew
+  about before arming, on the new host, read-only.
+
+```sh
+# 1. Fence the old writer. One of these, proven, not assumed:
+#    - the old host is powered off at the provider, or
+#    - the venue credential is rotated and the old key deleted at the venue.
+#    Until one holds, do not continue.
+
+# 2. On the replacement host, read-only, with REAL_MONEY still false:
+scripts/ops.sh verify-account-identity --environment mainnet
+scripts/ops.sh attest-flat --environment mainnet
+#    attest-flat is a two-scan proof of a flat account. When the account is
+#    not flat, compare the venue's working orders and positions against what
+#    the WAL last recorded. `engine-tools replay` and `engine-tools fills` read
+#    the whole family through `replay_chain`, and the live families do not fit
+#    in the funded host's memory, so run either on a copy off the host — never
+#    on the live family — and treat the result as the comparison's WAL side.
+
+# 3. Only then arm, through the existing runbook for that realm
+#    (§Real-Money Configuration Dials, and §MEXC Realm or §Hyperliquid Realm
+#    for a funded alt realm).
+```
+
 ---
 
 ### Real-Money Configuration Dials
@@ -328,18 +391,29 @@ dial written in either is read by nothing.
 | Credential file | `/etc/liquidity-migration/mexc-mainnet.env`, root-owned `0600`, written by hand |
 | Unit environment | `/etc/liquidity-migration/engine-mexc.env`, root-owned `0600`, written by hand |
 | Rendered config | `/etc/liquidity-migration/engine-mexc.toml`, rendered by deploy |
+| Account-binding registry | `/etc/liquidity-migration/mexc-account-bindings.json`, owner `root`, a regular file, not group- or world-writable (`mode & 0o022 == 0`), at most 64 KiB, written by hand. Schema: `schema_version` (must be `1`), `realm` (must be `mexc_mainnet`), `accounts[].account_uid` (the physical account or subaccount UID verified at provisioning: one canonical positive decimal, no leading zero, at most 40 digits, unique in the file), `accounts[].credential_sha256[]` (non-empty, unique lowercase 64-hex `sha256(api key)` fingerprints) |
+| Bound identity | `AccountBinding::load` runs inside `MexcGateway::new` and `MexcInventoryProbe::new`, so a credential the registry does not name is refused before any socket, authentication or mutation. Identity is `uid-<account_uid>`: rotating the API key inside one account keeps the identity and the lease path `/run/lock/liquidity-migration/mexc-mexc_mainnet-user-uid-<account_uid>.lock`, and two subaccounts stay two accounts. `identity_for` re-proves the key on every identity read |
+| REST pacing | Process-local classified quota in `engine-venue/src/venues/mexc/rest.rs`: a 2 s rolling window of 16 signed requests per `(REST base, sha256(key))`, shared by the gateway, its recovery reader and the probe. `OperationClass` is `Recovery`, `Trading` (default), `Administration` (`position/change_leverage`) and `Protection` (`stoporder/*`, `order/cancel_with_external`, reduce-only `order/create`); `QuotaGroup` is `General` and `StopWrite`. Only `Protection` may take all 16 slots — every other class stops at 12, so a `SAFETY_RESERVE` of 4 protective slots survives a recovery sweep — and `stoporder/*` writes are additionally capped at 4 per window against the venue's 5. This is not a cross-process or IP-wide rate-limit claim |
 | Sleeves | LONG entries on; CARRY and EXODUS entries rendered off. CARRY scores Bybit funding, MEXC funding differs per symbol. No maker, no probe |
 | Public data | MEXC's own: `sources.public_venue = "mexc"` in `configs/signal-worker.mexc.json`. Instruments, tickers, hourly klines and settled funding from `api.mexc.com`, the `contract.mexc.com` `edge` socket for the live ticker and candle; quantities converted from contracts to base by `contractSize`; funding carries each contract's own `collectCycle` (8 h, 4 h, 1 h or 24 h). The Binance top-trader ratio and the LLM gate are shared. Switching venue changed the realm's feature-contract hashes and checkpoint key, so its worker cold-starts |
 | Symbols the venue does not list | Dropped before ranking: `universe.listed_on` is `mexc`, so the worker reads `GET /api/v1/contract/detail` on `live.instrument_cadence_ms` and keeps the USDT-settled, API-tradable contracts in the engine's spelling (`BTC_USDT` is `BTCUSDT`; Bybit's `1000PEPEUSDT` is not MEXC's `PEPEUSDT`). A name that still reaches the engine waits at admission and is said once |
-| Source readiness | `mexc_mainnet` is `live-proven` (canary lifecycle 2026-09-08 20:16 UTC): `engine run` takes the realm, `engine canary-order` refuses it. `engine venues` prints the current value |
+| Source readiness | `mexc_mainnet` is `live-canary`: `engine run` is refused, `engine canary-order` is permitted with `REAL_MONEY` armed. `engine venues` prints the current value and `verify` prints it as `mexc readiness=...` |
+| Evidence boundary | The 2026-09-08 20:16 UTC canary (venue order `852400800159322624`) observed create, `New`, cancel, `Cancelled` and two clean scans. That is submit/cancel evidence only — no fill, no fee, no reduction, no protective place or trigger, no reconnect or history recovery — and it predates the execution-v2 catalogue and encoding change, so it does not carry forward |
+| What promotes it | Reviewed evidence on this exact realm, with the current adapter, for the capabilities being enabled: fill attribution, protective order place and trigger, and reconnect/history recovery. `engine canary-order` is the bounded harness that gathers it; it is not itself permission for general trading |
 
+**Must** write `/etc/liquidity-migration/mexc-account-bindings.json` before any
+MEXC mode runs; without it every MEXC gateway and probe refuses at construction.
 **Must** obtain `EXPECTED_ENGINE_ACCOUNT_USER_ID` from an authenticated venue
-reply; MEXC exposes no numeric account id, and the engine derives `key-` plus
-the first eight bytes of `sha256(api key)` in hex.
-**Must** know that `REAL_MONEY=true` in `mexc-mainnet.env` starts the realm on
-the next deploy: deploy reads `engine venues` from the installed binary, and a
-`live-proven` realm with an armed switch is provisioned and handed over like
-mainnet. `verify` prints the value as `mexc readiness=...`.
+reply. MEXC exposes no numeric account id in its replies, so the engine reports
+the registry's `uid-<account_uid>`; `deploy/engine.mexc.env.template` carries
+the `uid-` prefix, and the host's `engine-mexc.env` still holds the retired
+`key-…` value until the owner rewrites it.
+**Must** know that `REAL_MONEY=true` in `mexc-mainnet.env` does not start the
+realm while the source is `live-canary`: deploy reads `engine venues` from the
+installed binary, renders and projects the realm's configuration so the canary
+has something to run against, and leaves every unit stopped. `deploy/realms.tsv`
+also holds `mexc posture=stopped`, and deploy tests readiness before posture, so
+the readiness line is the one it prints.
 **Must Never** set the switch without explicit owner instruction.
 
 Arming, in order:
@@ -355,19 +429,39 @@ install -o root -g root -m 0600 deploy/engine.mexc.env.template \
 # fill in MEXC_REAL_API_KEY and MEXC_REAL_API_SECRET; leave REAL_MONEY=false
 # until the identity is bound.
 
-# 3. Deploy once with the switch off: deploy installs the units and leaves
-#    them stopped. Then read the account id the gateway binds: the template's
-#    placeholder `key-` mismatches on purpose and the message prints the id
-#    the credentials answered as. Write it into engine-mexc.env and rerun
-#    until it passes, then prove the account clean.
+# 3. Bind the credential to the physical account. Read the account UID from
+#    MEXC's own interface, take sha256 of the API key, and write both into the
+#    registry. Nothing on this host discovers the UID for you.
+printf '%s' "$MEXC_REAL_API_KEY" | sha256sum   # the 64-hex fingerprint
+cat > /etc/liquidity-migration/mexc-account-bindings.json <<'JSON'
+{"schema_version": 1, "realm": "mexc_mainnet",
+ "accounts": [{"account_uid": "<UID>", "credential_sha256": ["<64-hex>"]}]}
+JSON
+chown root:root /etc/liquidity-migration/mexc-account-bindings.json
+chmod 0644 /etc/liquidity-migration/mexc-account-bindings.json
+
+# 4. Deploy once with the switch off: deploy installs the units and leaves
+#    them stopped. Then read the account id the gateway binds. Any wrong value
+#    in engine-mexc.env mismatches and the message prints the id the
+#    credentials answered as, which is `uid-<UID>`. Write it in, rerun until
+#    it passes, then prove the account clean.
 gh workflow run vps-deploy.yml --ref main -f mode=deploy
 scripts/ops.sh verify-account-identity --environment mexc
 scripts/ops.sh attest-flat --environment mexc
 
-# 4. Arm REAL_MONEY=true in mexc-mainnet.env, then deploy; that deploy
-#    renders engine-mexc.toml, projects the worker env and starts the realm.
+# 5. Arm REAL_MONEY=true in mexc-mainnet.env, then deploy; that deploy renders
+#    engine-mexc.toml and projects the worker env so the canary has a
+#    configuration, and leaves the units stopped while the source is
+#    live-canary. Gather the missing capability evidence with canary-order.
 scripts/ops.sh real-money preflight-mexc
 gh workflow run vps-deploy.yml --ref main -f mode=deploy
+scripts/ops.sh canary-order --environment mexc --symbol BTCUSDT \
+  --expected-user-id uid-<UID> --execute
+
+# 6. Record the canary receipt in CHANGELOG.md, move mexc_mainnet to
+#    live-proven in engine/engine-public/src/registry.rs, set its posture to
+#    running in deploy/realms.tsv, push, and deploy again; that deploy starts
+#    the realm.
 ```
 
 `verify-account-identity`, `attest-flat` and `canary-order` run on the host

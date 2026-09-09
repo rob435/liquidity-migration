@@ -214,7 +214,7 @@ VENUE_FACTS: dict[str, dict[str, Any]] = {
         "liveness_label": "MEXC",
         "telegram_label": "MEXC",
         "engine_account_phrase": "FUNDED MEXC account",
-        "account_id_placeholder": "key-",
+        "account_id_placeholder": "uid-",
         "engine_credential_note": (
             "# The MEXC account's credentials, and REAL_MONEY.\n"
             "#\n"
@@ -254,9 +254,10 @@ VENUE_FACTS: dict[str, dict[str, Any]] = {
             "# the installed operational profile."
         ),
         "env_identity_note": (
-            "# Required identity binding. MEXC exposes no numeric account id, so the engine\n"
-            "# derives one: `key-` plus the first eight bytes of sha256(api key), in hex.\n"
-            "# `engine verify-account-identity --config /etc/liquidity-migration/engine-mexc.toml`\n"
+            "# Required identity binding: `uid-` plus the physical account UID that the\n"
+            "# root-owned registry /etc/liquidity-migration/mexc-account-bindings.json binds\n"
+            "# this key's sha256 fingerprint to. Without that registry the gateway does not\n"
+            "# construct. `engine verify-account-identity --config /etc/liquidity-migration/engine-mexc.toml`\n"
             "# prints the exact string this must equal. Never infer it from a key label.\n"
             "# Activation refuses a missing value or a heartbeat from another account."
         ),

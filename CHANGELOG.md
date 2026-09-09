@@ -10,6 +10,421 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-09 — `engine sim` heavy sweep, 17:19 UTC onward: three pre-existing replay and accounting faults surface once the venue task reorders commands. One is fixed at the root — live and replay reduced an `amounts: None` fill by different rules — and the two others are reported here with their seeds. None can reach a funded log.**
+  - Found how. `sim::one_seed_replays_byte_for_byte_under_heavy_faults` (seed
+    7, `--seconds 300 --symbols 2 --crashes 2 --faults heavy`) went red under
+    the F03 scheduling change with `engine: state: sleeve stop has no owned
+    position` from `attribution/internal.rs::validate_sleeve_stop_exact`. The
+    same binary at the unchanged HEAD, built in a throwaway worktree, fails
+    seeds 26 and 31 of 1–44 with the same error and passes seed 7; the
+    reordering only moves which seeds hit it.
+  - Root cause, fixed. `Attribution` has two fill reducers. Replay of a fill
+    with `allocation: None` goes through `commit_prepared`
+    (`engine-core/src/attribution.rs`), which drops a sub-`FLAT` (1e-9) row and
+    notes a legacy-quantity origin; the live path since `efb658b3` went through
+    `commit_portfolio_fill` (`attribution/allocated.rs`), which had no such
+    tail, while `venue_completion.rs::handle_or_journal` records the
+    allocation only for callback fills or `EmergencyNetFifo`. Seed 7: sleeve
+    `(0, ETHUSDT)` restated to exactly `1/10` by `legacy_quantity_grid_adopted_v2`,
+    closing fill `Sell 0.1` with `amounts: None, allocation: None`, so its
+    quantity is `Exact::from_legacy_f64(0.1)`; live kept the
+    `-1/180143985094819840` dust row, priced a stop off it and wrote
+    `SleeveStopSet`; replay dropped the row and found no owner. Fix: the live
+    path runs the same legacy tail when the allocation is not recorded
+    (`commit_portfolio_fill(prepared, recorded_allocation)`, with
+    `OrderUpdate::records_allocation` / `WalRecord::records_allocation`;
+    `PreparedPortfolioFill` carries `legacy_inputs`). Replay is byte-for-byte
+    unchanged for any given WAL; recorded allocations are unchanged; fees,
+    prices and realized amounts are untouched. Proof:
+    `legacy_quantity::context_tests::a_legacy_close_on_an_adopted_sleeve_leaves_the_live_and_replayed_row_alike`
+    fails on the old code with the dust row against an empty replay; seeds 7,
+    29, 34 pass; the sleeve-stop class is 0 of 300 seeds (was 18).
+  - Why no funded log holds it. The rule only diverges for a fill with
+    `amounts: None`, and every compiled adapter attaches `ExecutionAmounts`
+    unconditionally (`bybit/execution.rs:103`, `bybit/ws.rs:465`,
+    `mexc/execution.rs:128`, `mexc/ws.rs:645`, `hyperliquid/execution.rs:62`);
+    `git log -S "amounts: Some(amounts)"` on the Bybit adapter returns exactly
+    `efb658b3`, the commit that introduced the allocated live reducer, so no
+    binary has run that reducer on an `amounts: None` Bybit fill. Exposure was
+    `engine sim` and `engine backtest` in the unmodeled execution mode
+    (`backtest/venue.rs:862`).
+  - Still open, pre-existing, same sweep. (1) `boot: boot: legacy FIFO
+    rederivation has no owned execution` (`legacy_quantity/replay.rs::rederived`),
+    a boot crash loop: seeds 42, 123, 240, 243, 247; seed 42's WAL hash
+    `bb33159076d3` is identical before and after the fix. (2)
+    `ledger_agrees_when_flat`: seed 166 fails identically before and after
+    (`engine -35.087131 venue -38.973795 differ by 3.886664`), and seed 33 now
+    lands on it after its trajectory changed (`engine -210.912470 venue
+    -211.090525`, 0.178055 over 60 round trips). Reproducers:
+    `engine/target/debug/engine-tools sim --seed 42 --seconds 300 --symbols 2
+    --crashes 2 --faults heavy` and `--seed 166`. Neither is in the F02/F03
+    change: replay and the judge are unchanged code for any WAL. Both are
+    separate root causes and are not fixed here.
+
+- **2026-09-09 — The 2026-09-09 source audit's first hardening batch: four commits authored 15:36:34–15:38:51 UTC and rebased onto `origin/main` at 16:13:12. Leverage administration leaves the account-state owner's event loop, `floor_usdt` stops inventing capital nobody can see, MEXC gains a root-owned account binding and loses its `live-proven` claim, and a deployable archive must now carry qualification evidence for the exact candidate binaries. Nothing pushed, no deploy run.**
+  - F05, leverage administration off the account owner (`98a4be7a`).
+    `Engine::ensure_leverage` — one `set_leverage` round trip awaited inline,
+    before the `OrderSent` record — is gone. What stays local is
+    `validate_leverage_request`; the wire work is now
+    `VenueClient::dispatch_leverage` → `Command::DispatchLeverage` →
+    `MutationCompletion::Leverage` → `PendingMutation::Leverage { symbol, want,
+    orders, account, queued_ns }` → `complete_leverage`, across
+    `engine-core/src/engine/order_dispatch.rs`, `venue_runtime.rs` and
+    `venue_completion.rs`. `begin_order_preparation` replaces
+    `begin_order_attempt` at the queue head: an opening whose symbol is off its
+    wanted leverage is durably owned first (`DispatchWrite::Leverage` behind
+    `begin_dispatch_barrier`), a second owner is a hard `EngineError::State`,
+    and a ready order on the same symbol is dispatched before a conflicting
+    administration. Observable: a slow or hung `change_leverage` no longer
+    suspends order admission, fills, local cancels or the account-state owner.
+    A local refusal, an ambiguous reply, an account change during
+    administration, or a held position still at another leverage refuses the
+    dependent opening *unsent* rather than sending at a margin the risk kernel
+    did not price, and clears `leverage_at` for that symbol; the ambiguous and
+    held-position cases also set `books.account.observed_ns = 0` to force a
+    readback. A late success cannot revive an order cancellation or a private
+    terminal event already retired, and a pause, cancellation or restart during
+    administration leaves the never-transmitted opening restored and unsent.
+    Proof, 12 tests in `engine-core/src/engine/order_dispatch/leverage_tests.rs`
+    on a `controlled_leverage_venue` that holds `set_leverage` open:
+    `slow_leverage_does_not_hold_order_admission_or_precede_durable_ownership`,
+    `leverage_cannot_cross_a_failed_ownership_barrier`,
+    `a_fill_and_local_cancel_do_not_wait_for_leverage_and_late_success_cannot_revive`,
+    `a_pause_during_leverage_refuses_the_dependent_opening_without_transmitting`,
+    `an_ambiguous_leverage_reply_does_not_assert_that_administration_was_not_accepted`,
+    `an_account_observation_during_leverage_prevents_a_stale_completion_from_authorizing`,
+    `a_locally_refused_leverage_request_does_not_invalidate_cleanup_account_state`,
+    `changed_held_position_leverage_needs_account_readback_before_an_opening`,
+    `confirmed_leverage_requires_a_separate_durable_order_attempt_and_is_cached_once`,
+    `a_ready_order_is_submitted_before_a_conflicting_leverage_administration`,
+    `leverage_invalidated_during_the_attempt_barrier_cannot_be_used_on_the_wire`,
+    `restart_during_leverage_restores_a_never_transmitted_opening_without_resending`.
+  - Exact terminal fills, same commit. A terminal venue status used to retire an
+    order whenever `row.filled_qty.value <= known`. For an order carrying
+    `exact_terms` the test is now equality: a lower or differing exact total is
+    conflicting evidence, so `recovery.history_requested` is set and the order
+    joins `dispatches.unresolved` as `terminal fill total disagrees with durable
+    execution history` instead of retiring and erasing fills or its reservation.
+    Legacy binary64 orders keep the old `>` frontier unchanged. Proof:
+    `a_lower_exact_terminal_fill_total_cannot_retire_the_order_or_erase_fills`
+    in `engine-core/src/engine/order_dispatch.rs`, which also replays the WAL
+    and asserts the known exact fill survives. The Bybit-only boundary fixture
+    `engine-core/src/tests/venue_boundary.rs` is gated to its own feature.
+  - F11, actual equity contraction is not minimum account viability
+    (`4c531869`). `EnvelopeConfig::floor_usdt` was a lower bound on the
+    reference; it is now a viability threshold only. `Envelope::observe_equity`
+    becomes `observe_equity_with_permission(equity, allow_expansion)` and drops
+    the `.max(floor_usdt)`, so the economic reference and every allowance
+    derived from it — `allowance_usdt`, the rolling-loss budget, margin —
+    follow verified equity down. New `Envelope::viable_for_new_exposure()` is
+    the admission test, and the kernel's `require_viable_reference()` denies
+    with `verified equity is below the minimum viable capital reference; new
+    physical exposure is refused`. Kernel bookkeeping: `latest_account_observed_ns`
+    plus `observe_reference(view, allow_expansion)` mean expansion needs a
+    fresh, in-order, assessed observation — the `observe_account_view` callback
+    supplies no admission clock and may only contract, a reduction observes
+    with `allow_expansion = false`, and an admission whose view predates the
+    latest observation is denied `account view predates the latest observed
+    account state`. An unreadable or invalid balance now sets
+    `open_pnl_usdt = None` rather than implying zero open loss. The Python
+    reference is aligned: `capital_reference_after_equity` in
+    `liquidity_migration/core/operational_profile.py` drops the same `max`, and
+    `_risk_admits_target` in
+    `liquidity_migration/research/backtest/long_live_physics.py` refuses a
+    target that would raise standing notional while the reference is below the
+    floor. Proof: `engine-risk/tests/contracts/envelope.rs`
+    `audit_equity_below_viability_never_inflates_the_rolling_loss_reference`,
+    `audit_out_of_order_or_unassessed_equity_observations_cannot_expand_the_budget`,
+    and `the_viability_threshold_never_floors_the_economic_reference` (renamed
+    from `the_floor_bounds_the_envelope_rather_than_collapsing_it`), plus
+    `test_audit_viability_floor_does_not_invent_equity_or_admit_new_exposure` in
+    `tests/research/backtest/test_long_live_physics.py`. The semantics changed
+    and the dials did not: `configs/operational.json` still reads
+    `capital_reference_usdt` 100.0, `equity_fraction` 1.0, `floor_usdt` 100.0.
+  - F01/F04/F06/F07/F08/F24 and F09 in part, MEXC (`1e2cfc22`).
+    **F01, account binding.** `engine-venue/src/venues/mexc/account_binding.rs`
+    reads a root-controlled registry at
+    `/etc/liquidity-migration/mexc-account-bindings.json` (`O_NOFOLLOW`,
+    `O_CLOEXEC`; must be a regular file, `uid == 0`, `mode & 0o022 == 0`,
+    at most 64 KiB) whose schema is `schema_version` 1, `realm`
+    `mexc_mainnet`, and `accounts[]` of `account_uid` (one canonical positive
+    decimal, no leading zero, ≤ 40 digits, unique) and `credential_sha256[]`
+    (unique lowercase 64-hex fingerprints, non-empty). Identity is now
+    `uid-<account_uid>`, so a key rotation inside one account keeps the lease
+    and subaccounts stay distinct. `AccountBinding::load` runs in
+    `MexcGateway::new` and `MexcInventoryProbe::new`, so an unbound credential
+    is refused before any socket, authentication or mutation, and
+    `identity_for` re-proves the key on every `account_identity` read. Tests:
+    `rotation_preserves_account_identity_and_subaccounts_remain_distinct` (same
+    lease path across rotation, different path for the subaccount, a real
+    `flock` conflict) and `ambiguous_noncanonical_and_wrong_realm_registries_are_rejected`
+    (six mutations: shared fingerprint, `042`, `../42`, no credentials, wrong
+    realm, schema 2).
+    **F04, classified pacing.** `mexc/rest.rs` gains
+    `Pacer::reserve_for(OperationClass, QuotaGroup)` with `QUOTA_WINDOW` 2 s,
+    `QUOTA_REQUESTS` 16, `SAFETY_RESERVE` 4 and `STOP_WRITE_REQUESTS` 4.
+    `OperationClass` is `Recovery | Trading | Administration | Protection`;
+    `QuotaGroup` is `General | StopWrite`. Everything but `Protection` may
+    hold at most 12 of the 16 aggregate slots, so four protective slots stay
+    reserved; `Protection` may use all 16. `/api/v1/private/stoporder/*` is
+    `Protection` + `StopWrite`, capped at 4 per window on its own; the venue
+    allows 5. `order/cancel_with_external` and reduce-only `order/create` are
+    `Protection` + `General`, `position/change_leverage` is `Administration`,
+    the rest `Trading`. One `Pacer` is shared per `(rest base, sha256(key))`
+    across every clone — gateway, recovery reader, probe. Tests:
+    `clones_and_independent_clients_share_scope_and_background_wait_is_not_mutation_time`,
+    `recovery_saturation_preserves_four_protective_slots`,
+    `position_stop_writes_obey_their_smaller_endpoint_budget_without_delaying_cancels`,
+    `the_pacer_admits_the_quota_at_once_and_holds_the_next_request_for_the_window`.
+    **F06/F07/F08/F24**, all proved by 12 tests in
+    `engine-venue/tests/venue/mexc_audit.rs`. Leverage is integer-only and
+    bounds-checked before HTTP (`fractional_or_unrepresentable_leverage_is_refused_before_any_http`,
+    `integer_leverage_is_sent_unchanged_to_both_sides_and_above_maximum_is_refused`,
+    `leverage_below_the_published_minimum_never_changes_either_side`,
+    `held_position_leverage_names_the_position_and_keeps_the_integer_unchanged`).
+    Opening eligibility is separate from cleanup: a removed or disabled symbol
+    keeps its cancellation, reduction, stop-repair and lookup identity without
+    regaining permission to open, through `Catalog::existing` and
+    `engine-venue/src/catalog_checkpoint.rs`
+    (`removed_symbol_keeps_cleanup_and_lookup_identity_without_regaining_opening_permission`,
+    `disabled_opening_permission_does_not_disable_cancellation_reduction_or_stop_repair`).
+    Contract metadata is version 2 in `engine-public/src/venues/mexc/contracts.rs`:
+    `ExecutionCapabilities { volume_unit, lifecycle_state, position_open_type,
+    stop_only_fair, future_type, min_leverage, max_leverage, retained,
+    metadata_version }`, a `volUnit`-derived quantity step, and
+    `require_order_capability` / `stop_trend` that refuse new exposure on
+    unknown semantics while `parse_checkpoint_v1` keeps a retained checkpoint
+    readable (`published_contract_step_is_enforced_for_legacy_and_exact_orders`,
+    `lifecycle_margin_mode_and_unknown_execution_metadata_refuse_new_exposure`,
+    `fair_only_contracts_never_send_last_price_protection`,
+    `legacy_checkpoint_keeps_its_original_grid_but_cannot_authorize_new_exposure`).
+    Cancellation parsing never reads malformed per-order evidence as success
+    (`cancellation_never_defaults_malformed_per_order_evidence_to_success`,
+    `malformed_cancel_then_terminal_fill_keeps_the_exact_authoritative_quantity`).
+    **F09 in part, readiness.** `VenueName::readiness()` in
+    `engine-public/src/registry.rs` demotes `mexc_mainnet` from `LiveProven` to
+    `LiveCanary`: the 2026-09-08 20:16 UTC submit/`New`/cancel/`Cancelled`
+    canary predates this commit's catalogue and encoding changes and was never
+    fill, fee, reduction or protective-trigger evidence. So `engine run` is
+    refused on that realm and `engine canary-order` is permitted again. Test:
+    `a_submit_cancel_canary_does_not_qualify_general_protected_position_trading`.
+  - F10, deployment artifacts carry candidate evidence (`f6620ff9`).
+    `scripts/release_artifact.py` gains a `smoke` subcommand
+    (`qualify(..., smoke=True)`) that runs a release-profile recovery and
+    functional smoke on the exact candidate binaries: `SMOKE_CHECKS =
+    ("release-recovery-tests", "account-state-smoke", "candidate-engine-smoke",
+    "binary-smoke")`, i.e. `cargo test --release --locked --lib --tests` over
+    engine-core, engine-risk, engine-wal, engine-types, engine-public and
+    engine-venue, then `account_state_soak --operations 100000 --live-ids 1024
+    --history-rows 0,1000 --repeats 1`, then the packaged
+    `engine bench --events 200 --rate 100 --every 20 --symbols BTCUSDT`. The
+    artifact carries `qualification.json`, `qualification.log` and
+    `binaries.sha256`; the manifest is `schema_version` 2 with
+    `qualification_kind` (`candidate-smoke` or `full`) and a `build_contract`
+    of `cargo_lock_sha256`, `toolchain_sha256`,
+    `feature_policy = workspace-default-features-from-pinned-source`, `target`,
+    `profile = release`, `compiler_flag_overrides = false` and the exact
+    `build_arguments`. `_build_contract` refuses to qualify at all under
+    `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `RUSTC_WRAPPER`,
+    `RUSTC_WORKSPACE_WRAPPER` or any set `CARGO_PROFILE_RELEASE_*`, and the
+    contract is re-derived and compared after the workload. The `rust-artifact`
+    job in `.github/workflows/vps-deploy.yml` replaces
+    `cargo build --release --locked --workspace --bins` plus three `--help`
+    calls with `python3 scripts/release_artifact.py smoke`; the `vps` job,
+    `stage_release_binaries` in `scripts/deploy_vps_live.sh` and `build_engine`
+    in `scripts/vps/deploy_remote.sh` all pass `--require-candidate`, so an
+    archive with no `qualification.json`, with `schema_version` 1, or with a
+    different compilation or feature contract is refused before the fleet is
+    touched. `verify`/`unpack` without the flag still accept schema 1 and the
+    pre-qualification checksum-only archive, so the `8c92c964` rollback path
+    pinned in [STATE.md](STATE.md) stays usable. Separately, `_qualify_latency`
+    now records `candidate_runs_passed` and `qualified` and refuses to publish
+    when any candidate cell misses its budget, rather than letting a good run
+    median cover it. Proof, in `tests/scripts/test_release_artifact.py`:
+    `test_candidate_smoke_runs_optimized_recovery_and_the_packaged_engine_without_a_latency_claim`,
+    `test_candidate_verification_refuses_a_different_or_missing_compilation_contract`,
+    `test_new_deploy_refuses_a_checksummed_archive_without_candidate_qualification`
+    (was `test_deploy_unpacks_a_checksummed_archive_without_qualification_metadata`),
+    `test_a_single_bad_candidate_tail_cannot_hide_behind_good_run_medians`,
+    `test_four_fixed_latency_cells_keep_every_passing_cell_and_report_run_medians`;
+    and `test_ci_checks_main_pushes_and_keeps_release_work_explicit` in
+    `tests/scripts/test_runtime_scripts.py` pins the `smoke` step before the
+    upload with no `continue-on-error`, and `verify --require-candidate` in the
+    `vps` job. Scope: this is functional recovery/smoke evidence on the exact
+    candidate. It is not latency, profitability or installed-byte evidence, and
+    the manifest still states `wal_compatibility: "not_assessed"`.
+  - Deploy effect. The batch changes `engine/`, so the realm fingerprint gate
+    makes the next deploy restart both Bybit engines: demo handover, the 300 s
+    soak, then the atomic mainnet handover. No deploy has been run for this
+    batch and nothing is pushed. mexc stays stopped, now for two independent
+    reasons — `posture=stopped` in `deploy/realms.tsv` and `mexc_mainnet`
+    readiness `live-canary`. `deploy_mode` tests readiness before posture, so
+    the next deploy prints `mexc armed but the installed engine reports
+    mexc_mainnet readiness=live-canary: units stay stopped until the canary
+    evidence promotes it` instead of the posture line and does not call
+    `stop_funded_units`; those units are already `disabled inactive` from the
+    `42dd7446` deploy, so host state is unchanged. hyperliquid keeps its own
+    `live-canary` line. Two consequences to expect on the funded fleet. The
+    MEXC gateway no longer constructs until
+    `/etc/liquidity-migration/mexc-account-bindings.json` exists, which covers
+    `verify-account-identity`, `attest-flat` and `canary-order` on that realm as
+    well as the stopped engine, and the bound identity is `uid-<account_uid>`,
+    not the derived `key-<8 bytes of sha256(api key)>` that
+    `engine-mexc.env` holds today. And at the registered dials, a realm whose
+    verified equity is below `floor_usdt` 100.0 now refuses new physical
+    exposure and contracts its reference and rolling-loss allowance with
+    equity, where before the reference was floored at 100. The host read at
+    16:30–16:32 UTC (`scripts/ops.sh curve mainnet 3`) puts the mainnet
+    account at 36.42–36.82 USDT with three positions open, so under
+    `capital_reference.mode = "account_equity"`, `equity_fraction` 1.0 and
+    `floor_usdt` 100.0 the funded engine would refuse every new entry after
+    this deploy (`verified equity is below the minimum viable capital
+    reference; new physical exposure is refused`), while reductions, stops and
+    cancels flow. Demo reads the same profile but stood at 1,554–1,555 USDT in
+    the same reading, so it is not affected. The dial is the owner's: lower `floor_usdt` in
+    `configs/operational.json` to the smallest account the sleeves can trade
+    at their venue minimums, or accept the halt; neither is chosen here.
+    Deploy templates and the realm renderer now carry the `uid-` identity
+    prefix and the `live-canary` wording for MEXC
+    (`liquidity_migration/policy/realms.py`, `deploy/engine.mexc.env.template`,
+    `deploy/venue-credentials.env.template`).
+  - F09, readiness derived from a capability matrix. `engine-public/src/registry.rs`
+    gains `Capability` (13: `submit`, `cancel`, `post-only`, `fill-attribution`,
+    `partial-fill`, `amend`, `exact-quantity`, `reduce-below-minimum`,
+    `protection-place`, `protection-change`, `protection-trigger`,
+    `reconnect-history-recovery`, `funding-fee-cash`), `Evidence`
+    (`Unknown` | `Implemented` | `Observed { on, receipt, adapter_commit,
+    current }`), `VenueName::capability` — one explicit row per realm, every
+    `Observed` cell naming a dated receipt in CHANGELOG, `docs/history/` or
+    STATE.md — and `derive_readiness`: `live-proven` iff all six of
+    `UNATTENDED_PROTECTED_TRADING` (`submit`, `cancel`, `fill-attribution`,
+    `protection-place`, `protection-trigger`, `reconnect-history-recovery`) are
+    `Observed { current: true }` on that exact realm; otherwise a funded realm
+    is `live-canary`, a testnet realm `testnet-canary`; `production-blocked`
+    and `read-only` stay explicit overrides in `readiness_override`.
+    `VenueName::readiness()` is no longer assigned by hand, and every label
+    comes out as it was: both Bybit realms `live-proven` (mainnet's weakest
+    load-bearing cell is `reconnect-history-recovery`, receipt the 2026-09-02
+    HNTUSDT venue stop fill recovered from execution history at boot; demo's is
+    the 2026-09-06 whole-day reconciliation across the 16:01 restart), MEXC
+    `live-canary` because its 2026-09-08 submit/cancel receipt is `current:
+    false` (taken on `32f27d4b`, before the execution-v2 change) and it has no
+    fill, protection or recovery receipt at all. The `live-canary` refusal now
+    names the missing capabilities. Cells left `implemented` for want of a
+    dated receipt: demo `partial-fill` and `amend`, both Bybit realms'
+    `reduce-below-minimum`; MEXC `amend`, `reduce-below-minimum` and
+    `funding-fee-cash` are `unknown` (the adapter does not do them). The table
+    in [docs/engine.md](docs/engine.md) §2 is generated from the code and
+    pinned by `the_published_capability_matrix_matches_the_registry`; the
+    dangling `audit/2026-09-09/capabilities.md` reference is gone. Six tests
+    in `registry::capability_matrix_tests`, including
+    `a_receipt_taken_before_an_execution_semantics_change_does_not_qualify` and
+    `mexcs_own_row_with_current_receipts_would_derive_live_proven`.
+  - F12, the stop charge named for what it is. `Envelope::position_worst_case_usdt`
+    is `modelled_stop_charge_usdt` (`notional × max(stop_fraction,
+    disaster_stop_fraction)`: what the configured stops lose if they fill at
+    their triggers, not a bound on gap, liquidation, venue outage or collateral
+    loss), and the kernel's projected field with it, across `engine-risk`.
+    `DenyReason::EnvelopeBreached` keeps the wire key `worst_case_loss_usdt`
+    through `#[serde(rename)]` so no WAL record changes shape
+    (`the_envelope_denial_still_writes_the_charge_under_its_original_wire_name`).
+    The stress table the audit proposes beside it is not built: on one
+    account and one venue it duplicates `disaster_stop_fraction`, and its
+    value (hedged books, an unreachable venue, collateral haircuts) belongs to
+    the multi-venue stage.
+  - F02, the last check before the wire. `engine-types/src/authority.rs`:
+    `CommandAuthority { epoch, queued_ns, expires_at_ns }` and a shared
+    `AuthorityEpoch` counter the engine advances whenever a permission an
+    opening was admitted under goes away — `Engine::latch_closed` (the one
+    hook behind every `may_open = false`: boot comparison, foreign fill,
+    untrusted amend state, stop repair, order rejection limits),
+    `clear_private_stream_ready`, `note_unresolved` (the first dispatch the
+    venue never answered), `SetEntriesEnabled { false }` for a strategy, a
+    strategy's first callback fault, a strategy-runtime retirement, an
+    instrument catalog install, and the rolling-loss window tripping
+    (`telemetry.rs:record_trades`, read off `RiskKernel::rolling_loss`). The
+    engine mints an authority only for a `SendOrders` group that opens
+    exposure and for amends; cancels, stops, reducing sends and the boot-time
+    `*Wait` reads carry none and are never refused. `venue_runtime::run`
+    re-reads `authority_refusal` after the command's queue wait, immediately
+    before the gateway call, and the paced adapters re-read it once more after
+    their own quota wait and before signing (`VenueGateway::send_orders_under`,
+    default forwards to `send_orders`; `MexcGateway` after `admit(Trading)`,
+    `BybitGateway` after `reserve_create_capacity`). A refused command is
+    answered as `Err(VenueError::BadRequest("authority: epoch N superseded by
+    M" | "authority: expired after X ms in the venue queue"))` with no venue
+    call, which is the engine's existing never-sent path — `OrderUpdate::Reject`
+    with reason `never sent: …`, reservation released, dispatch completed.
+    A command the gateway already holds is untouched and resolves through the
+    lookup path. New knob `engine.opening_dispatch_ttl_ms` (default 10 000;
+    exits, cancels and stops never expire). Proof:
+    `engine-core/src/engine/order_dispatch/authority_tests.rs`
+    (`a_halt_acknowledged_while_an_opening_waits_in_the_venue_queue_retires_it_unsent`,
+    `an_opening_that_expires_in_the_venue_queue_is_rejected_without_a_venue_answer`,
+    `an_opening_already_handed_to_the_gateway_survives_an_epoch_advance_as_attempted`,
+    `a_slow_leverage_administration_does_not_delay_a_queued_cancel`),
+    `engine-venue/tests/venue/mexc_audit.rs`
+    `an_expired_or_superseded_opening_is_refused_after_quota_admission_and_never_reaches_http`,
+    `engine-venue/tests/venue/request_shape.rs`
+    `a_superseded_opening_is_refused_after_the_create_budget_and_never_signed`
+    (Bybit; both with a positive control), four unit tests in `authority.rs`.
+    Fixed on the way because the reordering made it reachable:
+    `apply_order_lookup` wrote `OrderDispatchQueued` on `NeverAccepted` even
+    for a dispatch already `Queued`, which `OrderDispatches::replay` refuses as
+    `invalid or repeated queued order dispatch`; it now writes only over
+    `Attempted`.
+  - F03, the venue task picks by class. `venue_runtime::run` drains every
+    command already in the channel into a ready set and hands the venue the
+    lowest `DispatchClass` first — `RiskReducing` (cancels, stops, sends whose
+    every request is `reduce_only`) > `Amend` > `Opening` > `Administration`
+    (leverage, symbol admission, boot reads) — FIFO within a class, with one
+    dependency rule: a cancel or amend naming an order whose send is itself
+    still queued waits behind that send and nothing else. One gateway call
+    stays in flight at a time; a slow leverage administration is not
+    pre-empted, the cancel behind it goes next. Amend coalescing (≤ 10,
+    distinct ids) now gathers ready amends past intervening commands; the
+    one-slot `deferred` buffer is gone. At runtime the only read that reaches
+    the venue task is symbol admission — live account and history reads use
+    the independent `AccountRecoveryClient` — so no second reads task was
+    built. Proof: `engine-core/src/tests/venue_priority.rs`
+    (`a_queued_protective_cancel_is_sent_before_unsent_openings_once_the_current_send_releases`,
+    `a_cancel_for_a_still_queued_send_waits_for_that_send_but_passes_other_openings`,
+    `a_reducing_order_and_a_cancel_ignore_authority_epoch_and_expiry`,
+    `a_superseded_opening_is_answered_without_a_venue_answer_or_a_quota_charge`,
+    `a_batch_is_risk_reducing_only_when_every_request_reduces_the_physical_position`);
+    `slow_order_fsync_does_not_block_cancels_and_an_unsent_order_can_be_cancelled`
+    and `a_stalled_order_lookup_cannot_hold_a_cancel_or_a_reduction` unchanged
+    and green. Under `engine sim` and `engine backtest` the TTL runs on tape
+    time, so a replay can expire an opening a live run would not; that is the
+    same rule the live engine applies, applied to the tape's clock.
+  - F15 in part. `scripts/research/run_engine_backtest.py` adds an `evidence`
+    block to `metrics.json` (`unqualified_forced_fills` =
+    `venue.fills_without_book`, `reconciliation_agrees`, `economics_qualified`,
+    `reasons`) and prints `UNQUALIFIED economics: …` when a stop or liquidation
+    was priced at the mark with no book side to walk, or the two ledgers
+    disagree — a diagnostic, not strategy evidence. Three tests in
+    `tests/research/backtest/test_run_engine_backtest_evidence.py`. Venue-model
+    profiles for the simulator (trigger source, throttling, partial-fill
+    rules) are not built; the simulator stays a Bybit model and says so.
+  - Not covered / still open. Cross-process quota scope: the MEXC pacer is
+    process-local by construction (`shared_pacer` keys on the REST base and
+    `sha256(key)` within one process), and the source says so — two processes
+    on one key, or the host's IP-wide budget, are not covered. Key-derived
+    identity migration for the existing lease path: nothing here migrates the
+    `key-…` identity to `uid-…`, so the lease file name, the registry file and
+    `EXPECTED_ENGINE_ACCOUNT_USER_ID` in `/etc/liquidity-migration/engine-mexc.env`
+    are all still the operator's to write. Capability-specific live evidence
+    for MEXC: fill attribution, fee, reduction, protection place and trigger,
+    and reconnect/history recovery, observed on `mexc_mainnet` with this
+    adapter; no receipt is manufactured, and the promotion criteria are in
+    [operations.md](docs/operations.md) §MEXC Realm. Not built from the audit's
+    list, by decision: the F12 stress table (duplicates `disaster_stop_fraction`
+    on one account), F13/F14 coordinator and fleet allocation (the audit itself
+    defers them until two venues qualify), F15 venue-model profiles, F20
+    persisted markout obligations (a `SegmentBase` shape change the incumbent
+    could not read), F16/F17 latency-cohort and production-day reconciliation
+    exercises (host data, not code).
+
 - **2026-09-09 — The host reclaims its own storage: verified history first, budgeted by `statvfs`, and the sealed WAL below the engine's own retention floor is now prunable once its Drive copy is proven. Owner override of the standing "no live WAL is pruned" rule: "this system must be self sufficient. If it doesn't impact operation then go ahead and prune it."**
   - The reading, 13:5x UTC. `/` is 117.0 GiB with 27.5 GiB writable free
     (`f_bavail`); the two Bybit WAL families hold 80 and 79 segments of
