@@ -1358,6 +1358,15 @@ mod boot_shape_tests {
 }
 
 impl WalRecord {
+    /// Whether this execution record carries its own allocation.
+    pub fn records_allocation(&self) -> bool {
+        match self {
+            Self::OrderUpdate { update, .. } => update.records_allocation(),
+            Self::RecoveredFill { allocation, .. } => allocation.is_some(),
+            _ => false,
+        }
+    }
+
     pub fn recovered_callback(&self) -> Option<(Vec<StrategyId>, OrderUpdate)> {
         let Self::RecoveredFill {
             callbacks: Some(callbacks),

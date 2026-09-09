@@ -973,10 +973,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         .then(|| prepared.allocation.slices[0].strategy)
                 })
             });
+            let recorded = record.records_allocation();
             if let Some(allocation) = allocation {
                 recovered_state
                     .attribution
-                    .commit_portfolio_fill(allocation)
+                    .commit_portfolio_fill(allocation, recorded)
                     .map_err(EngineError::State)?;
             }
             if owned {

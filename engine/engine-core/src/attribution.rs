@@ -62,7 +62,8 @@ pub(crate) struct PreparedAllocation {
     accounting: crate::execution_accounting::AccountingChange,
     strategy: StrategyId,
     symbol: SymbolId,
-    legacy: bool,
+    /// The binary64 signed quantity this fill puts into the sleeve's sum.
+    /// `None` when the venue stated exact amounts.
     legacy_input: Option<engine_types::numeric::Exact>,
 }
 
@@ -134,7 +135,7 @@ impl Attribution {
                     let prepared = self
                         .prepare_portfolio_update_for_order(request, strategy_names, update)?
                         .ok_or("recorded fill has no valid allocation")?;
-                    self.commit_portfolio_fill(prepared)?;
+                    self.commit_portfolio_fill(prepared, true)?;
                     if let Some(request) = request {
                         self.remember_order_stop(request);
                     }
@@ -177,7 +178,7 @@ impl Attribution {
                     let prepared = self
                         .prepare_portfolio_recovered_for_order(request, strategy_names, record)?
                         .ok_or("recorded recovered fill has no valid allocation")?;
-                    self.commit_portfolio_fill(prepared)?;
+                    self.commit_portfolio_fill(prepared, true)?;
                     if let Some(request) = request {
                         self.remember_order_stop(request);
                     }
@@ -412,7 +413,6 @@ impl Attribution {
             accounting,
             strategy,
             symbol: *symbol,
-            legacy: amounts.is_none(),
             legacy_input,
         }))
     }
@@ -465,9 +465,44 @@ impl Attribution {
             accounting,
             strategy,
             symbol: *symbol,
-            legacy: amounts.is_none(),
             legacy_input,
         })
+    }
+
+    /// This sleeve's legacy sum with one more binary64 reading in it. Taken
+    /// before the fill is applied, because a note that cannot be stored must
+    /// not leave the fill half applied.
+    fn note_legacy_reading(
+        &self,
+        key: (StrategyId, SymbolId),
+        signed: &engine_types::numeric::Exact,
+    ) -> Result<crate::legacy_quantity::Origin, String> {
+        let mut origin = self
+            .legacy_quantities
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        origin.note(signed)?;
+        Ok(origin)
+    }
+
+    /// The tail of a fill whose quantity the log keeps only as the binary64
+    /// `qty` field: under `FLAT` the sum is the readings' own rounding rather
+    /// than a holding, and what survives remembers the readings it came from
+    /// so a grid adoption can resolve it.
+    fn settle_legacy_sum(
+        &mut self,
+        key: (StrategyId, SymbolId),
+        origin: crate::legacy_quantity::Origin,
+    ) {
+        if self.signed(key.0, key.1).abs() < FLAT {
+            self.inventory.remove(key.0, key.1);
+        }
+        if self.inventory.position(key.0, key.1).is_none() {
+            self.legacy_quantities.remove(&key);
+        } else {
+            self.legacy_quantities.insert(key, origin);
+        }
     }
 
     pub(crate) fn commit_prepared(&mut self, prepared: PreparedAllocation) -> Result<(), String> {
@@ -476,24 +511,22 @@ impl Attribution {
             accounting,
             strategy,
             symbol,
-            legacy,
             legacy_input,
         } = prepared;
-        let mut origin = self.legacy_quantities.get(&(strategy, symbol)).cloned();
-        if let Some(input) = legacy_input {
-            origin.get_or_insert_default().note(&input)?;
-        }
+        let key = (strategy, symbol);
+        let origin = legacy_input
+            .map(|input| self.note_legacy_reading(key, &input))
+            .transpose()?;
         self.inventory.validate_change(&change)?;
         self.accounting.validate_change(&accounting)?;
         self.inventory.apply(change)?;
         self.accounting.apply(accounting)?;
-        if legacy && self.signed(strategy, symbol).abs() < FLAT {
-            self.inventory.remove(strategy, symbol);
-        }
-        if self.inventory.position(strategy, symbol).is_none() {
-            self.legacy_quantities.remove(&(strategy, symbol));
-        } else if let Some(origin) = origin {
-            self.legacy_quantities.insert((strategy, symbol), origin);
+        match origin {
+            Some(origin) => self.settle_legacy_sum(key, origin),
+            None if self.inventory.position(strategy, symbol).is_none() => {
+                self.legacy_quantities.remove(&key);
+            }
+            None => {}
         }
         Ok(())
     }
@@ -594,7 +627,6 @@ impl Attribution {
             accounting,
             strategy,
             symbol,
-            legacy,
             legacy_input,
         })
     }

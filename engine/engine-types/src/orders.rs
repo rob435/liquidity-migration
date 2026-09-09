@@ -765,6 +765,18 @@ pub enum OrderUpdate {
     },
 }
 
+impl OrderUpdate {
+    /// Whether a fill carries its own allocation. When it does not, a read of
+    /// the record derives the quantity from the binary64 `qty` field instead
+    /// of the recorded exact one.
+    pub fn records_allocation(&self) -> bool {
+        match self {
+            Self::Fill { allocation, .. } => allocation.is_some(),
+            _ => false,
+        }
+    }
+}
+
 /// Tick size, step size, and minimums for one instrument.
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InstrumentRule {

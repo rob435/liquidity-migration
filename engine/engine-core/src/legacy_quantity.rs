@@ -672,7 +672,7 @@ mod tests {
             .prepare_portfolio_update_for_order(Some(&request), &["left".into()], &update)
             .unwrap()
             .unwrap();
-        claims.commit_portfolio_fill(prepared).unwrap();
+        claims.commit_portfolio_fill(prepared, true).unwrap();
         assert_eq!(
             claims.signed_exact(StrategyId(0), SymbolId(0)),
             exact("0.000000000000000001")

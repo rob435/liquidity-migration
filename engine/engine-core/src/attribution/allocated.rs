@@ -7,6 +7,9 @@ pub(crate) struct PreparedPortfolioFill {
     pub allocation: ExecutionAllocation,
     inventory: crate::inventory::InventoryBatchChange,
     accounting: crate::execution_accounting::AccountingBatch,
+    /// The binary64 signed quantity this execution puts into each sleeve's
+    /// sum. Empty when the venue stated exact amounts.
+    legacy_inputs: Vec<(StrategyId, SymbolId, engine_types::numeric::Exact)>,
 }
 
 #[derive(Clone, Copy)]
@@ -285,21 +288,64 @@ impl Attribution {
                 })
                 .collect(),
         )?;
+        let legacy_inputs = if execution.amounts.is_some() {
+            Vec::new()
+        } else {
+            allocation
+                .slices
+                .iter()
+                .map(|slice| {
+                    let signed = if execution.side == Side::Buy {
+                        slice.quantity.clone()
+                    } else {
+                        -&slice.quantity
+                    };
+                    (slice.strategy, execution.symbol, signed)
+                })
+                .collect()
+        };
         Ok(Some(PreparedPortfolioFill {
             allocation,
             inventory,
             accounting,
+            legacy_inputs,
         }))
     }
 
+    /// `recorded_allocation` is whether the log carries this allocation. When
+    /// it does, the quantity every later read of the record uses is the
+    /// recorded exact one. When it does not, a read re-derives it from the
+    /// binary64 `qty` field, so the fill runs the same legacy tail that
+    /// replay of the record will run — `commit_prepared`'s.
     pub(crate) fn commit_portfolio_fill(
         &mut self,
         prepared: PreparedPortfolioFill,
+        recorded_allocation: bool,
     ) -> Result<(), String> {
-        self.inventory.validate_batch(&prepared.inventory)?;
-        self.accounting.validate_batch(&prepared.accounting)?;
-        self.inventory.apply_batch(prepared.inventory)?;
-        self.accounting.apply_batch(prepared.accounting)?;
+        let PreparedPortfolioFill {
+            inventory,
+            accounting,
+            legacy_inputs,
+            ..
+        } = prepared;
+        let legacy_inputs = if recorded_allocation {
+            Vec::new()
+        } else {
+            legacy_inputs
+        };
+        let origins = legacy_inputs
+            .iter()
+            .map(|(strategy, symbol, signed)| {
+                self.note_legacy_reading((*strategy, *symbol), signed)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        self.inventory.validate_batch(&inventory)?;
+        self.accounting.validate_batch(&accounting)?;
+        self.inventory.apply_batch(inventory)?;
+        self.accounting.apply_batch(accounting)?;
+        for ((strategy, symbol, _), origin) in legacy_inputs.into_iter().zip(origins) {
+            self.settle_legacy_sum((strategy, symbol), origin);
+        }
         self.legacy_quantities
             .retain(|(strategy, symbol), _| self.inventory.position(*strategy, *symbol).is_some());
         Ok(())
@@ -346,7 +392,7 @@ impl Attribution {
                 _ => unreachable!(),
             }
             .ok_or("recorded allocation has no owner")?;
-            self.commit_portfolio_fill(prepared)?;
+            self.commit_portfolio_fill(prepared, true)?;
             return Ok(true);
         }
         if request.is_some_and(|r| r.is_portfolio_reduction()) {

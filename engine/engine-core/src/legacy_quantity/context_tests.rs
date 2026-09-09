@@ -397,7 +397,7 @@ fn native_sub_ulp_partial_is_not_erased_by_a_legacy_forced_overfill() {
             .unwrap()
             .unwrap();
         let mut claims = claims;
-        claims.commit_portfolio_fill(prepared).unwrap();
+        claims.commit_portfolio_fill(prepared, true).unwrap();
         assert_eq!(
             claims.signed_exact(StrategyId(0), SymbolId(0)).abs(),
             n("0.00000000000000000001")
@@ -473,7 +473,7 @@ fn current_binary64_full_close_keeps_its_quantity_before_any_grid_adoption() {
         Exact::from_legacy_f64(0.1).unwrap()
     );
     assert!(prepared.allocation.legacy_quantity_step.is_none());
-    claims.commit_portfolio_fill(prepared).unwrap();
+    claims.commit_portfolio_fill(prepared, true).unwrap();
     assert!(claims.snapshot().positions.is_empty());
 }
 
@@ -787,4 +787,45 @@ fn internal_offset_cannot_erase_an_authoritative_canonical_microscopic_position(
     assert!(matches!(native, WalRecord::OrderUpdate {
         update: OrderUpdate::Fill { amounts: Some(amounts), .. }, ..
     } if amounts.quantity.value == delta));
+}
+
+#[test]
+fn a_legacy_close_on_an_adopted_sleeve_leaves_the_live_and_replayed_row_alike() {
+    let names: Vec<String> = ["left", "right", "third"]
+        .iter()
+        .map(|key| (*key).to_string())
+        .collect();
+    let mut records = vec![base(&[], 0.0)];
+    add(&mut records, 0, Side::Buy, "0.1", false, 1000);
+    records.push(plan(&records));
+    assert_eq!(
+        Attribution::try_from_records(&records)
+            .unwrap()
+            .signed_exact(StrategyId(0), SymbolId(0)),
+        n("0.1"),
+        "adoption did not put the sleeve on the venue grid"
+    );
+
+    let closing = fill("legacy-close", Side::Sell, "0.1", false);
+    let (WalRecord::OrderSent { request, .. }, WalRecord::OrderUpdate { update, .. }) =
+        (&closing[0], &closing[1])
+    else {
+        unreachable!()
+    };
+    let mut live = Attribution::try_from_records(&records).unwrap();
+    let prepared = live
+        .prepare_portfolio_update_for_order(Some(request), &names, update)
+        .unwrap()
+        .unwrap();
+    live.commit_portfolio_fill(prepared, false).unwrap();
+
+    records.extend(closing);
+    let replayed = Attribution::try_from_records(&records).unwrap();
+    assert_eq!(live.snapshot(), replayed.snapshot());
+    assert!(live.snapshot().positions.is_empty());
+    assert_eq!(
+        live.validate_sleeve_stop_exact(StrategyId(0), SymbolId(0), Side::Sell, &n("200")),
+        Err("sleeve stop has no owned position".into()),
+        "the live engine can still price a sleeve stop off binary64 rounding"
+    );
 }
