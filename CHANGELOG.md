@@ -68,8 +68,28 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     and twenty-one Python failures reproduce identically on the pristine tree
     from missing container tooling (`ssh-keygen`, `rsync`, `zstd`); ShellCheck is
     absent here. CI runs all of them.
-  - Host action. The fix reaches the realm only through a deploy; until then the
-    mexc engine keeps refusing entries and paging on `may-open:`.
+  - Deployed and verified. [Deploy run `34291380453`](https://github.com/rob435/liquidity-migration/actions/runs/34291380453)
+    installs `c6adead4`; its `vps` handover ran 23:47:14–23:55:04 UTC and
+    restarted the mexc engine at 23:54:07.
+    [Diagnose run `34293758810`](https://github.com/rob435/liquidity-migration/actions/runs/34293758810)
+    is the healthy post-action receipt, and it carries the fault on both sides
+    of the restart in one journal. The previous generation failed twice more at
+    23:53:47.198389 and 23:53:58.212816 UTC, the last firings of the incident.
+    Since 23:54:07 the journal holds only the seven one-time
+    `the venue does not list this instrument` notices and no failure line, and
+    at 00:09:27 the heartbeat reads `engine_commit=c6adead4`, `uptime_s=915`,
+    `may_open=true`, `stream_resets=1`, `strategy_errors=[]`,
+    `entry_blockers=0`. `uptime_s` past the 600 s `CONNECTED_RESYNC` with a
+    stream reset behind it is what closes this: a reset requests execution
+    history, so the sweep ran to completion on the live 132-symbol account
+    rather than being abandoned. Demo and mainnet report the same commit and
+    `may_open=true` at uptimes 1290 and 955 s. The realm refused every entry
+    between 22:48:29 and 23:54:07.
+  - Host action. None for the fault. The MEXC futures wallet still reads
+    `equity 0` at 22:40 UTC, so the realm cannot size an entry until the owner
+    funds it — the same standing item, not a consequence of this incident. The
+    realm's venue clock offset reads `-1935 ms` against Bybit's `-9` and is not
+    diagnosed.
 
 - **2026-09-08 — Filter the worker's universe to what the engine's venue lists.**
   - Why. A LONG batch naming a symbol the venue does not list stays pending in
