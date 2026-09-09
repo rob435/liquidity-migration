@@ -10,11 +10,22 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
-- **2026-09-09 — Incident `demo-0922e9f30da3bf98`: the demo worker's CARRY cycle stopped completing at the UTC decision roll for ten minutes, paged CRITICAL, and cleared itself. Root cause open; no code changed.**
+- **2026-09-09 — Incidents `demo-0922e9f30da3bf98` and `mainnet-014ec4a90a2fde5f`: every signal worker's CARRY cycle stopped completing at the UTC decision roll for five to eight minutes, paged CRITICAL on every realm including the funded one, and cleared itself. Root cause open; no code changed.**
+  - Scope. All three running realms stall at the same boundary, not demo alone,
+    and all three watchdogs page. Last CARRY completion before the stall:
+    mainnet 00:00:33.728, mexc 00:00:54.261, demo 00:00:56.980 UTC. The funded
+    realm pages too — the mainnet liveness watchdog logs `CRITICAL
+    worker-status:liquidity-migration-signal-worker-mainnet.service:
+    liquidity-migration-signal-worker-mainnet.service reports 'degraded': carry
+    cycle is 250s old (limit 180s)` at 00:04:43, `280s old` at 00:05:14 and
+    `310s old` at 00:05:44, and that page fired this on-call session. mexc pages
+    the same clause at 00:04:43 (`229s old`), 00:05:14 and 00:05:44, the last
+    reading `ticker coverage incomplete (149/149 rows, 149/149 topics accepted);
+    carry cycle is 290s old (limit 180s)`.
   - Start. The demo signal worker boots at 23:47:52 UTC in the `c6adead4`
     handover (deploy [run `34291380453`](https://github.com/rob435/liquidity-migration/actions/runs/34291380453)) and its
     last CARRY cycle completes at 00:00:56.980 UTC, four seconds after the
-    daily decision boundary. Nothing completes for the next ten minutes. The
+    daily decision boundary. Nothing completes for the next eight minutes. The
     demo liveness watchdog pages `CRITICAL
     liquidity-migration-signal-worker-demo.service reports 'degraded': carry
     cycle is 196s old (limit 180s)`, ref
@@ -34,11 +45,18 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     is frozen: `try_carry_watermark`
     (`engine/signal-worker/src/live.rs:1812`) is called every 60 s from
     `advance_kline_watermark` — the same call that commits the LONG watermark
-    beside it — and returns without committing. The mainnet (168 carry symbols)
-    and mexc (149) workers cross the same boundary `ready` throughout. All three
-    engines read `may_open=true`, `strategy_errors=[]`, `orders_sent=0`, with
-    demo/mainnet positions unchanged at four each, so nothing traded on the
-    stalled lane.
+    beside it — and returns without committing.
+    [Run `34293442003`](https://github.com/rob435/liquidity-migration/actions/runs/34293442003)
+    (`mode=diagnose`, 00:05:15 UTC) reads the same shape on the other two:
+    mainnet `status=degraded`, CARRY 00:00:33.728 against LONG 00:04:31.047,
+    `last_carry_upcoming_ts_ms` null, `carry_output_sequence` 55092; mexc
+    `status=degraded`, CARRY 00:00:54.261 against LONG 00:04:20.118,
+    `carry_output_sequence` 29. Both carry `spool_backpressured=false` and
+    `bybit_ws_gap_open=false`. All three engines read `may_open=true`,
+    `strategy_errors=[]`, `orders_sent=0`, with demo/mainnet positions
+    unchanged at four each, so nothing traded on the stalled lane, and no
+    decision was missed: `decision_kline_lag_ms` is 1200000, so the
+    2026-09-09 decision could not be published before 00:20 UTC in any case.
   - Recovery. No action was taken. [Run `34293875357`](https://github.com/rob435/liquidity-migration/actions/runs/34293875357)
     (`mode=diagnose`, 00:10:59 UTC) reads the demo worker `status=ready`,
     CARRY cycle 00:10:54.894 (5 s old), `last_carry_upcoming_ts_ms`
@@ -48,19 +66,62 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     at 00:18:59 UTC carries the watchdog's own receipt — `ok scope=demo
     warnings-present-no-critical` on four consecutive firings, 00:16:56 through
     00:18:57 — with the CARRY cycle 5 s old. The alert ref is clear.
-  - Open. Which of `try_carry_watermark`'s early returns held for those ten
-    minutes is not established. The two candidates are the lane gate
+    The other two clear before that same reading and demo is the outlier: the
+    run's own mainnet heartbeat is `status=ready` with CARRY 00:05:59.870, and
+    mexc `ready` with CARRY 00:05:41.743, both against their 00:05:44 pages. So
+    mexc stalls 4 min 47 s, mainnet 5 min 26 s, and demo — still `degraded` at
+    00:05:59.521 and `ready` by 00:09:29 with CARRY 00:08:55.161
+    ([run `34293758810`](https://github.com/rob435/liquidity-migration/actions/runs/34293758810),
+    00:09:26–00:09:29) — between five and eight minutes. Every realm's first
+    completion after the stall lands within a minute of 00:05:00 except demo's.
+    The clearing burst is about one carry output per carry symbol:
+    `carry_output_sequence` runs mexc 29 → 178 (+149 against 149 carry symbols)
+    in its clearing minute and then does not move again by 00:14:14, mainnet
+    55092 → 55273 (+181) over the same minute, demo 55146 → 55377 (+231) across
+    its longer stall. mainnet's `recovering` at 00:14:15 in
+    [run `34294110977`](https://github.com/rob435/liquidity-migration/actions/runs/34294110977)
+    is a later, separate `bybit_ws_ticker_coverage_complete=false` wobble, not
+    the tail of this stall.
+  - Open. Which of `try_carry_watermark`'s early returns held for those minutes
+    is not established. The two candidates are the lane gate
     (`carry_required_lanes_pending`, `engine/signal-worker/src/live.rs:2700`:
     an in-flight or last-failed funding pass blocks CARRY, and the funding lane
     is spawned on the same 60000 ms cadence as the kline tick that calls the
     gate) and the coverage gate (`covered < required`,
-    `engine/signal-worker/src/live.rs:1888`: at the roll `source_through_ms`
+    `engine/signal-worker/src/live.rs:1886`: at the roll `source_through_ms`
     advances a day and every active symbol must have kline and funding coverage
     through the new boundary). The one reading that would settle it is the
     worker's `LaneState` and the gate that returned, at the moment of the
     stall. Neither is in the heartbeat and `mode=diagnose` prints only the
     heartbeat subset, so no sanctioned host reading distinguishes them today.
     The next UTC decision roll is the natural repeat.
+  - What the window fits, unproven. The stall opens at the first kline tick
+    after `closed_kline_end` — `floor_hour(now - KLINE_PUBLICATION_LAG_MS
+    60000)`, `engine/signal-worker/src/live/acquisition.rs:858` — crosses the
+    new day, so `carry_source_through` (`engine/signal-worker/src/live.rs:2216`)
+    rolls its decision frontier a day forward from 00:01 and every carry
+    symbol's required funding range then ends at the new 00:00 boundary. The
+    funding lane may not ask for that settlement until `floor_hour(now -
+    FUNDING_PUBLICATION_LAG_MS 300000)` reaches it, which is 00:05
+    (`spawn_funding_lane`, `engine/signal-worker/src/live.rs:1369`), and it then
+    sweeps one symbol per request, awaiting each round trip before the next
+    (`spawn_funding_fetch_lane`,
+    `engine/signal-worker/src/live/acquisition.rs:306`; `spawn_repair_lane` at
+    `:392` is the same shape). mexc and mainnet clear 42 s and 60 s after
+    00:05:00. That fits a demand frontier four minutes ahead of the supply
+    frontier, with a sweep of about a minute behind it; it fits either gate
+    equally, and demo's longer stall is unexplained by it, so it stays a
+    hypothesis until the stall is read from inside the worker. Meanwhile the
+    heartbeat publishes
+    `carry_cycle_cadence_ms` as `live.kline_cadence_ms` 60000
+    (`engine/signal-worker/src/live.rs:2384`), so a lane whose real frontier
+    moves hourly and daily is judged on a 60 s clock.
+  - Owner's call. Closing this means shortening the post-roll sweep, holding
+    the CARRY source frontier back to what the funding lane may already
+    request, or publishing a CARRY cadence that admits the sweep. Each changes
+    either the fleet's request pressure on a venue or when the funded realm
+    pages, so none is taken unattended; nothing on the host is impaired
+    meanwhile and no decision is lost, `decision_kline_lag_ms` being 1200000.
 
 - **2026-09-08 — Incident `mexc-a361f5d18861421a`: a rowless execution-history sweep reported no progress, so the mexc engine abandoned every recovery pass and could never open.**
   - Start. The mexc engine boots at 22:38:15 UTC on `62234c95`, logs `mexc
