@@ -2369,7 +2369,7 @@ fn invalid_kernel_verdicts_are_finite_fail_closed_records() {
         RiskVerdict::Allow { qty: 2.0 },
         RiskVerdict::Deny {
             reason: DenyReason::EnvelopeBreached {
-                worst_case_loss_usdt: f64::INFINITY,
+                modelled_stop_charge_usdt: f64::INFINITY,
                 allowance_usdt: 1.0,
             },
         },

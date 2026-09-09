@@ -184,9 +184,13 @@ pub enum DenyReason {
     /// Read from historical logs, never written. The retired daily-loss guard
     /// produced this shape, so it remains decodable for WAL compatibility.
     LossGuardTripped { equity_usdt: f64, floor_usdt: f64 },
-    /// The order would breach the equity-anchored envelope.
+    /// The order would breach the equity-anchored envelope. The charge is the
+    /// book's modelled stop loss under the configured fractions, not a bound
+    /// on what the account can lose.
     EnvelopeBreached {
-        worst_case_loss_usdt: f64,
+        /// Wire name predates the Rust name and is what replay reads.
+        #[serde(rename = "worst_case_loss_usdt")]
+        modelled_stop_charge_usdt: f64,
         allowance_usdt: f64,
     },
     /// The whole book's gross notional, added up without letting one symbol's

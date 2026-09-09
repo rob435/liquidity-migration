@@ -1,11 +1,36 @@
 //! The equity-anchored envelope, against the same table as
-//! tests/policy/test_equity_anchored_envelope.py, plus the worst-case-loss
-//! allowance the Rust deny reason is written in.
+//! tests/policy/test_equity_anchored_envelope.py, plus the modelled stop
+//! charge the Rust deny reason is written in.
 
 use super::common::*;
 use engine_risk::{Kernel, KernelConfig};
 use engine_types::orders::Side;
 use engine_types::risk::{DenyReason, RiskKernel, RiskVerdict};
+
+#[test]
+fn the_envelope_denial_still_writes_the_charge_under_its_original_wire_name() {
+    let json = serde_json::to_string(&DenyReason::EnvelopeBreached {
+        modelled_stop_charge_usdt: 175_003.5,
+        allowance_usdt: 175_000.0,
+    })
+    .unwrap();
+    assert!(
+        json.contains("\"worst_case_loss_usdt\":175003.5"),
+        "the WAL key may not move with the Rust name: {json}"
+    );
+    assert!(!json.contains("modelled_stop_charge_usdt"), "{json}");
+    let back: DenyReason = serde_json::from_str(
+        r#"{"EnvelopeBreached":{"worst_case_loss_usdt":1.0,"allowance_usdt":2.0}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        back,
+        DenyReason::EnvelopeBreached {
+            modelled_stop_charge_usdt: 1.0,
+            allowance_usdt: 2.0,
+        }
+    );
+}
 
 fn observe(kernel: &mut Kernel, equity: f64) -> RiskVerdict {
     let now = SEC;
@@ -245,11 +270,11 @@ fn a_book_one_step_over_the_allowance_is_refused() {
         RiskVerdict::Deny {
             reason:
                 DenyReason::EnvelopeBreached {
-                    worst_case_loss_usdt,
+                    modelled_stop_charge_usdt,
                     allowance_usdt,
                 },
         } => {
-            assert!((worst_case_loss_usdt - 175_003.5).abs() < 1e-6);
+            assert!((modelled_stop_charge_usdt - 175_003.5).abs() < 1e-6);
             assert!((allowance_usdt - 175_000.0).abs() < 1e-6);
         }
         other => panic!("expected an envelope breach, got {other:?}"),
@@ -298,10 +323,10 @@ fn a_stop_wider_than_the_disaster_stop_is_charged_at_its_own_distance() {
         RiskVerdict::Deny {
             reason:
                 DenyReason::EnvelopeBreached {
-                    worst_case_loss_usdt,
+                    modelled_stop_charge_usdt,
                     ..
                 },
-        } => assert!((worst_case_loss_usdt - 200_000.0).abs() < 1e-6),
+        } => assert!((modelled_stop_charge_usdt - 200_000.0).abs() < 1e-6),
         other => panic!("expected an envelope breach, got {other:?}"),
     }
 }

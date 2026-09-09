@@ -64,7 +64,13 @@ impl Envelope {
     pub(crate) fn viable_for_new_exposure(&self) -> bool {
         !self.tracks_equity || self.reference_usdt >= self.floor_usdt
     }
-    pub(crate) fn position_worst_case_usdt(&self, notional: &Exact, stop: &Exact) -> Exact {
+    /// What this position loses if its stop fills at the trigger, charged at
+    /// the wider of the intent's own stop distance and `disaster_stop_fraction`.
+    ///
+    /// It is not a bound on the account's loss: a gap through the trigger, a
+    /// liquidation, a venue outage that leaves the stop unfilled, funding, or
+    /// collateral that stops being worth what it was all lose more than this.
+    pub(crate) fn modelled_stop_charge_usdt(&self, notional: &Exact, stop: &Exact) -> Exact {
         notional * stop.max(&self.disaster_stop_fraction)
     }
     pub(crate) fn pending_totals(&self, rows: &[(Exact, Exact)]) -> (Exact, Exact) {
@@ -126,7 +132,7 @@ mod tests {
                 |(gross, loss), (notional, fraction)| {
                     (
                         gross + notional,
-                        loss + envelope.position_worst_case_usdt(notional, fraction),
+                        loss + envelope.modelled_stop_charge_usdt(notional, fraction),
                     )
                 },
             );

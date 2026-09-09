@@ -444,9 +444,9 @@ impl Kernel {
             self.projected_book(&notional, &fraction, account, &view)?
         };
         let allowance = self.envelope.allowance_usdt();
-        if projected.worst_case_loss_usdt > allowance {
+        if projected.modelled_stop_charge_usdt > allowance {
             return Err(DenyReason::EnvelopeBreached {
-                worst_case_loss_usdt: report(&projected.worst_case_loss_usdt),
+                modelled_stop_charge_usdt: report(&projected.modelled_stop_charge_usdt),
                 allowance_usdt: report(&allowance),
             });
         }
@@ -529,7 +529,7 @@ impl Kernel {
             .map_err(unknown)?;
         let mut projected = Projected {
             gross_usdt: notional.clone(),
-            worst_case_loss_usdt: self.envelope.position_worst_case_usdt(notional, fraction),
+            modelled_stop_charge_usdt: self.envelope.modelled_stop_charge_usdt(notional, fraction),
         };
         for (symbol, qty) in view.exposures() {
             let fill = recent.remove(&symbol.0);
@@ -552,8 +552,8 @@ impl Kernel {
             let notional = effective.abs() * price;
             let stop = self.held_stop_fraction(symbol, view)?.max(recent_stop);
             projected.add(&notional);
-            projected.worst_case_loss_usdt +=
-                self.envelope.position_worst_case_usdt(&notional, &stop);
+            projected.modelled_stop_charge_usdt +=
+                self.envelope.modelled_stop_charge_usdt(&notional, &stop);
         }
         for (symbol, row) in recent {
             if row.signed_qty.abs() <= policy(self.cfg.qty_tolerance) {
@@ -567,8 +567,9 @@ impl Kernel {
                 .ok_or_else(|| unknown("no price for a just-filled symbol"))?;
             let notional = row.signed_qty.abs() * price;
             projected.add(&notional);
-            projected.worst_case_loss_usdt +=
-                self.envelope.position_worst_case_usdt(&notional, &fraction);
+            projected.modelled_stop_charge_usdt += self
+                .envelope
+                .modelled_stop_charge_usdt(&notional, &fraction);
         }
         self.add_pending(&mut projected, view)?;
         Ok(projected)
@@ -580,7 +581,7 @@ impl Kernel {
             .map_err(unknown)?;
         let (gross, loss) = self.envelope.pending_totals(&rows);
         projected.gross_usdt += gross;
-        projected.worst_case_loss_usdt += loss;
+        projected.modelled_stop_charge_usdt += loss;
         Ok(())
     }
     fn account_caps(
@@ -1029,7 +1030,7 @@ fn read_stop(intent: &Intent, low: &Exact, high: &Exact) -> Result<Exact, DenyRe
 #[derive(Default)]
 struct Projected {
     gross_usdt: Exact,
-    worst_case_loss_usdt: Exact,
+    modelled_stop_charge_usdt: Exact,
 }
 impl Projected {
     fn add(&mut self, notional: &Exact) {

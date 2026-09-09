@@ -207,7 +207,7 @@ impl Kernel {
     ) -> Result<Projected, DenyReason> {
         let mut projected = Projected {
             gross_usdt: notional.clone(),
-            worst_case_loss_usdt: self.envelope.position_worst_case_usdt(notional, fraction),
+            modelled_stop_charge_usdt: self.envelope.modelled_stop_charge_usdt(notional, fraction),
         };
         for row in &portfolio.positions {
             let current = self
@@ -229,8 +229,9 @@ impl Kernel {
                 .map_err(|e| unknown(e.to_string()))?;
             let notional = row.qty.abs() * price;
             projected.add(&notional);
-            projected.worst_case_loss_usdt +=
-                self.envelope.position_worst_case_usdt(&notional, &fraction);
+            projected.modelled_stop_charge_usdt += self
+                .envelope
+                .modelled_stop_charge_usdt(&notional, &fraction);
         }
         let recent = self
             .book
@@ -266,8 +267,8 @@ impl Kernel {
             };
             let notional = residual.abs() * price;
             projected.add(&notional);
-            projected.worst_case_loss_usdt +=
-                self.envelope.position_worst_case_usdt(&notional, &stop);
+            projected.modelled_stop_charge_usdt +=
+                self.envelope.modelled_stop_charge_usdt(&notional, &stop);
         }
         self.add_pending(&mut projected, view)?;
         Ok(projected)

@@ -487,7 +487,7 @@ mod tests {
                         |(gross, loss), (_, notional, fraction)| {
                             (
                                 gross + notional,
-                                loss + envelope.position_worst_case_usdt(notional, fraction),
+                                loss + envelope.modelled_stop_charge_usdt(notional, fraction),
                             )
                         },
                     )

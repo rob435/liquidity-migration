@@ -34,7 +34,8 @@ fn positive(value: f64, name: &str) -> Result<(), ConfigError> {
 /// and the worst-case-loss allowance derived from it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EnvelopeConfig {
-    /// False pins the reference at `reference_usdt` forever (the demo profile).
+    /// False pins the reference at `reference_usdt` forever: a profile with no
+    /// `capital_reference` block, or `mode = "fixed"`.
     pub tracks_equity: bool,
     /// The reference every cap below was sized against.
     pub reference_usdt: f64,

@@ -106,9 +106,10 @@ checks both public and private crate sources for undeclared hosts.
 
 #### Selectable Realms
 
-Readiness is declared in `VenueName::readiness` and enforced at boot by
-`require_engine_run_ready` (`engine/engine-core/src/runner.rs`), before a log,
-credential, or socket is opened.
+Readiness is derived from the capability matrix below by
+`VenueName::readiness` and enforced at boot by `require_engine_run_ready`
+(`engine/engine-core/src/runner.rs`), before a log, credential, or socket is
+opened.
 
 | `engine.toml` venue | Code readiness | Engine run permitted | Boot contract |
 | :--- | :--- | :---: | :--- |
@@ -116,8 +117,8 @@ credential, or socket is opened.
 | `bybit_mainnet` | `live-proven` | yes | Mainnet realm credentials, account lease and `REAL_MONEY` arming. |
 | `hyperliquid_testnet` | `testnet-canary` | yes | Testnet realm only. |
 | `lighter_testnet` | `testnet-canary` | yes | Testnet realm only. |
-| `mexc_mainnet` | `live-proven` | yes | Funded MEXC futures account, `REAL_MONEY` arming and account lease. Evidence boundary: the 2026-09-08 20:16 UTC canary lifecycle (venue order `852400800159322624`); no fill, stop trigger or `isTaker` push observed yet. |
-| `hyperliquid_mainnet` | `live-canary` | no | Canary permitted with `REAL_MONEY` armed; `engine run` refused until one reviewed `engine canary-order` lifecycle on this exact realm moves it to `live-proven`. `hyperliquid_testnet` is a different chain and a different account, so its evidence does not carry. |
+| `mexc_mainnet` | `live-canary` | no | Canary permitted with `REAL_MONEY` armed; `engine run` refused. Evidence boundary: the 2026-09-08 20:16 UTC canary lifecycle (venue order `852400800159322624`) was taken on `32f27d4b`, before the execution-v2 catalogue and encoding change in `1e2cfc22`, so it is stale and carries no capability. No fill, stop trigger or `isTaker` push has been observed. |
+| `hyperliquid_mainnet` | `live-canary` | no | Canary permitted with `REAL_MONEY` armed; `engine run` refused until the unattended capability set carries current receipts from this exact realm. No order lifecycle has run here at all. `hyperliquid_testnet` is a different chain and a different account, so its evidence does not carry. |
 | `lighter_mainnet` | `production-blocked` | no | Refused before credential or socket access. |
 | `binance_testnet` | `production-blocked` | no | Refused before credential or socket access. |
 | `binance_mainnet` | `production-blocked` | no | Private engine run refused; public market clients are separate. |
@@ -135,7 +136,7 @@ Readiness labels are code policy; this table does not establish current deployme
 
 | Command | Realms it accepts | Contract |
 | --- | --- | --- |
-| `engine canary-order` | `bybit_demo`, and every `live-canary` realm (`VenueName::require_canary_ready`) — `hyperliquid_mainnet` today | One minimum-lot post-only order away from the touch, cancelled, with two flat account scans; any fill is closed in full and fails the command. Client ids are at most 30 characters, inside MEXC's 32-character `externalOid`; a Hyperliquid id takes the hashed half of the 16-byte `cloid` scheme (prefix `0x02`) and still looks itself up. The order is sized by the notional term, not the lot, wherever the venue states a minimum notional — 10 USD on Hyperliquid. Venue clock: `/v5/market/time` on Bybit, `/api/v1/contract/ping` on MEXC, `/info {"type": "exchangeStatus"}` → `time` on Hyperliquid. Terminal proof: Bybit's order receipt, otherwise `VenueGateway::order_status`; a Hyperliquid order the venue has already dropped from its retained set answers `unknownOid`, which reaches the canary as an error, not as never-accepted. |
+| `engine canary-order` | `bybit_demo`, and every `live-canary` realm (`VenueName::require_canary_ready`) — `mexc_mainnet` and `hyperliquid_mainnet` today | One minimum-lot post-only order away from the touch, cancelled, with two flat account scans; any fill is closed in full and fails the command. Client ids are at most 30 characters, inside MEXC's 32-character `externalOid`; a Hyperliquid id takes the hashed half of the 16-byte `cloid` scheme (prefix `0x02`) and still looks itself up. The order is sized by the notional term, not the lot, wherever the venue states a minimum notional — 10 USD on Hyperliquid. Venue clock: `/v5/market/time` on Bybit, `/api/v1/contract/ping` on MEXC, `/info {"type": "exchangeStatus"}` → `time` on Hyperliquid. Terminal proof: Bybit's order receipt, otherwise `VenueGateway::order_status`; a Hyperliquid order the venue has already dropped from its retained set answers `unknownOid`, which reaches the canary as an error, not as never-accepted. |
 | `engine verify-account-identity`, `engine attest-flat` | Realms with an `InventoryProbe`: `bybit_demo`, `bybit_mainnet`, `mexc_mainnet`, `hyperliquid_mainnet` | Read-only credentials, no order/cancel/amend/stop API on the probe type. MEXC's `AccountIdentity.user_id` is `key-<first 8 bytes of sha256(api key)>`; its scan covers futures balances, positions, working orders and position-bound stop records. Hyperliquid's is the master account address, lower-case `0x` and 40 hex digits, and its scope reads `credential account: Hyperliquid — every open perpetual position and the cross-margin account value, every working order including the reduce-only trigger orders a stop is kept as, and every spot token balance. Vaults and sub-accounts are separate addresses this scan does not read.` Each says so in `AccountInventory.scope`. |
 
 | Private conformance scope | Verified fixture behavior |
@@ -148,6 +149,43 @@ Readiness labels are code policy; this table does not establish current deployme
 | Evidence boundary | Constructed local HTTP/WebSocket fixtures exercise adapter contracts. They do not establish live-account completeness or promote a dormant realm. |
 
 
+#### Capability matrix
+
+`VenueName::capability` holds one row per realm, and `VenueName::readiness`
+derives the label above from it — no realm is assigned a readiness by hand.
+A realm is `live-proven` when, and only when, all six capabilities in
+`UNATTENDED_PROTECTED_TRADING` (`submit`, `cancel`, `fill-attribution`,
+`protection-place`, `protection-trigger`, `reconnect-history-recovery`) carry a
+current receipt from that exact realm.
+
+Legend: `observed <date>` = a dated receipt in `CHANGELOG.md`, `docs/history/`
+or `STATE.md`; `stale <date>` = that receipt predates a change to the adapter's
+execution semantics and counts as `implemented`; `implemented` = the adapter
+does it and offline conformance covers it, the live venue has not been seen
+doing it here; `unknown` = the adapter does not do it.
+
+<!-- BEGIN GENERATED capability-matrix -->
+| Capability | `bybit_demo` | `bybit_mainnet` | `mexc_mainnet` | `hyperliquid_mainnet` | `hyperliquid_testnet` |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `submit` | observed 2026-09-06 | observed 2026-09-06 | stale 2026-09-08 | implemented | implemented |
+| `cancel` | observed 2026-09-06 | observed 2026-08-29 | stale 2026-09-08 | implemented | implemented |
+| `post-only` | observed 2026-09-04 | observed 2026-08-30 | implemented | implemented | implemented |
+| `fill-attribution` | observed 2026-09-06 | observed 2026-09-08 | implemented | implemented | implemented |
+| `partial-fill` | implemented | observed 2026-09-06 | implemented | implemented | implemented |
+| `amend` | implemented | observed 2026-08-29 | unknown | implemented | implemented |
+| `exact-quantity` | observed 2026-09-06 | observed 2026-09-06 | implemented | implemented | implemented |
+| `reduce-below-minimum` | implemented | implemented | unknown | unknown | unknown |
+| `protection-place` | observed 2026-09-09 | observed 2026-09-09 | implemented | implemented | implemented |
+| `protection-change` | observed 2026-09-06 | observed 2026-09-06 | implemented | implemented | implemented |
+| `protection-trigger` | observed 2026-08-25 | observed 2026-09-02 | implemented | implemented | implemented |
+| `reconnect-history-recovery` | observed 2026-09-06 | observed 2026-09-02 | implemented | implemented | implemented |
+| `funding-fee-cash` | observed 2026-09-06 | observed 2026-09-08 | unknown | unknown | unknown |
+<!-- END GENERATED capability-matrix -->
+
+The table is generated from the code by
+`registry::capability_matrix_tests::the_published_capability_matrix_matches_the_registry`,
+which fails on any drift between it and the block above.
+
 #### Invariants
 
 * **Must**: every realm retain its declared readiness and feature mapping in
@@ -155,9 +193,16 @@ Readiness labels are code policy; this table does not establish current deployme
   selection before credential or socket access.
 * **Must**: `engine/engine-venue/tests/venue/conformance.rs` pass under each
   enabled feature, alongside that adapter's exact request and private-stream tests.
-* **Must Never**: a realm move to `live-proven` without reviewed live evidence
-  from that exact realm — the smallest permitted order, and its cancel or fill.
-  A compiled adapter is not evidence.
+* **Must**: readiness for a funded or practice realm be derived from that
+  realm's capability row. `production-blocked` and `read-only` are the only
+  overrides, and each names its reason in `VenueName::readiness_override`.
+* **Must Never**: a realm reach `live-proven` other than through the matrix —
+  every capability in the unattended set `observed` on that exact realm.
+  A compiled adapter is not evidence, and neither is a promotion note.
+* **Must Never**: a receipt taken before a change to that adapter's execution
+  semantics — request encoding, order types, quantity conversion, fill
+  interpretation — count as current. It is `stale`, and worth what
+  `implemented` is worth.
 * **Must Never**: real capital reach a `production-blocked` or `read-only`
   realm. The boot gate refuses the run; there is no override flag.
 * **Must Never**: `engine run` start on a `live-canary` realm. That state
@@ -310,7 +355,7 @@ The risk kernel (`engine-risk`) gates every order before it reaches the venue ad
 | :--- | :--- | :--- | :--- |
 | **Account Freshness** | Account/private-state age within configured bound. | `StaleAccountView` | Blocks growth; a reduction must still be provably safe for the physical exposure interval. |
 | **Quote Freshness** | Quote age within the configured limit. | `StaleQuote` | Blocks new entries; recovery and protective work retain their own admission rules. |
-| **Capital / Margin** | Exact virtual gross and incremental physical margin, including outstanding orders and ambiguous amendment ranges. | `GrossExposureExceeded`, margin or leverage refusal | Refuses additional exposure beyond available account capacity. |
+| **Capital / Margin** | Exact virtual gross and incremental physical margin, including outstanding orders and ambiguous amendment ranges. The book's modelled stop charge — each position's notional × `max(stop_fraction, disaster_stop_fraction)` — against `allowance_usdt`. | `GrossExposureExceeded`, `EnvelopeBreached`, margin or leverage refusal | Refuses additional exposure beyond available account capacity. The modelled stop charge is what the configured stops lose if they fill at their triggers; it is not a bound on account loss, and does not cover a gap through a trigger, a liquidation, a venue outage or collateral revaluation. |
 | **Shared Symbol Ownership** | Exact quantity and stop belong to `(StrategyId, SymbolId)`; physical exposure is the net of all sleeves and pending effects. | Portfolio admission verdict | Same-direction and opposing sleeves are supported; another sleeve’s position is never reassigned or silently netted away. |
 | **Sleeve Reduction** | Requested quantity does not exceed the owning sleeve; any resulting physical exposure has valid protection and margin. | Exact allowed quantity or durable emergency takeover | A virtual reduction can increase physical exposure when sleeves oppose; it does not inherit blanket physical reduce-only permission. |
 | **Rolling Loss / Valuation** | Exact 24-hour net closed PnL compared with the capital loss limit; unknown canonical valuation is explicit. | `RollingLossTripped` or unknown-state refusal | Blocks entry and size increases; exits remain subject to physical safety and venue legality. |
