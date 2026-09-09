@@ -7,7 +7,7 @@
   ],
   "timezone": "utc",
   "schemaVersion": 39,
-  "version": 11,
+  "version": 12,
   "editable": true,
   "graphTooltip": 1,
   "refresh": "1m",
@@ -38,6 +38,8 @@
           "uid": "${DS_METRICS}"
         },
         "query": "label_values(lm_engine_up, realm)",
+        "regex": "/^(demo|mainnet)$/",
+        "allValue": "demo|mainnet",
         "current": {
           "text": "All",
           "value": "$__all"

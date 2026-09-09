@@ -177,6 +177,8 @@ class Host:
         self.systemd = self.host / "etc/systemd/system"
         self.binaries = tmp_path / "bin"
         self.binaries.mkdir(parents=True, exist_ok=True)
+        self.capture = tmp_path / "capture"
+        self.capture.mkdir(parents=True, exist_ok=True)
         self.rclone_log = tmp_path / "rclone.log"
         self.apt_log = tmp_path / "apt.log"
         self.retention_table = tmp_path / "retention.json"
@@ -299,6 +301,11 @@ class Host:
             f"[Service]\nEnvironment=COMMIT={COMMITS['deployed']}\n", encoding="utf-8"
         )
 
+    def capture_config(self, name: str, text: str) -> Path:
+        path = self.capture / f"{name}.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
     def argv(self, *extra: str) -> list[str]:
         families: list[str] = []
         for family in self.families:
@@ -328,6 +335,8 @@ class Host:
             str(self.systemd),
             "--archive-root",
             str(self.archive),
+            "--tape-floor-config",
+            str(self.capture),
             "--no-apt-clean",
             *families,
             *extra,
@@ -790,6 +799,52 @@ def test_growth_and_runway_come_from_the_recorded_samples(host: Host) -> None:
     assert [row["measured_at_s"] for row in _samples(host)][-1] == NOW
 
 
+def test_the_low_water_clears_the_tape_recorders_free_floor(host: Host) -> None:
+    # A recorder under `[storage].min_free_disk_gb` counts every frame and writes
+    # none; a sealed segment below the engine's floor has a verified copy. The
+    # WAL yields first: low water is a writer headroom above the highest
+    # recorder floor, not only above the reserve.
+    two_families(host)
+    host.capture_config("bybit-linear", "[storage]\nmin_free_disk_gb = 25\n")
+    host.capture_config("binance-usdm", "[storage]\nmax_disk_gb = 18\n")  # the recorder's default, 25
+    host.capture_config("spare", "[storage]\nmin_free_disk_gb = 18\n")
+    settings = MODULE.parse_settings(host.argv(*PRESSURE))
+    assert MODULE.tape_free_floor_bytes(settings.tape_floor_configs) == (25 * GIB, [])
+    capacity = 118 * GIB
+    budget = MODULE.measure_budget(statvfs_for(capacity, 30 * GIB), [], NOW, settings, 25 * GIB)
+    assert (budget.reserve_bytes, budget.tape_floor_bytes) == (6 * MIB, 25 * GIB)
+    assert budget.low_water_bytes == 25 * GIB + 2 * MIB
+    assert budget.high_water_bytes == budget.low_water_bytes + 4 * MIB
+
+    # Above the recorders' floor nothing is reclaimed; under it, far above the
+    # reserve, verified history goes.
+    assert host.run(*PRESSURE, capacity=capacity, free=26 * GIB) == 0
+    assert host.status()["reclaimed_by_class"]["wal"] == 0
+    assert host.run(*PRESSURE, capacity=capacity, free=24 * GIB) == 0
+    status = host.status()
+    assert (status["tape_floor_bytes"], status["low_water_bytes"]) == (25 * GIB, 25 * GIB + 2 * MIB)
+    assert status["reclaimed_by_class"]["wal"] > 0
+
+
+def test_an_unreadable_capture_config_is_a_fault_and_the_readable_floors_still_hold(host: Host) -> None:
+    two_families(host)
+    host.capture_config("bybit-linear", "[storage]\nmin_free_disk_gb = 25\n")
+    host.capture_config("broken", "[storage\n")
+    host.capture_config("negative", "[storage]\nmin_free_disk_gb = -1\n")
+    assert host.run(*PRESSURE, capacity=118 * GIB, free=24 * GIB) == 1
+    status = host.status()
+    assert sorted(status["errors"]) == sorted(
+        [error for error in status["errors"] if error.startswith("tape floor ")]
+    )
+    assert {error.split(": ", 1)[0] for error in status["errors"]} == {
+        f"tape floor {host.capture / 'broken.toml'}",
+        f"tape floor {host.capture / 'negative.toml'}",
+    }
+    assert status["tape_floor_bytes"] == 25 * GIB
+    assert status["reclaimed_by_class"]["wal"] > 0
+    assert not host.stamp.exists()
+
+
 def test_the_default_family_list_is_one_engine_wal_per_realm() -> None:
     families = MODULE.default_wal_families()
     assert families == tuple(row.engine_wal for row in realm_table())
@@ -815,6 +870,9 @@ def test_the_flagless_defaults_are_the_ones_the_deployed_unit_relies_on(host: Ho
     assert settings.backup_lock == Path("/var/lib/liquidity-migration/backup/backup.lock")
     assert settings.backup_stage == Path("/var/lib/liquidity-migration/backup/stage")
     assert settings.archive_roots == (Path("/var/lib/liquidity-migration-wal-quarantine"),)
+    assert settings.tape_floor_configs == (Path(MODULE.DEFAULT_TAPE_FLOOR_CONFIG),)
+    # Both recorders hold min_free_disk_gb = 25; the deployed low water clears it.
+    assert MODULE.tape_free_floor_bytes(settings.tape_floor_configs) == (25 * GIB, [])
     assert settings.release_dir == Path("/opt/liquidity-migration-engine")
     assert settings.systemd_dir == Path("/etc/systemd/system")
     assert settings.wal_families == tuple(Path(row.engine_wal) for row in realm_table())
@@ -840,6 +898,7 @@ def test_environment_overrides_use_the_reclaim_prefix_and_flags_win(
     monkeypatch.setenv("RECLAIM_APT_CLEAN", "0")
     monkeypatch.setenv("RECLAIM_WAL_FAMILY", "/var/lib/one/engine.wal /var/lib/two/engine.wal")
     monkeypatch.setenv("RECLAIM_ARCHIVE_ROOT", "/var/lib/quarantine-a /var/lib/quarantine-b")
+    monkeypatch.setenv("RECLAIM_TAPE_FLOOR_CONFIG", "/etc/capture/a.toml /etc/capture")
     settings = MODULE.parse_settings([])
     assert settings.rclone_config == Path("/var/lib/liquidity-migration/backup/other.conf")
     assert settings.remote == "gdrive:Other/engine-state"
@@ -848,6 +907,7 @@ def test_environment_overrides_use_the_reclaim_prefix_and_flags_win(
     assert settings.apt_clean is False
     assert settings.wal_families == (Path("/var/lib/one/engine.wal"), Path("/var/lib/two/engine.wal"))
     assert settings.archive_roots == (Path("/var/lib/quarantine-a"), Path("/var/lib/quarantine-b"))
+    assert settings.tape_floor_configs == (Path("/etc/capture/a.toml"), Path("/etc/capture"))
     overridden = MODULE.parse_settings(
         ["--max-wal-bytes-per-run", "1GiB", "--apt-clean", "--wal-family", "/var/lib/three/engine.wal"]
     )
@@ -865,6 +925,7 @@ def test_bad_arguments_exit_two(host: Host) -> None:
         ("--keep-commit", "not-a-commit"),
         ("--max-wal-bytes-per-run", "12 furlongs"),
         ("--wal-family", "/var/lib/liquidity-migration-engine/heartbeat.json"),
+        ("--tape-floor-config", "relative/capture.toml"),
     ):
         with pytest.raises(SystemExit) as failure:
             host.run(*extra)

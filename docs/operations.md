@@ -665,8 +665,9 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 | Budget term | Value |
 | :--- | :--- |
 | Reserve | `max(12% of capacity, 8 GiB)` |
+| Tape floor | the highest `[storage].min_free_disk_gb` in `deploy/capture/*.toml` (25 GiB); a recorder under it counts every frame and writes none |
 | Writer headroom | `6 GiB` |
-| Low water | reserve + writer headroom; below it, sealed-WAL reclamation is permitted |
+| Low water | `max(reserve, tape floor)` + writer headroom; below it, sealed-WAL reclamation is permitted, so verified WAL yields before a recorder blocks |
 | High water | low water + two days of measured growth |
 | Growth measurement | `statvfs` samples appended to `samples.jsonl`, one per run |
 | Runway | `estimated_runway_s` = (free − low water) / growth, and `runway_with_verified_history_s` counting retained verified WAL as reclaimable, both in `status.json` |
@@ -680,7 +681,7 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 
 | File | Holds |
 | :--- | :--- |
-| `/var/lib/liquidity-migration/storage-reclaim/status.json` | The last run's measurement: capacity, free, reserve, low and high water, measured growth, runway, per-class bytes reclaimed (`st_blocks × 512`), the unverified backlog with reasons, the run's `plan` (what went, or would go under `--dry-run`), `errors` and `lock_timeout` |
+| `/var/lib/liquidity-migration/storage-reclaim/status.json` | The last run's measurement: capacity, free, reserve, tape floor, low and high water, measured growth, runway, per-class bytes reclaimed (`st_blocks × 512`), the unverified backlog with reasons, the run's `plan` (what went, or would go under `--dry-run`), `errors` and `lock_timeout` |
 | `/var/lib/liquidity-migration/storage-reclaim/md5-cache.json` | Local md5 of sealed segments keyed by `dev:ino:size:mtime_ns`, so an hourly run does not re-read 40 GB beside the engines |
 | `/var/lib/liquidity-migration/storage-reclaim/ledger.jsonl` | One append-only row per reclaimed file: class, path, bytes, md5, remote destination, timestamp; a `wal` row also carries the deleted inode's `st_dev` and `st_ino`. Written and fsynced before the unlink. The realm watchdogs read it (`reclaimed_wal_identities` in `check_fleet_liveness.py`) so a segment the reclaimer deleted is not a segment the family lost |
 | `/var/lib/liquidity-migration/storage-reclaim/samples.jsonl` | One `statvfs` sample per run; the growth measurement reads this |

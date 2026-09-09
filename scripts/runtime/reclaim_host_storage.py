@@ -40,6 +40,7 @@ import stat
 import subprocess
 import sys
 import time
+import tomllib
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,6 +51,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from liquidity_migration.core.durable_file import durable_atomic_replace  # noqa: E402
 from liquidity_migration.policy.realms import realms as _realm_rows  # noqa: E402
+from market_tape.config import StorageSettings as _TapeStorage  # noqa: E402
 
 GIB = 1024**3
 DEFAULT_FILESYSTEM = "/var/lib/liquidity-migration"
@@ -66,6 +68,9 @@ DEFAULT_RELEASE_DIR = "/opt/liquidity-migration-engine"
 DEFAULT_SYSTEMD_DIR = "/etc/systemd/system"
 #: The engine build that stays on the host whatever the deploy pins.
 DEFAULT_KEEP_COMMIT = "8c92c96464bfe66662891c05f53a9510eefe8ba2"
+#: The recorders' capture configs. `[storage].min_free_disk_gb` is the free
+#: space under which a recorder counts every frame and writes none.
+DEFAULT_TAPE_FLOOR_CONFIG = str(_REPO_ROOT / "deploy" / "capture")
 
 STATUS_NAME = "status.json"
 LEDGER_NAME = "ledger.jsonl"
@@ -135,6 +140,7 @@ class Settings:
     backup_stage: Path
     wal_families: tuple[Path, ...]
     archive_roots: tuple[Path, ...]
+    tape_floor_configs: tuple[Path, ...]
     archive_min_age_hours: float
     release_dir: Path
     keep_commits: tuple[str, ...]
@@ -170,6 +176,7 @@ class Budget:
     free_bytes: int
     inodes_free: int
     reserve_bytes: int
+    tape_floor_bytes: int
     low_water_bytes: int
     high_water_bytes: int
     growth_bytes_per_s: float | None
@@ -291,6 +298,7 @@ def parse_settings(argv: Sequence[str] | None = None) -> Settings:
     parser.add_argument("--backup-stage", type=Path, default=_env("BACKUP_STAGE", DEFAULT_BACKUP_STAGE))
     parser.add_argument("--wal-family", action="append", default=[])
     parser.add_argument("--archive-root", action="append", default=[])
+    parser.add_argument("--tape-floor-config", action="append", default=[])
     parser.add_argument(
         "--archive-min-age-hours", type=_nonneg_float, default=_env("ARCHIVE_MIN_AGE_HOURS", "24")
     )
@@ -325,6 +333,10 @@ def parse_settings(argv: Sequence[str] | None = None) -> Settings:
     roots = tuple(
         Path(item) for item in (args.archive_root or _env_list("ARCHIVE_ROOT") or [DEFAULT_ARCHIVE_ROOT])
     )
+    tape_floor_configs = tuple(
+        Path(item)
+        for item in (args.tape_floor_config or _env_list("TAPE_FLOOR_CONFIG") or [DEFAULT_TAPE_FLOOR_CONFIG])
+    )
     keep = tuple(args.keep_commit or _env_list("KEEP_COMMIT") or [DEFAULT_KEEP_COMMIT])
     for commit in keep:
         if not _COMMIT.fullmatch(commit):
@@ -341,6 +353,7 @@ def parse_settings(argv: Sequence[str] | None = None) -> Settings:
         args.systemd_dir,
         *families,
         *roots,
+        *tape_floor_configs,
     ]
     for path in absolute:
         if not path.is_absolute():
@@ -361,6 +374,7 @@ def parse_settings(argv: Sequence[str] | None = None) -> Settings:
         backup_stage=args.backup_stage,
         wal_families=families,
         archive_roots=roots,
+        tape_floor_configs=tape_floor_configs,
         archive_min_age_hours=args.archive_min_age_hours,
         release_dir=args.release_dir,
         keep_commits=keep,
@@ -422,12 +436,43 @@ def growth_bytes_per_s(samples: Iterable[Sample], now: float) -> float | None:
     return grown / span
 
 
-def measure_budget(stats: StatvfsResult, samples: Iterable[Sample], now: float, settings: Settings) -> Budget:
+def tape_free_floor_bytes(configs: Iterable[Path]) -> tuple[int, list[str]]:
+    """The highest `[storage].min_free_disk_gb` across the recorders' capture
+    configs, in bytes, with the configs that could not be read. A directory
+    stands for its `*.toml` files; a missing key is the recorder's default."""
+
+    files: list[Path] = []
+    for config in configs:
+        files.extend(sorted(config.glob("*.toml")) if config.is_dir() else [config])
+    floor = 0
+    problems: list[str] = []
+    for path in files:
+        try:
+            with path.open("rb") as handle:
+                data = tomllib.load(handle)
+            storage = data.get("storage") or {}
+            if not isinstance(storage, dict):
+                raise ValueError("[storage] must be a table")
+            value = storage.get("min_free_disk_gb", _TapeStorage().min_free_disk_gb)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not value >= 0:
+                raise ValueError(f"storage.min_free_disk_gb must be a non-negative number, not {value!r}")
+            floor = max(floor, int(float(value) * GIB))
+        except (OSError, ValueError) as exc:
+            problems.append(f"tape floor {path}: {exc}")
+    return floor, problems
+
+
+def measure_budget(
+    stats: StatvfsResult, samples: Iterable[Sample], now: float, settings: Settings, tape_floor_bytes: int = 0
+) -> Budget:
     capacity = stats.f_blocks * stats.f_frsize
     free = stats.f_bavail * stats.f_frsize
     used = capacity - stats.f_bfree * stats.f_frsize
     reserve = int(max(settings.reserve_fraction * capacity, settings.reserve_floor_gib * GIB))
-    low_water = reserve + int(settings.writer_headroom_gib * GIB)
+    # Reclaim before either writer is refused room. A recorder under its floor
+    # loses frames for good; a sealed segment below the engine's floor has a
+    # verified copy, so the WAL yields first.
+    low_water = max(reserve, tape_floor_bytes) + int(settings.writer_headroom_gib * GIB)
     growth = growth_bytes_per_s(samples, now)
     if growth is None:
         headroom = int(settings.high_water_default_gib * GIB)
@@ -440,6 +485,7 @@ def measure_budget(stats: StatvfsResult, samples: Iterable[Sample], now: float, 
         free_bytes=free,
         inodes_free=stats.f_favail,
         reserve_bytes=reserve,
+        tape_floor_bytes=tape_floor_bytes,
         low_water_bytes=low_water,
         high_water_bytes=low_water + headroom,
         growth_bytes_per_s=growth,
@@ -1249,6 +1295,7 @@ class Reclaimer:
             "free_bytes": budget.free_bytes,
             "inodes_free": budget.inodes_free,
             "reserve_bytes": budget.reserve_bytes,
+            "tape_floor_bytes": budget.tape_floor_bytes,
             "low_water_bytes": budget.low_water_bytes,
             "high_water_bytes": budget.high_water_bytes,
             "growth_bytes_per_s": growth,
@@ -1340,7 +1387,10 @@ class Reclaimer:
             return 1
         self.load_md5_cache()
         samples = read_samples(self.state_dir / SAMPLES_NAME)
-        budget = measure_budget(stats, samples, self.now(), self.settings)
+        tape_floor, unreadable = tape_free_floor_bytes(self.settings.tape_floor_configs)
+        for problem in unreadable:
+            self._fail(problem)
+        budget = measure_budget(stats, samples, self.now(), self.settings, tape_floor)
         self.last_remote_verification_at = self.previous_verification()
 
         self.release_step()
@@ -1370,8 +1420,9 @@ class Reclaimer:
         for item in status["plan"]:
             print(f"{prefix}: {item['class']} {item['path']} bytes={item['bytes']} remote={item['remote'] or '-'}")
         print(
-            f"{prefix}: free={status['free_bytes']} low_water={status['low_water_bytes']} "
-            f"high_water={status['high_water_bytes']} reclaimed={status['reclaimed_bytes_this_run']} "
+            f"{prefix}: free={status['free_bytes']} tape_floor={status['tape_floor_bytes']} "
+            f"low_water={status['low_water_bytes']} high_water={status['high_water_bytes']} "
+            f"reclaimed={status['reclaimed_bytes_this_run']} "
             f"retained_verified={status['retained_verified_wal_bytes']} "
             f"backlog={status['unverified_backlog_bytes']} errors={len(status['errors'])}"
         )

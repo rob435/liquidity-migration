@@ -7,8 +7,9 @@ of hand-edited JSON. `--check` fails when the committed JSON is not what this
 script renders, which is how the test keeps them together.
 
 Every expression here charts a field `engine-tools record-equity` pushes.
-The realm variable is fed by `lm_engine_up`, so recorder panels, whose realm is
-a venue, deliberately do not filter on it.
+The realm variable is fed by `lm_engine_up` and narrowed to the realms
+`deploy/realms.tsv` holds `running`; recorder panels, whose realm is a venue,
+deliberately do not filter on it.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 OUT = Path(__file__).with_name("liquidity-migration-fleet.json")
+REALMS_TABLE = Path(__file__).resolve().parents[1] / "realms.tsv"
 
 DS = {"type": "prometheus", "uid": "${DS_METRICS}"}
 REALM = 'realm=~"$realm"'
@@ -47,6 +49,22 @@ def _targets(rows: list[tuple[str, str]], *, instant: bool = False) -> list[dict
 
 def _grid(x: int, y: int, w: int, h: int) -> dict[str, int]:
     return {"x": x, "y": y, "w": w, "h": h}
+
+
+def running_realms(table: Path = REALMS_TABLE) -> list[str]:
+    """The realms `deploy/realms.tsv` holds `running`. A stopped realm still
+    pushes `up=0` every minute into the host record; the view leaves it out."""
+
+    lines = table.read_text(encoding="utf-8").splitlines()
+    columns = lines[1].removeprefix("# ").split("|")
+    realms: list[str] = []
+    for line in lines[2:]:
+        if not line.strip() or line.startswith("#"):
+            continue
+        fields = dict(zip(columns, line.split("|")))
+        if fields["posture"] == "running":
+            realms.append(fields["realm"])
+    return realms
 
 
 def row(panel_id: int, title: str, y: int) -> Panel:
@@ -569,6 +587,7 @@ def panels() -> list[Panel]:
 
 
 def dashboard() -> dict[str, Any]:
+    realms = running_realms()
     return {
         "title": "liquidity-migration fleet",
         "uid": "liqmig-fleet",
@@ -576,7 +595,7 @@ def dashboard() -> dict[str, Any]:
         "tags": ["liquidity-migration"],
         "timezone": "utc",
         "schemaVersion": 39,
-        "version": 11,
+        "version": 12,
         "editable": True,
         "graphTooltip": 1,
         "refresh": "1m",
@@ -598,6 +617,8 @@ def dashboard() -> dict[str, Any]:
                     "type": "query",
                     "datasource": DS,
                     "query": "label_values(lm_engine_up, realm)",
+                    "regex": f"/^({'|'.join(realms)})$/",
+                    "allValue": "|".join(realms),
                     "current": {"text": "All", "value": "$__all"},
                     "includeAll": True,
                     "multi": True,

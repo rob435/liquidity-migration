@@ -139,6 +139,11 @@ the script renders.
 | **Execution** | current orders, fills, and stream resets over 15 minutes with isolated sparklines; p99 and p99.9 order-path latency with end-to-end emphasized | `increase({orders_sent,fills,stream_resets}[15m])`, `{end_to_end,ack,durable,decide}_{p99,p999}_ns` |
 | **Data pipeline** | current market-data age; worker, recorder, and byte-budget load; five-minute Bybit/Binance tape loss and reconnect gaps | engine, worker, and recorder ages; worker and recorder fill ratios; recorder drop and reconnect increases |
 
+The `Realm` variable is rendered from `deploy/realms.tsv`: its regex and
+`allValue` are the realms the table holds `running`. A stopped realm still
+pushes `up=0` every minute into the host record and the sink; it is not a red
+card on the view. A posture change re-renders the JSON, which is re-imported.
+
 The six-hour default view is an operator view. Change the time range for incident
 analysis. Empty order-path windows are absent, so the latency chart marks only
 real measurements. Each account card puts its label and colored USDT value on
@@ -223,6 +228,8 @@ python deploy/grafana/render_dashboard.py --check
 * **Must Never**: Grafana be the only pager. It is a remote view fed by this
   host; Telegram, the incident routine, and the watchdog-plane dead-man are
   independent delivery paths defined in [notifications.md](notifications.md).
+* **Must**: the `Realm` variable list only the realms `deploy/realms.tsv` holds
+  `running`. The samples and the push keep every realm; the view keeps the fleet.
 * **Must**: the imported dashboard default to the fleet Prometheus datasource.
   This stack also has ML and usage Prometheus sources; either one renders a
   dashboard shell without the fleet series.

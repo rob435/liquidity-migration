@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from liquidity_migration.policy.realms import realms as realm_table
+
 ROOT = Path(__file__).resolve().parents[2]
 RUST_SOURCE = ROOT / "engine/engine-tools/src/equity_recorder.rs"
 ORACLE = ROOT / "engine/engine-tools/tests/fixtures/equity_recorder_oracle.json"
@@ -276,3 +278,16 @@ def test_execution_activity_legend_uses_plain_metric_names() -> None:
         if property_["id"] == "displayName"
     }
     assert names == {"D orders", "M orders", "D fills", "M fills", "D resets", "M resets"}
+
+
+def test_the_realm_variable_lists_only_the_realms_the_table_holds_running() -> None:
+    # A stopped realm pushes up=0 every minute by design; the view is not where
+    # that is read, so its card is not a red DOWN beside the running fleet.
+    running = [row.realm for row in realm_table() if row.posture == "running"]
+    variable = next(item for item in _dashboard()["templating"]["list"] if item["name"] == "realm")
+    assert variable["regex"] == "/^(" + "|".join(running) + ")$/"
+    assert variable["allValue"] == "|".join(running)
+    for row in realm_table():
+        if row.posture != "running":
+            assert row.realm not in variable["regex"]
+            assert row.realm not in variable["allValue"]

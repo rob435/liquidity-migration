@@ -703,8 +703,43 @@ Older history: Retained in git history (pre-September 6).
     segment` — the hyperliquid realm has never run, so its family has no
     file, and the reclaimer treated the tool's refusal as a fault; no receipt
     was written. Fixed the same hour: a family with no log yet is nothing to
-    reclaim (`wal … no log yet` note, no error), with a test. The receipt of
-    the first clean run follows below.
+    reclaim (`wal … no log yet` note, no error), with a test. The fix reached
+    the host at 22:43 UTC with the `e899ea21` deploy; the 16:41–22:41 runs
+    each exited 1 on it while reclaiming as designed (quarantine 2.0, 1.9 and
+    1.9 GiB; free 28.0 → 34.2–38.1 GB).
+  - **Low water sat under the recorders' floor, so the tape, not the WAL,
+    would have yielded first.** `low_water` was 20.04 GiB (reserve 14.04 +
+    6) against `min_free_disk_gb = 25` in both `deploy/capture/*.toml`
+    (`writable()`, `market_tape/storage.py:440`). Under 25 GiB a recorder
+    counts every frame and writes none until its own retention pass frees
+    tape, which is the mechanism behind every `disk_dropped_frames` burst on
+    the fleet dashboard: 58.4 M Bybit and 20.7 M Binance frames this month,
+    8,816,049 and 2,487,759 of them since the recorders' 2026-09-06 15:59
+    boot, all between 22:0x Sep 7 and 02:0x Sep 8 (the `capture-disk` entry
+    below), none since. Free fell 56.6 → 28.1 GB from 02:00 Sep 8 to 15:00
+    Sep 9 (~0.75 GB/h: WAL ~5 GB/day plus the tape regrowing to its 24 h
+    window), so the recorders would have blocked again in about a day with
+    the reclaimer idle 5 GiB beneath them. Fix: `tape_free_floor_bytes`
+    reads the highest `[storage].min_free_disk_gb` under `deploy/capture/`
+    (`--tape-floor-config`, `RECLAIM_TAPE_FLOOR_CONFIG`; a directory means
+    its `*.toml`, a missing key is the recorder's default, an unreadable file
+    is an error that does not lower the floor), and low water is one writer
+    headroom above `max(reserve, tape floor)`: 31.0 GiB here, high water two
+    days of growth above it. `tape_floor_bytes` joins `status.json` and the
+    journal line. Tests: the low water clears the floor, a run at 24 GiB
+    free (far above the reserve) reclaims and one at 26 GiB does not; an
+    unreadable config fails the run and leaves the readable floors in force;
+    the flagless defaults read the repository's capture configs as 25 GiB.
+  - **What the dashboard's `Tape loss · 5m` shows besides the block.**
+    `dropped_frames` 48, Bybit, 22:09–22:10 UTC Sep 9: eleven shards lost
+    their sockets to Bybit within 90 s (`ping/pong timed out`, `Connection to
+    remote host was lost`), their resubscribe snapshots landed on a burst
+    that took inbound from 3.9 k to 10.1 k frames/s, and the 262,144-frame
+    queue overran against a writer that clears 7–8 k frames/s on one core
+    (one Python process at 57 % of a core on average; the box has four, 79 %
+    idle). `gap` is the shards' reconnects: 349 since boot on Bybit (168 lost
+    connections, 77 ping timeouts), 33 on Binance (31 ping timeouts),
+    venue-side. Neither is a disk fault; neither is changed here.
 
 - **2026-09-09 — Render the fleet's realm plumbing from one table, and hold mexc and hyperliquid provisioned but stopped.**
   - Owner direction: collapse the realm plumbing into a manifest-driven form
@@ -748,6 +783,14 @@ Older history: Retained in git history (pre-September 6).
     stops the mexc realm (no positions, empty wallet) and leaves hyperliquid
     stopped after its promotion. Posture stops publication, not exposure, and
     is never authorization: `REAL_MONEY` still is.
+  - Dashboard. `deploy/grafana/render_dashboard.py` reads the table too: the
+    `Realm` variable's `regex` and `allValue` are the realms it holds
+    `running`, so the two stopped realms, which push `up=0` every minute by
+    design, stop showing as a red `DOWN` and `ATTENTION` beside the fleet
+    (owner, 2026-09-09: "they are just backups, remove them from grafana").
+    The host record and the push keep every realm. Dashboard `version` 12;
+    re-import the JSON. Test
+    `test_the_realm_variable_lists_only_the_realms_the_table_holds_running`.
   - Observable differences, none functional for the four realms: demo's engine
     control `UnsetEnvironment` now also names the MEXC pair (a gap), mainnet's
     list is in canonical group order, log strings name the realm
