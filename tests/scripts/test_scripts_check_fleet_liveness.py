@@ -466,6 +466,58 @@ def test_a_paced_private_stream_resync_is_quiet_but_a_stuck_one_pages(tmp_path: 
     assert alerts_for() == set()
 
 
+def test_a_stuck_private_stream_page_carries_its_journal_and_holds_across_a_deploy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The new reference must carry what `may-open:` carried before the split.
+
+    Splitting the latch off moved the stuck-stream fault to its own key, so
+    that key has to be registered everywhere the old one was: the incident
+    payload attaches the engine journal by alert prefix, and a deploy holds
+    realm engine keys in state so a bounced unit does not re-fire a fault the
+    on-call engineer is already working.
+    """
+
+    monkeypatch.setattr(liveness, "unit_journal_tail", lambda unit: f"journal for {unit}")
+    heartbeat = tmp_path / "heartbeat.json"
+    for unit in sorted(liveness._ENGINE_UNITS):
+        heartbeat.write_text(
+            json.dumps(
+                {
+                    "may_open": True,
+                    "rolling_loss_tripped": False,
+                    "private_stream_ready": False,
+                    "private_stream_unready_ms": 600_000,
+                }
+            )
+        )
+        key = f"private-stream:{unit}"
+        alerts = liveness.evaluate_engine_heartbeat(unit, heartbeat)
+        assert [alert.key for alert in alerts] == [key]
+
+        lines, state = liveness.select_alerts_to_send(alerts, state={}, now=1_000, cooldown_sec=1_800)
+        due, incidents = liveness.select_incidents_to_fire(alerts, state={}, now=1_000)
+        assert len(lines) == len(due) == 1
+
+        # Without the journal the page names a dead stream and hands the
+        # engineer no reading of the unit that lost it.
+        scope = "mainnet" if "-mainnet" in unit else "demo"
+        assert liveness._incident_units(scope, alerts) == [unit]
+        assert f"journal for {unit}" in liveness.incident_text(scope, lines, alerts, due)
+
+        # A deploy bounces the unit and evaluates no engine alert, so an
+        # unpreserved key clears from state and pages again as new.
+        preserved = {key for key in state if key.startswith(liveness._DEPLOY_TRANSITIONAL_ALERT_PREFIXES)}
+        assert preserved == {key}
+        assert liveness.select_alerts_to_send(
+            [], state=state, now=1_070, cooldown_sec=1_800, preserve_keys=preserved
+        ) == ([], state)
+        assert liveness.select_incidents_to_fire([], state=incidents, now=1_070, preserve_keys=preserved) == (
+            [],
+            incidents,
+        )
+
+
 def test_signal_worker_startup_and_recovery_are_quiet_but_degraded_and_backpressured_page(
     tmp_path: Path,
 ) -> None:

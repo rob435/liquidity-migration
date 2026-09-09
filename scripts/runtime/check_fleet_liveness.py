@@ -76,6 +76,7 @@ _DEPLOY_TRANSITIONAL_ALERT_PREFIXES = (
     "heartbeat-parse:",
     "heartbeat-contract:",
     "may-open:",
+    "private-stream:",
     "rolling-loss:",
     "strategy-errors:",
     "worker-status:",
@@ -1149,6 +1150,7 @@ def _incident_units(scope: str, alerts: list[Alert]) -> list[str]:
         "heartbeat-parse:",
         "heartbeat-contract:",
         "may-open:",
+        "private-stream:",
         "strategy-errors:",
         "worker-status:",
         "worker-spool:",
@@ -1442,10 +1444,11 @@ def main() -> int:
         return run_demo_soak()
     now = time.time()
     # Every scope consults the lock. The transitional keys held below —
-    # worker-status, worker-spool, may-open, rolling-loss, strategy-errors,
-    # and the fleet's unit and heartbeat keys — come from realm scopes; host
-    # watches the independent units. A lock held past _MAX_DEPLOY_AGE_SEC still
-    # pages, through the host scope's deploy-lock check.
+    # worker-status, worker-spool, may-open, private-stream, rolling-loss,
+    # strategy-errors, and the fleet's unit and heartbeat keys — come from
+    # realm scopes; host watches the independent units. A lock held past
+    # _MAX_DEPLOY_AGE_SEC still pages, through the host scope's deploy-lock
+    # check.
     try:
         deploy_age = active_deploy_age(_DEPLOY_LOCK, now=now)
     except OSError:

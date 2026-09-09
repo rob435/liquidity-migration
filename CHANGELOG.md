@@ -10,7 +10,7 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
-- **2026-09-09 — Incident id `mexc-a361f5d18861421a` fires seven times on a healthy mexc engine, at 00:44:29, ~01:24:29, 01:51:36, 02:11:34, 02:21:45, 02:31:32 and 02:41:43 UTC: MEXC's designed 600 s private-stream resync publishes `may_open=false` for the length of its history sweep, and the 30 s watchdog read seven of those windows. Seven false pages in sixteen resyncs across two engine generations and a deploy, one on-call session each. The sweep's length is now read off the source rather than guessed — it is one signed request per followed symbol, issued sequentially, so it runs tens of seconds against a 30 s watchdog period, and the catch is close to a coin flip by construction. The current generation paged on five of its seven resyncs and on the last four consecutively, one wake per ten minutes. Nothing was impaired at any point. Fixed: the heartbeat now publishes the operator latch and the private-stream readiness bit as separate fields, and the watchdog pages on a stream that stays unusable past 180 s rather than on a sweep in progress. The one candidate fix that would move when the engine admits entries is untaken and still the owner's.**
+- **2026-09-09 — Incident id `mexc-a361f5d18861421a` fires seven times on a healthy mexc engine, at 00:44:29, ~01:24:29, 01:51:36, 02:11:34, 02:21:45, 02:31:32 and 02:41:43 UTC: MEXC's designed 600 s private-stream resync publishes `may_open=false` for the length of its history sweep, and the 30 s watchdog read seven of those windows. Seven false pages in sixteen resyncs across two engine generations and a deploy, one on-call session each. The sweep's length is now read off the source rather than guessed — it is one signed request per followed symbol, issued sequentially, so it runs tens of seconds against a 30 s watchdog period, and the catch is close to a coin flip by construction. The current generation paged on five of its seven resyncs and on the last four consecutively, one wake per ten minutes. Nothing was impaired at any point. Fixed: the heartbeat now publishes the operator latch and the private-stream readiness bit as separate fields, and the watchdog pages on a stream that stays unusable past 180 s rather than on a sweep in progress. That fix shipped with its new `private-stream:` reference registered in neither the table that attaches a unit's journal to a page nor the one that holds a realm key across a deploy, so a genuinely dead stream would have paged with no journal and re-paged after every deploy; both are now registered. The one candidate fix that would move when the engine admits entries is untaken and still the owner's.**
   - Not the incident that id names. `incident_id` is `sha256(scope + the newly
     due alert keys)[:16]` (`scripts/runtime/check_fleet_liveness.py:1170`), so
     every `may-open:liquidity-migration-engine-mexc.service` page carries
@@ -198,6 +198,38 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     pass; Ruff, mypy, rustfmt and Clippy are clean. The 20 Python and 1 Rust
     failures in this container are missing `rsync`, `ssh`, `rclone` and tape
     fixtures; the failure set is byte-identical at `cbd4da8`.
+  - The split left its new key unrouted, and the next session found it. A new
+    alert reference has to be registered in the two tables that decide what a
+    page carries and how a deploy treats it, and `private-stream:` was in
+    neither, so it behaved worse than the `may-open:` page it took the fault
+    over from. `_incident_units`
+    (`scripts/runtime/check_fleet_liveness.py:1146`) selects the units whose
+    journals `incident_text` attaches, by alert prefix: a genuinely dead
+    private stream would have fired the on-call routine with no
+    `journalctl -u liquidity-migration-engine-*.service` excerpt at all — the
+    one reading that diagnoses it, and the excerpt every page in this entry
+    was read from. `_DEPLOY_TRANSITIONAL_ALERT_PREFIXES` (`:73`) holds a realm
+    engine key in state across a deploy, when engine alerts are not evaluated
+    (`:1462`); without it the key clears and the same unfixed stream pages a
+    fresh session the moment any deploy touches the fleet, which is the wake
+    spam this whole entry is about. Both prefixes are now registered and the
+    transitional comment at `:1446` names the key.
+  - Proof of that half.
+    `test_a_stuck_private_stream_page_carries_its_journal_and_holds_across_a_deploy`
+    walks every unit in `_ENGINE_UNITS` and fails on each gap alone: without
+    the `_incident_units` prefix, `assert liveness._incident_units(scope,
+    alerts) == [unit]` fails `assert [] == ['liquidity-migration-engine-hyperliquid.service']`;
+    without the transitional prefix, `assert preserved == {key}` fails
+    `assert set() == {'private-stream:liquidity-migration-engine-hyperliquid.service'}`.
+    The re-fire was also reproduced directly against the module: with the key
+    unpreserved, state across a deploy goes to `{}` and the next reading fires
+    the incident again; preserved, it fires nothing. 92 of 92 tests in
+    `tests/scripts/test_scripts_check_fleet_liveness.py` pass, and
+    `tests/scripts` plus `tests/repo` go 551 passed against 550 at `d835b62`
+    with the same 10 container failures (missing `rsync`, `ssh`, `rclone`,
+    `polars`). Ruff and mypy are clean. This container has no venv or Rust
+    toolchain, so `scripts/dev.sh check` did not run locally; the change is
+    Python-only and the pushed commit's GitHub checks are the full gate.
 
 - **2026-09-09 — Incidents `demo-0922e9f30da3bf98`, `mainnet-014ec4a90a2fde5f` and `mexc-d62940e951288d4c`: every signal worker's CARRY cycle stopped completing at the UTC decision roll for five to eight minutes and paged CRITICAL on every realm including the funded one, because the freshness verdict judged the lane by 180 s while the worker's own funding supply frontier guarantees a longer wait. The lanes were working; the verdict was wrong, is now measured from the instant the roll's cycle is actually due, and is deployed as `beef5bc5` with a healthy receipt.**
   - Scope. All three running realms stall at the same boundary, not demo alone,
