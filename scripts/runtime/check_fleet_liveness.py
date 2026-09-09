@@ -1605,7 +1605,7 @@ def main() -> int:
     elif args.require_oncall:
         save_state(routine_state_file, next_routine_state)
     has_critical = any(alert.severity == "CRITICAL" for alert in alerts)
-    if not has_critical:
+    if not has_critical and not routing_failed:
         if not alerts:
             if deploy_maintenance:
                 print(f"ok scope={scope} sanctioned-deploy-in-progress")

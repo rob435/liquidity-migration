@@ -211,8 +211,7 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     drained, and with the engine retiring nothing the new process would block
     again on its first eight `current` files.
 
-- **2026-09-09 — Incident id `host-51b05439c4f09794`, 06:46:12 UTC: the fleet's Telegram alert channel is refused with `HTTP 400` on every send, so the mainnet and host watchdogs exit 1 every 30 s and no watchdog page has reached the owner by Telegram since. The engines are untouched. Why the venue refuses is now established as `PEER_ID_INVALID` — the configured alerts chat id is not a peer the bot can reach — and that it took this long was the repository's fault: Telegram names the cause in the refusal's JSON `description`, and `transport_error` threw it away for every plain `HTTPError`, so the journal reads a bare `HTTP 400` an operator cannot act on. That is the same defect the 2026-09-07 entry fixed for the on-call fire path and never applied to the Telegram path. Fixed: the refusal reason is read back bounded, credential-redacted, and printed. Deploy receipt below. The refusal now names the cause and the chat-side fix is the owner's.**
-  - The chain. `liquidity-migration-mainnet-liveness` sends its due
+- **2026-09-09 — Incident id `host-51b05439c4f09794`, 06:46:12 UTC, re-read as `host-bf5dcb6544d0dfdc` at 07:28:02: the fleet's Telegram alert channel is refused with `HTTP 400` on every send, so the demo, mainnet, host and mexc watchdogs exit 1 every 30 s and no watchdog page has reached the owner by Telegram since. The engines are untouched. Why the venue refuses is now established as `PEER_ID_INVALID` — the configured alerts chat id is not a peer the bot can reach — and that it took this long was the repository's fault: Telegram names the cause in the refusal's JSON `description`, and `transport_error` threw it away for every plain `HTTPError`, so the journal reads a bare `HTTP 400` an operator cannot act on. That is the same defect the 2026-09-07 entry fixed for the on-call fire path and never applied to the Telegram path. Fixed: the refusal reason is read back bounded, credential-redacted, and printed. Deploy receipt below. The refusal now names the cause and the chat-side fix is the owner's. Also fixed on the second read: a run that fails its send no longer signs off `ok scope=… warnings-present-no-critical` while returning 1.**  - The chain. `liquidity-migration-mainnet-liveness` sends its due
     rolling-loss NOTICE at 06:46:12 and prints `CRITICAL telegram: cannot
     deliver alerts (HTTP 400)`; `main` returns 1 on a routing failure
     (`scripts/runtime/check_fleet_liveness.py:1602`), so systemd records
@@ -277,17 +276,46 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     bot was removed from, or a supergroup migration that changed the id. It is
     not a rate limit, not a parse error and nothing about our payload, so no
     repository change can clear it. The route has been dead since at least
-    06:46:12 and the last accepted delivery is still not established.
+    06:46:12 and the last accepted delivery is still not established. Demo's
+    turn arrived exactly as this entry predicted — its 06:49 runs exited 0
+    only inside cooldown, and its next due alert at 07:28:02 failed the same
+    way, which is the `watchdog:demo` in that fire's `new_critical_refs`.
   - Still the owner's, and now actionable. Repointing the alerts chat id. Its
     home is the root-owned realm env under `/etc/liquidity-migration`, which
     this routine must not read or edit. Until it is repointed every watchdog
     page is written to the journal and reaches nobody by Telegram; the on-call
-    fire path is unaffected and is the only route still delivering.
-  - Untaken, and the owner's call. A run that fails its send still prints `ok
-    scope=… warnings-present-no-critical` before exiting 1, because that line
-    is derived from the fleet alerts alone and the routing CRITICAL is not one
-    of them. Both lines are true of different things; read together in a
-    journal they contradict, and the next on-call read starts there.
+    fire path is unaffected and is the only route still delivering. The check
+    that confirms the repointed id without waiting for an alert to come due is
+    the delivery drill in [notifications.md](docs/notifications.md) §4, which
+    prints `delivery drill: telegram accepted` when the route is live.
+  - The verdict line no longer contradicts the exit code. `main` derived `ok
+    scope=… warnings-present-no-critical` from the fleet alerts alone, so a
+    realm holding nothing worse than a rolling-loss NOTICE printed it on the
+    same run that printed `CRITICAL telegram:` and returned 1 — the demo and
+    mainnet journals above hold the two on consecutive lines, with systemd's
+    `status=1/FAILURE` on the next. `has_critical`
+    now takes `routing_failed` with it
+    (`scripts/runtime/check_fleet_liveness.py:1608`), so a run that cannot
+    route prints its CRITICAL and no verdict, exactly as a run with a fleet
+    CRITICAL already did. Every healthy path is byte-identical: the `ok` line
+    is withheld only when the run was already returning 1, and the two routing
+    failures that reach it — Telegram and the on-call fire — are both printed
+    `CRITICAL` immediately above it. The `deadman` route needed nothing: its
+    alert is always `CRITICAL`, so it suppressed the verdict already.
+  - Proof. `test_a_run_that_cannot_route_prints_no_healthy_verdict` builds the
+    07:28:02 demo run — an active unit, a tripped rolling loss, a send refused
+    with `PEER_ID_INVALID` — and asserts `main() == 1`, the NOTICE, the named
+    CRITICAL, and no `ok scope=`. At the parent commit it fails against the
+    exact production text: `AssertionError: assert 'ok scope=' not in '…'`,
+    pointing at `ok scope=demo warnings-present-no-critical`. 99 liveness tests
+    pass, and `tests/scripts`, `tests/ops`, `tests/repo` and `tests/policy` go
+    695 passed against the parent's 694, with the same 11 failures and 10
+    collection errors this container has either way (missing rsync, ssh,
+    rclone, numpy, websocket-client). `scripts/dev.sh check` runs its doctor,
+    Ruff and pytest stages here; Ruff is clean and mypy is clean on the changed
+    file, with its 6 `unused-ignore` errors confined to numpy-dependent modules
+    this container cannot import. ShellCheck and the Rust stages have no
+    toolchain here; the change is Python-only.
 
 - **2026-09-09 — Incident id `mexc-a361f5d18861421a` fires eight times on a healthy mexc engine, at 00:44:29, ~01:24:29, 01:51:36, 02:11:34, 02:21:45, 02:31:32, 02:41:43 and ~03:21:3x UTC: MEXC's designed 600 s private-stream resync publishes `may_open=false` for the length of its history sweep, and the 30 s watchdog read eight of those windows. Eight false pages in twenty resyncs across two engine generations and two deploys, one on-call session each. The sweep's length is now read off the source rather than guessed — it is one signed request per followed symbol, issued sequentially, so it runs tens of seconds against a 30 s watchdog period, and the catch is close to a coin flip by construction. The current generation paged on five of its seven resyncs and on the last four consecutively, one wake per ten minutes. Nothing was impaired at any point. Fixed: the heartbeat now publishes the operator latch and the private-stream readiness bit as separate fields, and the watchdog pages on a stream that stays unusable past 180 s rather than on a sweep in progress. That fix is deployed as `d835b62` with a healthy receipt. It shipped with its new `private-stream:` reference registered in none of the three places the reference it replaced was in — the table that attaches a unit's journal to a page, the one that holds a realm key across a deploy, and the on-call diagnostic's own heartbeat digest — so a genuinely dead stream would have paged with no journal, re-paged after every deploy, and shown nothing in the only host reading the routine may take. All three are now registered in the repository; the digest half is a workflow file and is already live, but the two `check_fleet_liveness.py` prefixes are still only on `main` — the host runs the `d835b62` watchdog until the next deploy, and no extra funded-fleet restart was spent on them alone because they change nothing until a private stream genuinely stalls. The mechanism is settled on the host: the first resync under the fix, at 03:50:51, was read 12 s in at `stream_resets=1`, `private_stream_ready=false`, `private_stream_unready_ms=7440` and `may_open=true` — the exact sample that paged seven times, now reporting healthy, with no page. The one candidate fix that would move when the engine admits entries is untaken and still the owner's.**
   - Not the incident that id names. `incident_id` is `sha256(scope + the newly

@@ -1630,6 +1630,70 @@ def test_a_refused_telegram_alert_names_the_venue_reason(tmp_path: Path, monkeyp
     assert not state_file.exists(), "a refused alert must not consume its cooldown"
 
 
+def test_a_run_that_cannot_route_prints_no_healthy_verdict(tmp_path: Path, monkeypatch, capsys) -> None:
+    """A run that exits 1 must not sign off `ok scope=…`.
+
+    The verdict was derived from the fleet alerts alone, so a realm holding
+    nothing worse than a NOTICE printed `warnings-present-no-critical` on the
+    same run that printed `CRITICAL telegram:` and returned 1.
+    """
+    heartbeat = tmp_path / "engine.json"
+    heartbeat.write_text(
+        json.dumps(
+            {
+                "may_open": True,
+                "rolling_loss_tripped": True,
+                "rolling_loss_net_usdt": -186.09,
+                "rolling_loss_limit_usdt": 160.22,
+                "rolling_loss_window_ms": 86_400_000,
+                "strategy_errors": [],
+            }
+        )
+    )
+    row = liveness.FleetUnit(
+        unit="liquidity-migration-engine.service",
+        kind="service",
+        realm="demo",
+        activation="always",
+        health="active",
+        output_artifact=str(heartbeat),
+    )
+    monkeypatch.setattr(liveness, "load_fleet_manifest", lambda: [row])
+    monkeypatch.setattr(liveness, "unit_states", lambda units: {unit: "active" for unit in units})
+    monkeypatch.setattr(liveness, "active_deploy_age", lambda *_args, **_kwargs: None)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:token")
+    monkeypatch.setenv("TELEGRAM_ALERT_CHAT_ID", "-1001")
+
+    response = io.BytesIO(
+        json.dumps({"ok": False, "error_code": 400, "description": "Bad Request: PEER_ID_INVALID"}).encode()
+    )
+
+    def refuse(*_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            "https://api.telegram.org/bot123:token/sendMessage", 400, "Bad Request", {}, response
+        )
+
+    monkeypatch.setattr(liveness, "send_telegram_message", refuse)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_fleet_liveness.py",
+            "--account-scope",
+            "demo",
+            "--telegram",
+            "--state-file",
+            str(tmp_path / "state.json"),
+        ],
+    )
+
+    assert liveness.main() == 1
+    out = capsys.readouterr().out
+    assert "NOTICE rolling-loss:liquidity-migration-engine.service" in out
+    assert "CRITICAL telegram: cannot deliver alerts (HTTP 400 (Bad Request: PEER_ID_INVALID))" in out
+    assert "ok scope=" not in out
+
+
 @pytest.mark.parametrize(
     "body",
     [
