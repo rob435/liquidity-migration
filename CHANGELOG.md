@@ -343,7 +343,32 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     file, with its 6 `unused-ignore` errors confined to numpy-dependent modules
     this container cannot import. ShellCheck and the Rust stages have no
     toolchain here; the change is Python-only.
-
+  - Deployed and read back. [Checks run
+    `34325109619`](https://github.com/rob435/liquidity-migration/actions/runs/34325109619)
+    is green on `5b9b72b` (rustfmt, Clippy, the locked Rust suite, Ruff,
+    ShellCheck, mypy, pytest), and [deploy run
+    `34326157516`](https://github.com/rob435/liquidity-migration/actions/runs/34326157516)
+    put it on the host at 08:05:09. That run then failed at the demo soak — the
+    ticker-coverage defect the entry above records, refusing a deploy for the
+    first time — so the funded realms kept their incumbent runtimes; the
+    checkout and every realm's watchdog are the new commit regardless, because
+    the reset precedes the soak gate, and that is all a Python-only change
+    needed. No funded restart was spent re-running a soak for a fix already
+    live. [Diagnose run
+    `34327757402`](https://github.com/rob435/liquidity-migration/actions/runs/34327757402)
+    (08:11:35–08:11:49) is the receipt, and it reads the fix working on the
+    exact run that motivated it: demo and mainnet at 08:10:30, 08:11:00 and
+    08:11:30 print the rolling-loss NOTICE, then `CRITICAL telegram: cannot
+    deliver alerts (HTTP 400 (Bad Request: PEER_ID_INVALID))`, then systemd's
+    `Failed with result 'exit-code'` — no verdict line between them, where
+    07:28:02 and 07:28:32 had `ok scope=demo warnings-present-no-critical`. The
+    healthy path is intact in the same reading: `ok scope=host
+    sanctioned-deploy-in-progress` at 08:06:46 on a run that exited 0 and
+    deactivated successfully. `systemctl --failed` lists four units, the demo,
+    mainnet, mexc and host watchdogs, every one of them on the refused Telegram
+    send and mexc additionally on its worker; no engine or worker unit is
+    failed. The watchdogs still exit 1 and will until the chat id is repointed,
+    so this incident is not resolved — only the half this repository owns is.
 - **2026-09-09 — Incident id `mexc-a361f5d18861421a` fires eight times on a healthy mexc engine, at 00:44:29, ~01:24:29, 01:51:36, 02:11:34, 02:21:45, 02:31:32, 02:41:43 and ~03:21:3x UTC: MEXC's designed 600 s private-stream resync publishes `may_open=false` for the length of its history sweep, and the 30 s watchdog read eight of those windows. Eight false pages in twenty resyncs across two engine generations and two deploys, one on-call session each. The sweep's length is now read off the source rather than guessed — it is one signed request per followed symbol, issued sequentially, so it runs tens of seconds against a 30 s watchdog period, and the catch is close to a coin flip by construction. The current generation paged on five of its seven resyncs and on the last four consecutively, one wake per ten minutes. Nothing was impaired at any point. Fixed: the heartbeat now publishes the operator latch and the private-stream readiness bit as separate fields, and the watchdog pages on a stream that stays unusable past 180 s rather than on a sweep in progress. That fix is deployed as `d835b62` with a healthy receipt. It shipped with its new `private-stream:` reference registered in none of the three places the reference it replaced was in — the table that attaches a unit's journal to a page, the one that holds a realm key across a deploy, and the on-call diagnostic's own heartbeat digest — so a genuinely dead stream would have paged with no journal, re-paged after every deploy, and shown nothing in the only host reading the routine may take. All three are now registered in the repository; the digest half is a workflow file and is already live, but the two `check_fleet_liveness.py` prefixes are still only on `main` — the host runs the `d835b62` watchdog until the next deploy, and no extra funded-fleet restart was spent on them alone because they change nothing until a private stream genuinely stalls. The mechanism is settled on the host: the first resync under the fix, at 03:50:51, was read 12 s in at `stream_resets=1`, `private_stream_ready=false`, `private_stream_unready_ms=7440` and `may_open=true` — the exact sample that paged seven times, now reporting healthy, with no page. The one candidate fix that would move when the engine admits entries is untaken and still the owner's.**
   - Not the incident that id names. `incident_id` is `sha256(scope + the newly
     due alert keys)[:16]` (`scripts/runtime/check_fleet_liveness.py:1170`), so
