@@ -12,7 +12,7 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 
 - **2026-09-09 — Incident id `mexc-a361f5d18861421a` fires again at 00:44:29 UTC on a healthy mexc engine: MEXC's designed 600 s private-stream resync publishes `may_open=false` for the length of its history sweep, and the 30 s watchdog read one of those windows. Cause named, nothing impaired, no code changed; the fix is the owner's call.**
   - Not the incident that id names. `incident_id` is `sha256(scope + the newly
-    due alert keys)[:16]` (`scripts/runtime/check_fleet_liveness.py:1158`), so
+    due alert keys)[:16]` (`scripts/runtime/check_fleet_liveness.py:1170`), so
     every `may-open:liquidity-migration-engine-mexc.service` page carries
     `mexc-a361f5d18861421a` whatever caused it. The 2026-09-08 entry below is
     the history-progress fault, fixed and deployed as `c6adead4`; this is a
@@ -47,7 +47,7 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     (`engine/engine-venue/src/venues/mexc/ws.rs:66`, `:228`), because the
     venue's execution history and not its socket is the authority there. So a
     healthy mexc engine publishes `may_open=false` once every ten minutes for
-    the length of its sweep, and `check_fleet_liveness.py:385` pages CRITICAL on
+    the length of its sweep, and `check_fleet_liveness.py:397` pages CRITICAL on
     `may_open is not True` with no dwell — the condition exactly as
     [notifications](docs/notifications.md) §Realm/Admission documents it.
   - The grid fits to the second. Heartbeat `stream_resets` reads 1 at 00:09:27,
@@ -61,7 +61,7 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     the watchdog's read to land inside the 5 s that beat is current. It is a
     race, not a certainty — one page in five resyncs here — and it re-arms every
     time: `select_incidents_to_fire` drops a key that is not currently alerting
-    (`:1024`), so the next catch is again "not in state" and fires a fresh
+    (`:1036`), so the next catch is again "not in state" and fires a fresh
     routine.
   - Impaired: nothing. mexc holds no positions, `orders_sent=0` since the
     23:54:07 start, and its USDT futures wallet reads `equity 0`, so no entry
