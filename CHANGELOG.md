@@ -9,6 +9,51 @@ edit STATE.md to match.
 
 Older history: Retained in git history (pre-September 6).
 
+- **2026-09-09 — Alt-realm readiness, 23:16–23:25 UTC: MEXC's identity is bound and proven flat; Hyperliquid's second canary placed and cancelled a real order the venue confirmed, but the harness could not recognise its own order because the adapter hashed the canary's client id. Fixed in the cloid codec; both reruns are the owner's.**
+  - MEXC. The owner supplied account UID `19445654`. Written on the host at
+    23:17 UTC: `/etc/liquidity-migration/mexc-account-bindings.json` (root,
+    0644, schema 1, the key's sha256 fingerprint bound to `19445654`) and
+    `EXPECTED_ENGINE_ACCOUNT_USER_ID=uid-19445654` in `engine-mexc.env` (the
+    retired `key-…` value backed up at `/root/engine-mexc.env.bak-20260910`).
+    `verify-account-identity` answers `account-identity-ok account=uid-19445654`;
+    `attest-flat` reads `flat=true samples=2 positions=0 open_orders=0`;
+    `real-money preflight-mexc` passes every precondition. The owner's canary
+    at 23:24:22 reached `private_feed=ready` and was stopped by systemd one
+    second later when the operator's shell disconnected (`Stopping
+    liquidity-migration-canary-order-mexc-3838236.service`); no order was
+    created, and `attest-flat` at 23:26 reads flat again. Rerun pending.
+  - Hyperliquid, canary run 2 at 23:24:37 UTC. `verify-account-identity`
+    answers `0xcef3cc6085897672efc4bf5d8401f757c9b85b17`; preflight passes;
+    `attest-flat` reads not flat on `wallet_asset HYPE Buy 0.00230994` in the
+    spot wallet (the credential-wide scan counts wallet assets; the canary's
+    precheck is derivative-and-order flatness and does not). The canary
+    priced `order_px=77698 qty=0.00014 stop=66044` against `bid=78089
+    ask=78090`, the venue accepted the create (`venue_order_id=540726821427`)
+    and the cancel, `orderStatus` by oid read `Cancelled cumulative_filled_qty=0`
+    and four cleanup scans read `derivative_positions=0 open_orders=0`. The
+    command still ended in `create returned an id, but neither the private
+    feed nor open-order inventory proved New`: no `New`, no `Cancelled` on the
+    private feed, no match in `frontendOpenOrders`.
+  - Root cause, fixed. Hyperliquid's client id is a fixed 16-byte `cloid`.
+    `engine-venue/src/venues/hyperliquid/cloid.rs` packed only
+    `eng-<ms>-<n>` reversibly and hashed every other shape one way, so the
+    venue's `orderUpdates` rows and open-order list came back with a cloid
+    `from_cloid` could not read, the feed dropped them as not ours, and the
+    inventory row carried the raw hex instead of `lmcan-…`. Everything keyed
+    by the venue's own oid worked, which is why the order cleaned up. The
+    canary's `lmcan-<hex ms>-<pid>-<nonce>` and `lmcls-…` ids are now packed
+    under scheme bytes `0x03` and `0x04` with a five-byte zero tail as the
+    proof of origin, and print back byte for byte or are not packed. Engine
+    ids and the hashed fallback are unchanged. Tests:
+    `a_canary_id_survives_the_round_trip`,
+    `a_canary_shaped_id_that_would_print_back_differently_is_not_packed`,
+    `a_stranger_id_that_starts_with_the_canary_scheme_byte_is_not_ours`
+    (`cloid.rs`), and `a_canary_client_id_packs_into_the_cloid_and_looks_itself_up`
+    (`tests/venue/hyperliquid_requests.rs`, which pinned the hashed
+    behaviour and failed on the fix until rewritten). `hyperliquid_mainnet`
+    and `mexc_mainnet` stay `live-canary` until a rerun passes on the
+    deployed fix.
+
 - **2026-09-09 — Audit deferred items completed: restart markouts (F20), opportunity cohort (F16), production day reconciliation (F17), and research standards (F18, F19, F21).**
   - **F20, owed markouts**: `Fills.pending` restated at rotation as `SegmentBase.owed_markouts` (`engine-types/src/wal.rs`, `#[serde(default)]`) and rebuilt at boot for fills younger than 305 s. `filled_ns` signed stamp reconstructed from venue `fill_ts_ms` against wall clock. Fills report splits late marks into restart-gap and stall. 10 execution/fill-cost tests pass; `engine sim --twice` passes on seeds 7, 26, 31, 42, 166.
   - **F16, opportunity cohort**: Added `engine-tools cohort --wal PATH [--json]` (`engine-tools/src/cohort.rs`). Tracks source rows keyed by `(destination, source, sequence, observation_id)` and order intents by `intent` with settle status. Reports latencies at p50/p90/p99/p99.9. Mainnet 2026-09-08 census (segments 000064–000074): 52 source rows consumed, 11 intents (9 sent, 2 refused StaleQuote), decision-to-wire p50 0.755 ms across 114,809 records.

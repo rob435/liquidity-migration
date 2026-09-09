@@ -21,8 +21,15 @@
 //! only the cross-restart recognition is lost, and only for an id shape the
 //! engine does not currently mint.
 //!
-//! The first byte says which of the two it is, so a later change of scheme can
-//! be told apart from this one rather than silently misread.
+//! The canary mints its own ids, `lmcan-<hex ms>-<pid>-<nonce>` for the order
+//! and `lmcls-…` for the close that follows a fill, and proves the order by
+//! reading it back from this venue's private feed and open-order list. Those
+//! are packed too, under their own scheme bytes: hashed, the venue's reply
+//! would carry an id the canary cannot recognise as its own, and the order it
+//! placed would read as a stranger's.
+//!
+//! The first byte says which scheme made the id, so a later change of scheme
+//! can be told apart from these rather than silently misread.
 
 use super::sign::keccak;
 
@@ -30,10 +37,17 @@ use super::sign::keccak;
 const SCHEME_PACKED: u8 = 0x01;
 /// The hashed fallback: unique, but not reversible.
 const SCHEME_HASHED: u8 = 0x02;
+/// The canary's order id, recoverable from the bytes.
+const SCHEME_CANARY: u8 = 0x03;
+/// The canary's close id, recoverable from the bytes.
+const SCHEME_CANARY_CLOSE: u8 = 0x04;
 
 /// What the engine's ids look like. Kept here as one string so the coupling to
 /// `engine-core`'s minting is visible rather than implied.
 const ENGINE_PREFIX: &str = "eng-";
+/// What `engine canary-order` mints (`engine-tools/src/canary.rs`).
+const CANARY_PREFIX: &str = "lmcan-";
+const CANARY_CLOSE_PREFIX: &str = "lmcls-";
 
 const MAX_BOOT_MS: u64 = (1 << 48) - 1;
 const MAX_COUNTER: u64 = (1 << 40) - 1;
@@ -51,14 +65,21 @@ fn to_bytes(client_order_id: &str) -> [u8; 16] {
         out[7..12].copy_from_slice(&counter.to_be_bytes()[3..]);
         return out;
     }
+    if let Some((scheme, stamp_ms, process, nonce)) = split_canary_id(client_order_id) {
+        out[0] = scheme;
+        out[1..7].copy_from_slice(&stamp_ms.to_be_bytes()[2..]);
+        out[7..9].copy_from_slice(&process.to_be_bytes());
+        out[9..11].copy_from_slice(&nonce.to_be_bytes());
+        return out;
+    }
     let hashed = keccak(client_order_id.as_bytes());
     out[0] = SCHEME_HASHED;
     out[1..].copy_from_slice(&hashed[..15]);
     out
 }
 
-/// The engine id a cloid was made from, or `None` when it was hashed or was
-/// never one of ours.
+/// The engine or canary id a cloid was made from, or `None` when it was hashed
+/// or was never one of ours.
 pub(crate) fn from_cloid(cloid: &str) -> Option<String> {
     let body = cloid
         .trim()
@@ -69,20 +90,67 @@ pub(crate) fn from_cloid(cloid: &str) -> Option<String> {
     // The scheme byte alone is one byte in two hundred and fifty-six: this
     // reply is account-wide, the owner hand-trades it, and a stranger's cloid
     // that happened to start with it would deliver their fill to a strategy
-    // here. The packed form always leaves these four bytes zero, so they are
-    // part of the proof that the id is one this engine minted.
-    if bytes[0] != SCHEME_PACKED || bytes[12..] != [0u8; 4] {
+    // here. Each packed form leaves its tail bytes zero, so they are part of
+    // the proof that the id is one this engine minted.
+    match bytes[0] {
+        SCHEME_PACKED if bytes[12..] == [0u8; 4] => {
+            let mut boot = [0u8; 8];
+            boot[2..].copy_from_slice(&bytes[1..7]);
+            let mut counter = [0u8; 8];
+            counter[3..].copy_from_slice(&bytes[7..12]);
+            Some(format!(
+                "{ENGINE_PREFIX}{}-{}",
+                u64::from_be_bytes(boot),
+                u64::from_be_bytes(counter)
+            ))
+        }
+        scheme @ (SCHEME_CANARY | SCHEME_CANARY_CLOSE) if bytes[11..] == [0u8; 5] => {
+            let mut stamp = [0u8; 8];
+            stamp[2..].copy_from_slice(&bytes[1..7]);
+            let process = u16::from_be_bytes([bytes[7], bytes[8]]);
+            let nonce = u16::from_be_bytes([bytes[9], bytes[10]]);
+            let prefix = if scheme == SCHEME_CANARY {
+                CANARY_PREFIX
+            } else {
+                CANARY_CLOSE_PREFIX
+            };
+            Some(format!(
+                "{prefix}{:x}-{process:04x}-{nonce:04x}",
+                u64::from_be_bytes(stamp)
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// `lmcan-<hex ms>-<pid>-<nonce>` or `lmcls-…` split into its scheme and three
+/// numbers, or `None` for any other shape. The id must print back byte for
+/// byte from the numbers, or it is not packed.
+fn split_canary_id(id: &str) -> Option<(u8, u64, u16, u16)> {
+    let (scheme, rest) = if let Some(rest) = id.strip_prefix(CANARY_PREFIX) {
+        (SCHEME_CANARY, rest)
+    } else if let Some(rest) = id.strip_prefix(CANARY_CLOSE_PREFIX) {
+        (SCHEME_CANARY_CLOSE, rest)
+    } else {
+        return None;
+    };
+    let mut parts = rest.split('-');
+    let stamp = parts.next()?;
+    let process = parts.next()?;
+    let nonce = parts.next()?;
+    if parts.next().is_some() || stamp.is_empty() || stamp.len() > 12 {
         return None;
     }
-    let mut boot = [0u8; 8];
-    boot[2..].copy_from_slice(&bytes[1..7]);
-    let mut counter = [0u8; 8];
-    counter[3..].copy_from_slice(&bytes[7..12]);
-    Some(format!(
-        "{ENGINE_PREFIX}{}-{}",
-        u64::from_be_bytes(boot),
-        u64::from_be_bytes(counter)
-    ))
+    let stamp_ms = u64::from_str_radix(stamp, 16).ok()?;
+    let process = u16::from_str_radix(process, 16).ok()?;
+    let nonce = u16::from_str_radix(nonce, 16).ok()?;
+    let prefix = if scheme == SCHEME_CANARY {
+        CANARY_PREFIX
+    } else {
+        CANARY_CLOSE_PREFIX
+    };
+    (stamp_ms <= MAX_BOOT_MS && format!("{prefix}{stamp_ms:x}-{process:04x}-{nonce:04x}") == id)
+        .then_some((scheme, stamp_ms, process, nonce))
 }
 
 /// `eng-<boot ms>-<n>` split into its two numbers, or `None` for any other
@@ -185,6 +253,66 @@ mod tests {
     fn the_first_byte_says_which_scheme_made_it() {
         assert!(to_cloid("eng-1-1").starts_with("0x01"));
         assert!(to_cloid("something else").starts_with("0x02"));
+        assert!(to_cloid("lmcan-1a0887cda03-9793-0000").starts_with("0x03"));
+        assert!(to_cloid("lmcls-1a0887cda03-9793-0000").starts_with("0x04"));
+    }
+
+    #[test]
+    fn a_canary_id_survives_the_round_trip() {
+        // The ids `engine canary-order` actually mints, including the one the
+        // 2026-09-09 23:24 UTC Hyperliquid canary placed and could not
+        // recognise in the venue's reply.
+        for id in [
+            "lmcan-1a0887cda03-9793-0000",
+            "lmcls-1a0887cda03-9793-0000",
+            "lmcan-1-0000-0000",
+            "lmcan-ffffffffffff-ffff-ffff",
+            "lmcls-1a0887cda03-0001-00ff",
+        ] {
+            let cloid = to_cloid(id);
+            assert_eq!(cloid.len(), 34, "{cloid} is not 16 bytes of hex");
+            assert_eq!(
+                from_cloid(&cloid).as_deref(),
+                Some(id),
+                "{id} did not come back from {cloid}"
+            );
+        }
+        assert_ne!(
+            to_cloid("lmcan-1a0887cda03-9793-0000"),
+            to_cloid("lmcls-1a0887cda03-9793-0000")
+        );
+    }
+
+    #[test]
+    fn a_canary_shaped_id_that_would_print_back_differently_is_not_packed() {
+        // Uppercase hex, a padded stamp, a short field and a fourth field all
+        // parse as numbers but print back as another string.
+        for odd in [
+            "lmcan-1A0887CDA03-9793-0000",
+            "lmcan-01a0887cda03-9793-0000",
+            "lmcan-1a0887cda03-979-0000",
+            "lmcan-1a0887cda03-9793-0000-1",
+            "lmcan-1a0887cda03-9793",
+            "lmcan-1000000000000-9793-0000",
+        ] {
+            assert_eq!(from_cloid(&to_cloid(odd)), None, "{odd} was packed");
+        }
+    }
+
+    #[test]
+    fn a_stranger_id_that_starts_with_the_canary_scheme_byte_is_not_ours() {
+        for scheme in [SCHEME_CANARY, SCHEME_CANARY_CLOSE] {
+            for byte in 11..16 {
+                let mut near = [0u8; 16];
+                near[0] = scheme;
+                near[byte] = 0x01;
+                assert_eq!(
+                    from_cloid(&format!("0x{}", hex::encode(near))),
+                    None,
+                    "a foreign id differing only at byte {byte} was read as ours"
+                );
+            }
+        }
     }
 
     #[test]

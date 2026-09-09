@@ -1126,18 +1126,18 @@ async fn the_inventory_probe_reads_the_same_account_and_never_signs_a_mutation()
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_canary_client_id_hashes_into_the_cloid_and_still_looks_itself_up() {
-    // The canary mints `lmcan-…`, not `eng-<ms>-<n>`, so it takes the hashed
-    // half of the cloid scheme rather than the packed one. The derivation is
-    // still a function of the id, which is all the lookup needs: what the
-    // packed form buys — recognising the engine's own orders across a restart
-    // — no canary order lives long enough to want.
+async fn a_canary_client_id_packs_into_the_cloid_and_looks_itself_up() {
+    // The canary mints `lmcan-…`, not `eng-<ms>-<n>`, and it proves its order
+    // by reading it back from the private feed and the open-order list, so
+    // its id is packed under its own scheme byte and comes back as itself.
+    // Hashed, every reply the venue sent about the order would carry an id
+    // the canary could not recognise as its own.
     let canary_id = "lmcan-1997d1b5cc0-1a2b-0000";
     let server = TestServer::start(move |request, count| {
         let body: Value = request.json();
         if body["type"] == "orderStatus" {
             let cloid = body["oid"].as_str().expect("a cloid, not an oid").to_string();
-            assert!(cloid.starts_with("0x02"), "canary ids hash: {cloid}");
+            assert!(cloid.starts_with("0x03"), "canary ids pack: {cloid}");
             assert_eq!(cloid.len(), 34);
             return (
                 200,
