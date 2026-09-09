@@ -44,7 +44,10 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     CARRY cycle 00:10:54.894 (5 s old), `last_carry_upcoming_ts_ms`
     `1788912000000` (the 2026-09-09 decision), `carry_output_sequence` 55399 —
     220 outputs in the five minutes between the two readings against mainnet's
-    82, the shape of a lane working off a backlog. The alert ref is clear.
+    82, the shape of a lane working off a backlog. [Run `34294451786`](https://github.com/rob435/liquidity-migration/actions/runs/34294451786)
+    at 00:18:59 UTC carries the watchdog's own receipt — `ok scope=demo
+    warnings-present-no-critical` on four consecutive firings, 00:16:56 through
+    00:18:57 — with the CARRY cycle 5 s old. The alert ref is clear.
   - Open. Which of `try_carry_watermark`'s early returns held for those ten
     minutes is not established. The two candidates are the lane gate
     (`carry_required_lanes_pending`, `engine/signal-worker/src/live.rs:2700`:
