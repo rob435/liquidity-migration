@@ -51,16 +51,17 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     `may_open is not True` with no dwell — the condition exactly as
     [notifications](docs/notifications.md) §Realm/Admission documents it.
   - The grid fits to the second. Heartbeat `stream_resets` reads 1 at 00:09:27,
-    3 at 00:33:52 and 5 at 00:45:53: five resets 600 s apart from the 23:54:29
-    socket, at 00:04:29, 00:14:29, 00:24:29, 00:34:29 and 00:44:29. The page is
-    on the fifth. Both Bybit engines read `stream_resets=0` over the same
-    window and neither paged; this is MEXC's paced re-read, not a lost socket.
+    3 at 00:33:52, 5 at 00:45:53 and 8 at 01:21:55: eight resets 600 s apart
+    from the 23:54:29 socket, at 00:04:29 through 01:14:29. The page is on the
+    fifth. Both Bybit engines read `stream_resets=0` over the same window and
+    neither paged; this is MEXC's paced re-read, not a lost socket.
   - Why once and not five times. The heartbeat is rewritten every 5 s
     (`engine/engine-core/src/heartbeat.rs:50`) and the watchdog reads it once
     per 30 s, so the page needs a heartbeat write to land inside the sweep and
     the watchdog's read to land inside the 5 s that beat is current. It is a
-    race, not a certainty — one page in five resyncs here — and it re-arms every
-    time: `select_incidents_to_fire` drops a key that is not currently alerting
+    race, not a certainty — one page in the eight resyncs to 01:21:55, and the
+    three after the page all passed unpaged — and it re-arms every time:
+    `select_incidents_to_fire` drops a key that is not currently alerting
     (`:1036`), so the next catch is again "not in state" and fires a fresh
     routine.
   - Impaired: nothing. mexc holds no positions, `orders_sent=0` since the
