@@ -10,7 +10,7 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
-- **2026-09-09 — Incident id `mexc-a361f5d18861421a` fires six times on a healthy mexc engine, at 00:44:29, ~01:24:29, 01:51:36, 02:11:34, 02:21:45 and 02:31:32 UTC: MEXC's designed 600 s private-stream resync publishes `may_open=false` for the length of its history sweep, and the 30 s watchdog read six of those windows. Six false pages in fifteen resyncs across two engine generations and a deploy, one on-call session each. The rate is not what it looked like at three pages: the current generation paged on four of its six resyncs and on the last three consecutively, one wake per ten minutes. Cause named, nothing impaired, no code changed; the fix is the owner's call and the rate is the argument for making it.**
+- **2026-09-09 — Incident id `mexc-a361f5d18861421a` fires seven times on a healthy mexc engine, at 00:44:29, ~01:24:29, 01:51:36, 02:11:34, 02:21:45, 02:31:32 and 02:41:43 UTC: MEXC's designed 600 s private-stream resync publishes `may_open=false` for the length of its history sweep, and the 30 s watchdog read seven of those windows. Seven false pages in sixteen resyncs across two engine generations and a deploy, one on-call session each. The sweep's length is now read off the source rather than guessed — it is one signed request per followed symbol, issued sequentially, so it runs tens of seconds against a 30 s watchdog period, and the catch is close to a coin flip by construction. The current generation paged on five of its seven resyncs and on the last four consecutively, one wake per ten minutes. Cause named, nothing impaired, no code changed; the fix is the owner's call and the rate is the argument for making it.**
   - Not the incident that id names. `incident_id` is `sha256(scope + the newly
     due alert keys)[:16]` (`scripts/runtime/check_fleet_liveness.py:1170`), so
     every `may-open:liquidity-migration-engine-mexc.service` page carries
@@ -60,16 +60,36 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     (`engine/engine-core/src/heartbeat.rs:50`) and the watchdog reads it once
     per 30 s, so the page needs a heartbeat write to land inside the sweep and
     the watchdog's read to land inside the 5 s that beat is current. It is a
-    race, not a certainty — six pages in the fifteen resyncs to 02:32:44, one
+    race, not a certainty — seven pages in the sixteen resyncs to 02:42:49, one
     on-call session each — and it re-arms every time:
     `select_incidents_to_fire` drops a key that is not currently alerting
     (`:1036`), so the next catch is again "not in state" and fires a fresh
     routine. The race is far likelier to land than the first three pages
-    suggested: the current generation caught four of its six resyncs, three of
+    suggested: the current generation caught five of its seven resyncs, four of
     them back to back, so the working rate is one wake per ten minutes, not per
-    forty. Nothing in the mechanism explains the difference; the sweep's
-    duration against the 5 s heartbeat write is the one measurement that would,
-    and no reading here times it.
+    forty.
+  - Why the odds are that bad: the sweep is long by construction.
+    `RecoveryClient::executions`
+    (`engine/engine-venue/src/venues/mexc/recovery.rs:118`) walks the followed
+    symbols in a `for` loop and awaits each `GET` of `PATH_DEALS` before
+    issuing the next — `symbol` is a required parameter there, so the read is
+    per symbol and not account-wide — and an account with no fills in the
+    window answers each in one page (`PAGE_SIZE = 100`,
+    `engine/engine-venue/src/venues/mexc/gateway.rs:90`). Every one of those
+    requests, plus the three the account view takes first, passes the shared
+    pacer at `QUOTA_REQUESTS = 16` per `QUOTA_WINDOW = 2 s`
+    (`engine/engine-venue/src/venues/mexc/rest.rs:26-30`). For the 132-symbol
+    sweep the pacer comment records live on 2026-09-08 that is a floor of about
+    15 s of pacing alone, and because the loop is sequential the true cost is
+    `symbols × round trip` whenever a round trip exceeds 125 ms. So
+    `private_stream_ready` is false for something on the order of 15–25 s of
+    every 600 s, against a 30 s watchdog period and a 5 s heartbeat: the
+    watchdog is expected to catch a majority of resyncs, which is what five of
+    seven is. The floor is exact from source; the round-trip term is an
+    estimate, and no reading here times a sweep directly. Two consequences the
+    owner's choice turns on: the rate is not noise that will settle, and it
+    rises with the followed-symbol count, so a wider MEXC universe pages more
+    often.
   - Second page, 2026-09-09 ~01:24:29 UTC, on the ninth resync. Same shape:
     [diagnose run `34299124321`](https://github.com/rob435/liquidity-migration/actions/runs/34299124321)
     (01:25:33–01:25:49) reads pid `3491854`, `ActiveEnterTimestamp=23:54:29`,
@@ -96,26 +116,30 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     The same reading puts `venue_clock_offset_ms` at `-4366`, the widest MEXC
     value recorded and still undiagnosed; it alerts on nothing and is not this
     page's cause.
-  - Fourth, fifth and sixth pages, 2026-09-09 02:11:34, 02:21:45 and 02:31:32
-    UTC, on this generation's fourth, fifth and sixth resyncs — 12, 23 and 10 s
-    after the 02:11:22, 02:21:22 and 02:31:22 grid points. Three consecutive
-    resyncs, three fresh on-call sessions, each of which read the host:
+  - Fourth through seventh pages, 2026-09-09 02:11:34, 02:21:45, 02:31:32 and
+    02:41:43 UTC, on this generation's fourth, fifth, sixth and seventh resyncs
+    — 12, 23, 10 and 21 s after the 02:11:22, 02:21:22, 02:31:22 and 02:41:22
+    grid points. Four consecutive resyncs, four fresh on-call sessions, each of
+    which read the host:
     [diagnose runs `34302281315`](https://github.com/rob435/liquidity-migration/actions/runs/34302281315)
     (02:12:36–02:12:50, `uptime_s=2487`, `stream_resets=4`),
     [`34302946042`](https://github.com/rob435/liquidity-migration/actions/runs/34302946042)
-    (02:22:33–02:22:46, `uptime_s=3083`, `stream_resets=5`) and
+    (02:22:33–02:22:46, `uptime_s=3083`, `stream_resets=5`),
     [`34303611711`](https://github.com/rob435/liquidity-migration/actions/runs/34303611711)
-    (02:32:33–02:32:48, `uptime_s=3680`, `stream_resets=6`). All three read pid
+    (02:32:33–02:32:48, `uptime_s=3680`, `stream_resets=6`) and
+    [`34304281101`](https://github.com/rob435/liquidity-migration/actions/runs/34304281101)
+    (02:42:30–02:42:56, `uptime_s=4287`, `stream_resets=7`). All four read pid
     `3527710`, `NRestarts=0`, `may_open=true`, `strategy_errors=[]`,
     `entry_blockers=0`, `entry_blocker_reasons=[]`, `positions=0`,
     `orders_sent=0`, and the mexc watchdog reads `ok scope=mexc
     units-and-heartbeats-healthy` at 02:12:03 and 02:12:33, 02:22:14 and
-    02:22:44, and 02:32:01 and 02:32:31 — every page self-clears inside 30 s.
-    `0 loaded units listed` for `systemctl --failed` at 02:32:44, and both Bybit
-    engines hold `stream_resets=0` and `may_open=true` across the same window.
-    `venue_clock_offset_ms` swings from `-831` at 02:22:46 to `-4217` at
-    02:32:43, still wide, still unstable, still undiagnosed, and still not this
-    page's cause.
+    02:22:44, 02:32:01 and 02:32:31, and 02:42:12 and 02:42:42 — every page
+    self-clears inside 30 s. `0 loaded units listed` for `systemctl --failed`
+    at 02:32:44 and again at 02:42:54, and both Bybit engines hold
+    `stream_resets=0` and `may_open=true` across the same window.
+    `venue_clock_offset_ms` swings from `-831` at 02:22:46 through `-4217` at
+    02:32:43 to `-3354` at 02:42:49, still wide, still unstable, still
+    undiagnosed, and still not this page's cause.
   - Stopping the mexc engine is not the shortcut. `evaluate_units`
     (`scripts/runtime/check_fleet_liveness.py:196`) pages `CRITICAL
     unit:liquidity-migration-engine-mexc.service is inactive` for any manifest
@@ -139,8 +163,12 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     dwell replaces it. (3) Give the `may-open:` alert a dwell of two consecutive
     firings — smallest change, delays a real latch page by 30 s. Recommendation:
     (2) with (3), which keeps every real latch paging on the first reading and
-    costs a genuinely stuck stream one extra tick. Each changes when the funded
-    realm pages, so the choice is the owner's.
+    costs a genuinely stuck stream one extra tick. The sweep-length derivation
+    above is what makes (3) sufficient rather than merely quieter: the window is
+    15–25 s against a 30 s watchdog period, so it cannot survive two consecutive
+    readings, and a `may_open=false` that does survive them is by construction
+    not this mechanism. Each changes when the funded realm pages, so the choice
+    is still the owner's; seven wakes in two hours is the cost of not making it.
 
 - **2026-09-09 — Incidents `demo-0922e9f30da3bf98`, `mainnet-014ec4a90a2fde5f` and `mexc-d62940e951288d4c`: every signal worker's CARRY cycle stopped completing at the UTC decision roll for five to eight minutes and paged CRITICAL on every realm including the funded one, because the freshness verdict judged the lane by 180 s while the worker's own funding supply frontier guarantees a longer wait. The lanes were working; the verdict was wrong, is now measured from the instant the roll's cycle is actually due, and is deployed as `beef5bc5` with a healthy receipt.**
   - Scope. All three running realms stall at the same boundary, not demo alone,
