@@ -285,6 +285,10 @@ fn engine_fields(out: &mut Value, beat: &Value, now: i64) {
     }
     for key in [
         "may_open",
+        // Recorded beside the latch because `may_open` alone no longer says
+        // whether entries were actually being admitted at the sample.
+        "private_stream_ready",
+        "private_stream_unready_ms",
         "rolling_loss_net_usdt",
         "rolling_loss_limit_usdt",
         "rolling_loss_tripped",

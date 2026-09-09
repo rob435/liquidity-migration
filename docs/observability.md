@@ -48,7 +48,8 @@ noise, and the history is the point.
 | `heartbeat_age_ms`, `account_age_ms` | Age of the heartbeat, and of the venue reading inside it |
 | `position_count`, `position_entry_notional_usdt`, `sleeve_positions` | Holdings, and how many each **configured** sleeve owns, zero included; `unattributed` is the owner's hand exposure |
 | `sleeve_entries_enabled`, `sleeve_blockers` | Per configured sleeve: the effective entry gate (1/0) and how many symbols it is blocked on |
-| `may_open`, `entry_blockers`, `strategy_errors`, `working_entries`, `pending_flatten_requests` | Whether new risk is admitted and why not; orders resting at the venue; flattens not yet acknowledged |
+| `may_open`, `entry_blockers`, `strategy_errors`, `working_entries`, `pending_flatten_requests` | Whether new risk is admitted and why not; orders resting at the venue; flattens not yet acknowledged. `may_open` is the operator latch alone |
+| `private_stream_ready`, `private_stream_unready_ms` | Whether the private account channel is usable, and how long it has not been (`null` while usable). Entries are refused while it is unready, so both are needed with `may_open` to say whether the engine was admitting at the sample |
 | `rolling_loss_net_usdt`, `rolling_loss_limit_usdt`, `rolling_loss_tripped`, `rolling_loss_trades` | The 24h breaker against its ceiling |
 | `uptime_s`, `market_events`, `orders_sent`, `fills`, `stream_resets`, `amends_confirmed`, `amends_pulled_unconfirmed` | Since-boot counters; all reset on restart. The dashboard reads them as `increase()` |
 | `fills_maker_share`, `fill_all_in_arrival_bps`, `fill_arrival_shortfall_bps`, `fill_fee_coverage`, `fill_markout_1m_our_way_bps` | What the trading cost |

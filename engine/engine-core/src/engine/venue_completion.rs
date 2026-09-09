@@ -1353,7 +1353,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let stream_reset = matches!(&update, OrderUpdate::StreamReset { .. });
         if stream_reset {
             self.stream_resets += 1;
-            self.private_stream_ready = false;
+            self.clear_private_stream_ready();
             self.books.account.observed_ns = 0;
         }
         let Some(journaled) = Self::journal_update(

@@ -4,6 +4,8 @@ use super::*;
 fn beat_with(costs: &Costs) -> serde_json::Value {
     let facts = Facts {
         may_open: true,
+        private_stream_ready: true,
+        private_stream_unready_ms: None,
         market_events: 1,
         orders_sent: 1,
         strategies: &[],

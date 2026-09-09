@@ -291,7 +291,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     }));
                 }
                 Some(Err(error)) if matches!(&error, VenueError::Transport(_)) => {
-                    self.private_stream_ready = false;
+                    self.clear_private_stream_ready();
                     self.recovery.history_requested = true;
                     self.recovery.history_generation = None;
                     tracing::warn!(%error, "execution history recovery retained for retry");
@@ -403,7 +403,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     if query.history.is_none() {
                         self.recovery.history_requested = true;
                         self.recovery.history_generation = None;
-                        self.private_stream_ready = false;
+                        self.clear_private_stream_ready();
                     } else {
                         self.may_open = false;
                         record_latch(
@@ -427,7 +427,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 if self.recovery.connected
                     && self.recovery.history_generation == Some(self.recovery.generation)
                 {
-                    self.private_stream_ready = true;
+                    self.restore_private_stream_ready();
                 }
                 self.enforce_position_stop_intent().await?;
                 self.queue_halted_entry_cancels()?;

@@ -153,6 +153,14 @@ pub(super) fn render(heartbeat: &Heartbeat, facts: &Facts, wall_ts_ms: i64) -> S
             or_null(heartbeat.account.as_ref().map(|a| quoted(&a.venue))),
         ),
         ("positions", positions(facts.holdings)),
+        (
+            "private_stream_ready",
+            facts.private_stream_ready.to_string(),
+        ),
+        (
+            "private_stream_unready_ms",
+            or_null(facts.private_stream_unready_ms.map(|ms| ms.to_string())),
+        ),
         ("strategies", list(facts.strategies)),
         ("wall_ts_ms", wall_ts_ms.to_string()),
         ("wire_p50_ns", figure(facts.wire.count, facts.wire.p50_ns)),

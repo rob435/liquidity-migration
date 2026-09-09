@@ -4,7 +4,7 @@ use super::*;
 use crate::testpath::temp_path;
 
 /// Every key the file carries, in the order it must read in.
-const KEYS: [&str; 66] = [
+const KEYS: [&str; 68] = [
     "account_available_usdt",
     "account_equity_usdt",
     "account_observed_wall_ts_ms",
@@ -48,6 +48,8 @@ const KEYS: [&str; 66] = [
     "pending_flatten_requests",
     "pid",
     "positions",
+    "private_stream_ready",
+    "private_stream_unready_ms",
     "quota_hold_p999_ns",
     "quota_hold_p99_ns",
     "realm",
@@ -122,6 +124,8 @@ fn facts<'a>(
     Facts {
         costs: NOTHING_YET.get_or_init(Costs::default),
         may_open: true,
+        private_stream_ready: true,
+        private_stream_unready_ms: None,
         market_events: 1234,
         orders_sent: 7,
         strategies,

@@ -10,7 +10,7 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
-- **2026-09-09 — Incident id `mexc-a361f5d18861421a` fires seven times on a healthy mexc engine, at 00:44:29, ~01:24:29, 01:51:36, 02:11:34, 02:21:45, 02:31:32 and 02:41:43 UTC: MEXC's designed 600 s private-stream resync publishes `may_open=false` for the length of its history sweep, and the 30 s watchdog read seven of those windows. Seven false pages in sixteen resyncs across two engine generations and a deploy, one on-call session each. The sweep's length is now read off the source rather than guessed — it is one signed request per followed symbol, issued sequentially, so it runs tens of seconds against a 30 s watchdog period, and the catch is close to a coin flip by construction. The current generation paged on five of its seven resyncs and on the last four consecutively, one wake per ten minutes. Cause named, nothing impaired, no code changed; the fix is the owner's call and the rate is the argument for making it.**
+- **2026-09-09 — Incident id `mexc-a361f5d18861421a` fires seven times on a healthy mexc engine, at 00:44:29, ~01:24:29, 01:51:36, 02:11:34, 02:21:45, 02:31:32 and 02:41:43 UTC: MEXC's designed 600 s private-stream resync publishes `may_open=false` for the length of its history sweep, and the 30 s watchdog read seven of those windows. Seven false pages in sixteen resyncs across two engine generations and a deploy, one on-call session each. The sweep's length is now read off the source rather than guessed — it is one signed request per followed symbol, issued sequentially, so it runs tens of seconds against a 30 s watchdog period, and the catch is close to a coin flip by construction. The current generation paged on five of its seven resyncs and on the last four consecutively, one wake per ten minutes. Nothing was impaired at any point. Fixed: the heartbeat now publishes the operator latch and the private-stream readiness bit as separate fields, and the watchdog pages on a stream that stays unusable past 180 s rather than on a sweep in progress. The one candidate fix that would move when the engine admits entries is untaken and still the owner's.**
   - Not the incident that id names. `incident_id` is `sha256(scope + the newly
     due alert keys)[:16]` (`scripts/runtime/check_fleet_liveness.py:1170`), so
     every `may-open:liquidity-migration-engine-mexc.service` page carries
@@ -154,21 +154,50 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     (`engine/engine-core/src/engine/intent_admission.rs:142`,
     `OpeningRefusal::PrivateStreamUnready`) — right behaviour, wrongly reported
     as a CRITICAL that wakes an engineer.
-  - Owner's call. Three fixes, none taken unattended. (1) Stop overloading
-    `StreamReset`: give MEXC's paced re-read its own venue signal so a socket
-    that never dropped does not invalidate the account view — the root fix, and
-    it changes when the funded engine admits entries. (2) Publish the latch and
-    the readiness bit as separate heartbeat fields and page CRITICAL only on the
-    latch — loses the page for a private stream that never recovers unless a
-    dwell replaces it. (3) Give the `may-open:` alert a dwell of two consecutive
-    firings — smallest change, delays a real latch page by 30 s. Recommendation:
-    (2) with (3), which keeps every real latch paging on the first reading and
-    costs a genuinely stuck stream one extra tick. The sweep-length derivation
-    above is what makes (3) sufficient rather than merely quieter: the window is
-    15–25 s against a 30 s watchdog period, so it cannot survive two consecutive
-    readings, and a `may_open=false` that does survive them is by construction
-    not this mechanism. Each changes when the funded realm pages, so the choice
-    is still the owner's; seven wakes in two hours is the cost of not making it.
+  - The three candidate fixes were: (1) stop overloading `StreamReset` so
+    MEXC's paced re-read does not invalidate the account view; (2) publish the
+    latch and the readiness bit as separate heartbeat fields; (3) give the
+    `may-open:` alert a dwell. All three were held as the owner's on the
+    ground that each moves when the funded realm pages *or admits entries*.
+  - Why (2) was not the owner's call after all. That ground is false for the
+    field split. `effective_may_open` existed at exactly two lines — computed
+    at `engine/engine-core/src/engine/telemetry.rs:160`, consumed at `:179` as
+    the heartbeat's `may_open` — and nothing else read it. Every admission
+    path reads `may_open` and `private_stream_ready` independently
+    (`intent_admission.rs:142`, `scheduling.rs:948`, `stop_runtime.rs:188`,
+    `portfolio_runtime.rs:158`), so splitting the two in telemetry changes no
+    trading behaviour at all: it moves only when the watchdog pages. Taken on
+    that basis rather than left for an eighth wake. Fix (1) is untaken and
+    still the owner's — it does move when the engine admits entries.
+  - Fix, taken. The heartbeat publishes `may_open` as the boot-reconciliation
+    latch alone, plus `private_stream_ready` and `private_stream_unready_ms`
+    beside it. `check_fleet_liveness.py` keeps `may-open:` paging CRITICAL on
+    the first reading — the latch is permanent until an operator clears it, so
+    no real latch page is delayed — and adds `private-stream:` CRITICAL once
+    `private_stream_unready_ms` exceeds `_PRIVATE_STREAM_STUCK_MS` 180 000.
+    That sits 7–12× above the 15–25 s sweep derived above and inside one
+    600 s `CONNECTED_RESYNC`, so a stream that is genuinely gone still pages
+    before the next paced re-read could mask it. This keeps the coverage a
+    plain dwell would have kept and the immediacy it would have cost: the
+    stuck-stream fault the conflated page was really carrying now has its own
+    reference, and the latch keeps a first-reading page. A heartbeat without
+    the field pages through `may-open:` exactly as before, so the deploy
+    window has no gap. Both readiness transitions go through
+    `clear_private_stream_ready` / `restore_private_stream_ready` so no call
+    site can move the bit without the stamp, and a second reset before
+    recovery keeps the original stamp — a stream that never returns keeps
+    ageing instead of restarting its own clock every 600 s.
+    `engine-tools record-equity` samples both new fields, so the curve and
+    `lm_engine_*` keep saying whether entries were being admitted.
+  - Proof. `engine::telemetry::tests::a_paced_resync_does_not_publish_a_latched_engine`
+    drives a `StreamReset` into a real engine and reads the heartbeat it
+    writes; with the conflation restored it fails `left: Bool(false), right:
+    Bool(true)` on "the sweep was published as a latched engine and paged
+    CRITICAL". `test_a_paced_private_stream_resync_is_quiet_but_a_stuck_one_pages`
+    fails without the watchdog half. 854 engine-core and 1 767 Python tests
+    pass; Ruff, mypy, rustfmt and Clippy are clean. The 20 Python and 1 Rust
+    failures in this container are missing `rsync`, `ssh`, `rclone` and tape
+    fixtures; the failure set is byte-identical at `cbd4da8`.
 
 - **2026-09-09 — Incidents `demo-0922e9f30da3bf98`, `mainnet-014ec4a90a2fde5f` and `mexc-d62940e951288d4c`: every signal worker's CARRY cycle stopped completing at the UTC decision roll for five to eight minutes and paged CRITICAL on every realm including the funded one, because the freshness verdict judged the lane by 180 s while the worker's own funding supply frontier guarantees a longer wait. The lanes were working; the verdict was wrong, is now measured from the instant the roll's cycle is actually due, and is deployed as `beef5bc5` with a healthy receipt.**
   - Scope. All three running realms stall at the same boundary, not demo alone,

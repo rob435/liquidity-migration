@@ -91,6 +91,13 @@ _ENGINE_UNITS = {
     "liquidity-migration-engine-mexc.service",
     "liquidity-migration-engine-hyperliquid.service",
 }
+# Past any healthy sweep and inside one MEXC resync period, so a stream that is
+# genuinely gone still pages before the next paced re-read could mask it. The
+# sweep is one signed request per followed symbol, issued sequentially
+# (mexc/recovery.rs executions), through a pacer admitting 16 per 2 s
+# (mexc/rest.rs QUOTA_REQUESTS): ~19 s of pacing floor at 151 symbols, order
+# 15-25 s in practice, against the 600 s mexc/ws.rs CONNECTED_RESYNC period.
+_PRIVATE_STREAM_STUCK_MS = 180_000
 _ENGINE_WAL_BYTES_PER_SECOND = 1_048_576
 _ENGINE_RSS_BYTES = 1_610_612_736
 _DEMO_SOAK_SECONDS = 300
@@ -395,6 +402,23 @@ def evaluate_engine_heartbeat(unit: str, path: Path, *, now: float | None = None
         )
     if "may_open" in payload and payload.get("may_open") is not True:
         alerts.append(Alert(f"may-open:{unit}", "CRITICAL", f"{unit} cannot open positions"))
+    # The private stream is the other way an engine stops opening, and it is
+    # not a latch: it clears itself once the account view and execution
+    # history are back. A venue whose history is the authority re-reads on a
+    # timer with the socket up, so the bit alone says nothing — only an age
+    # past any healthy sweep does. Absent field: an engine older than the
+    # split, which reports the same fault through may_open.
+    unready_ms = _number(payload.get("private_stream_unready_ms"))
+    if unit in _ENGINE_UNITS and unready_ms is not None and unready_ms > _PRIVATE_STREAM_STUCK_MS:
+        alerts.append(
+            Alert(
+                f"private-stream:{unit}",
+                "CRITICAL",
+                f"{unit} private account stream has been unusable for "
+                f"{unready_ms / 1000:.0f}s (limit {_PRIVATE_STREAM_STUCK_MS / 1000:.0f}s); "
+                "entries are refused until it recovers",
+            )
+        )
     if payload.get("rolling_loss_tripped") is True:
         # The breaker doing its job is not a fault: NOTICE reports it and leaves
         # the incident routine for things a fix can change.

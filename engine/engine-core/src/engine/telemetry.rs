@@ -40,6 +40,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             fills,
             may_open,
             private_stream_ready,
+            private_stream_unready_since_ns,
             events_seen,
             orders_sent,
             risk,
@@ -157,7 +158,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // per-sleeve rows are what the ledger is for, and adding them up is
         // cheaper than keeping a second copy correct.
         let costs = fills.total();
-        let effective_may_open = *may_open && *private_stream_ready;
+        // The latch and the readiness bit are published apart because they
+        // are different faults with different operators. `may_open` false is
+        // permanent until somebody clears it; readiness false is a sweep in
+        // progress, and on a venue whose execution history is the authority
+        // that happens on a timer while the socket is healthy. Rolling them
+        // into one field made every paced re-read look like a latched engine.
+        let private_stream_unready_ms = private_stream_unready_since_ns
+            .map(|since_ns| now_ns.saturating_sub(since_ns) / 1_000_000);
         // How far the venue's clock sits from this box's, read off the
         // freshest quote: its venue stamp against the wall clock, minus the
         // time it has spent here since the socket read. Both clocks are
@@ -176,7 +184,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         heartbeat.write(
             now_ns,
             &heartbeat::Facts {
-                may_open: effective_may_open,
+                may_open: *may_open,
+                private_stream_ready: *private_stream_ready,
+                private_stream_unready_ms,
                 market_events: *events_seen,
                 orders_sent: *orders_sent,
                 strategies: names,
@@ -230,6 +240,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 mod tests {
     use super::*;
 
+    const NANOS_PER_SEC: u64 = 1_000_000_000;
+
     #[tokio::test(start_paused = true)]
     async fn callback_process_faults_appear_under_their_configured_sleeve() {
         let path = crate::testpath::temp_path("heartbeat-callback-error");
@@ -256,6 +268,85 @@ mod tests {
                 "strategy": "probe",
                 "error": "LONG filled state is invalid",
             }])
+        );
+    }
+
+    /// Incident `mexc-a361f5d18861421a`: MEXC resyncs on a 600 s timer while
+    /// the socket is healthy, so a heartbeat that published `may_open &&
+    /// private_stream_ready` told the fleet watchdog the engine was latched
+    /// once every ten minutes, and the watchdog woke an on-call engineer.
+    #[tokio::test(start_paused = true)]
+    async fn a_paced_resync_does_not_publish_a_latched_engine() {
+        let path = crate::testpath::temp_path("heartbeat-paced-resync");
+        let (mut engine, _) = crate::tests::callback_test_fixture(Vec::new()).await;
+        engine.write_heartbeat(Heartbeat::with_every(
+            path.to_path_buf(),
+            None,
+            None,
+            Duration::from_millis(1),
+        ));
+        assert!(engine.may_open && engine.private_stream_ready);
+
+        // What the venue sends on its timer with the socket still up.
+        engine
+            .take_update_ready(engine_types::OrderUpdate::StreamReset {
+                recv_ns: clock::now_ns(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            engine.may_open && !engine.private_stream_ready,
+            "a paced re-read must not touch the operator latch"
+        );
+
+        // The engine's clock is the real monotonic one, so the age is driven
+        // through the beat's own stamp rather than a paused timer.
+        let since_ns = engine
+            .private_stream_unready_since_ns
+            .expect("clearing readiness must stamp when the outage began");
+        engine.beat(since_ns + 200 * NANOS_PER_SEC);
+        let fields: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            fields["may_open"],
+            serde_json::json!(true),
+            "the sweep was published as a latched engine and paged CRITICAL"
+        );
+        assert_eq!(fields["private_stream_ready"], serde_json::json!(false));
+        assert_eq!(
+            fields["private_stream_unready_ms"],
+            serde_json::json!(200_000),
+            "the age a watcher thresholds on must be the age of the outage"
+        );
+
+        // A second reset before recovery is the same outage, not a fresh one:
+        // a stream that never returns must keep ageing past any dwell.
+        engine
+            .take_update_ready(engine_types::OrderUpdate::StreamReset {
+                recv_ns: clock::now_ns(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(engine.private_stream_unready_since_ns, Some(since_ns));
+        engine.beat(since_ns + 400 * NANOS_PER_SEC);
+        let fields: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            fields["private_stream_unready_ms"],
+            serde_json::json!(400_000),
+            "a repeated reset restarted the clock and hid a stuck stream"
+        );
+
+        // Recovery clears both, so the next sweep starts its own clock.
+        engine.restore_private_stream_ready();
+        engine.beat(since_ns + 500 * NANOS_PER_SEC);
+        let fields: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(fields["private_stream_ready"], serde_json::json!(true));
+        assert_eq!(
+            fields["private_stream_unready_ms"],
+            serde_json::json!(null),
+            "a recovered stream must not keep reporting an outage"
         );
     }
 }

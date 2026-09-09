@@ -428,6 +428,44 @@ def test_engine_that_cannot_open_positions_pages(tmp_path: Path) -> None:
     assert liveness.evaluate_engine_heartbeat("worker", heartbeat) == []
 
 
+def test_a_paced_private_stream_resync_is_quiet_but_a_stuck_one_pages(tmp_path: Path) -> None:
+    """Incident mexc-a361f5d18861421a.
+
+    MEXC re-reads execution history every 600 s with the socket up, which
+    clears private-stream readiness for the length of the sweep. That window
+    is the engine correctly refusing entries against an unconfirmed account
+    view, not a latched engine, and it must not wake anybody.
+    """
+
+    unit = "liquidity-migration-engine-mexc.service"
+    heartbeat = tmp_path / "heartbeat.json"
+
+    def alerts_for(**fields: object) -> set[str]:
+        heartbeat.write_text(
+            json.dumps({"wall_ts_ms": 0, "may_open": True, "rolling_loss_tripped": False, **fields})
+        )
+        return {alert.key for alert in liveness.evaluate_engine_heartbeat(unit, heartbeat)}
+
+    assert alerts_for(private_stream_ready=False, private_stream_unready_ms=0) == set()
+    assert alerts_for(private_stream_ready=False, private_stream_unready_ms=29_000) == set()
+    assert (
+        alerts_for(private_stream_ready=False, private_stream_unready_ms=liveness._PRIVATE_STREAM_STUCK_MS)
+        == set()
+    ), "the limit itself is still a sweep, not a fault"
+
+    # A stream that never came back refuses every entry indefinitely, which is
+    # the fault the old conflated may_open page was really carrying.
+    stuck = alerts_for(private_stream_ready=False, private_stream_unready_ms=600_000)
+    assert stuck == {f"private-stream:{unit}"}
+
+    # The latch keeps its own page, undelayed and independent of readiness.
+    latched = alerts_for(may_open=False, private_stream_ready=True)
+    assert latched == {f"may-open:{unit}"}
+
+    # An engine older than the field split reports through may_open alone.
+    assert alerts_for() == set()
+
+
 def test_signal_worker_startup_and_recovery_are_quiet_but_degraded_and_backpressured_page(
     tmp_path: Path,
 ) -> None:

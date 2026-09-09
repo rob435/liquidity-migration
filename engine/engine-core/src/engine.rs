@@ -562,6 +562,12 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// recovery succeed. Unlike `may_open`, a healthy reconnect may restore
     /// it without operator action.
     private_stream_ready: bool,
+    /// Monotonic stamp of the transition into unready, `None` while ready.
+    /// It is what separates a venue's paced re-read, which clears readiness
+    /// and restores it within one sweep, from a private stream that never
+    /// comes back: only the age distinguishes them, and only a watcher
+    /// reading the age can tell a design from a fault.
+    private_stream_unready_since_ns: Option<u64>,
     recovery: account_recovery::Recovery,
     /// Signed quantity per symbol over every fill this log ever held —
     /// strangers' included, because it mirrors the log's records, not the
@@ -1308,10 +1314,25 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// a periodic REST refresh from re-enabling entries before execution
     /// history has closed the stream gap.
     fn invalidate_private_stream(&mut self) -> Result<(), EngineError> {
-        self.private_stream_ready = false;
+        self.clear_private_stream_ready();
         self.recovery.disconnected();
         self.books.account.observed_ns = 0;
         self.queue_halted_entry_cancels()
+    }
+
+    /// Both readiness transitions live here so no call site can move the bit
+    /// without the stamp. Clearing while already unready keeps the original
+    /// stamp: a stream that resets again before it recovers has not started
+    /// a fresh outage, and the age must keep running against the first loss.
+    fn clear_private_stream_ready(&mut self) {
+        self.private_stream_ready = false;
+        self.private_stream_unready_since_ns
+            .get_or_insert_with(clock::now_ns);
+    }
+
+    fn restore_private_stream_ready(&mut self) {
+        self.private_stream_ready = true;
+        self.private_stream_unready_since_ns = None;
     }
 
     fn is_live_halt_order(&self, client_order_id: &str) -> bool {

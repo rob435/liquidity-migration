@@ -651,6 +651,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             leverage_at: BTreeMap::new(),
             may_open,
             private_stream_ready: true,
+            private_stream_unready_since_ns: None,
             logged_exposure,
             intended_stops,
             stop_repairs_pending,

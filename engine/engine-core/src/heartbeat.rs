@@ -59,6 +59,12 @@ pub struct Facts<'a> {
     /// It is the field to read first: an engine in that state answers every
     /// other question exactly like a healthy one.
     pub may_open: bool,
+    /// Whether the private account channel is usable right now, and how long
+    /// it has been unusable (`None` while usable). Separate from `may_open`:
+    /// this one clears itself, so a watcher must read the age rather than the
+    /// bit to tell a venue's paced re-read from a stream that never returned.
+    pub private_stream_ready: bool,
+    pub private_stream_unready_ms: Option<u64>,
     /// Market messages seen since boot, and orders sent since boot. Two
     /// numbers that both stop moving is a wedged loop; a quiet market moves
     /// the first and not the second.
@@ -311,6 +317,8 @@ impl Heartbeat {
                 })
                 .collect(),
             pid: std::process::id(),
+            private_stream_ready: facts.private_stream_ready,
+            private_stream_unready_ms: facts.private_stream_unready_ms,
             account_metrics: facts.account_metrics,
             positions: facts
                 .holdings
@@ -468,6 +476,8 @@ struct HeartbeatOutput<'a> {
     pending_flatten_requests: Vec<PendingFlatten<'a>>,
     pid: u32,
     positions: Vec<Position<'a>>,
+    private_stream_ready: bool,
+    private_stream_unready_ms: Option<u64>,
     quota_hold_p999_ns: Option<u64>,
     quota_hold_p99_ns: Option<u64>,
     realm: Option<&'a str>,
