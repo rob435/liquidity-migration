@@ -869,3 +869,22 @@ def test_bad_arguments_exit_two(host: Host) -> None:
         with pytest.raises(SystemExit) as failure:
             host.run(*extra)
         assert failure.value.code == 2, extra
+
+
+def test_a_family_with_no_log_yet_is_nothing_to_reclaim(host: Host) -> None:
+    # A realm that has never run has an empty state directory and no engine.wal,
+    # and the retention tool refuses such a family. That is not a fault.
+    mainnet, _ = two_families(host)
+    unborn = host.host / "var/lib/liquidity-migration-engine-hyperliquid"
+    unborn.mkdir(parents=True)
+    family = unborn / "engine.wal"
+    host.families.append(family)
+    assert host.run(*PRESSURE) == 0
+
+    status = host.status()
+    assert status["errors"] == []
+    rows = {row["family"]: row for row in status["per_family"]}
+    assert rows[str(family)]["retention_floor_segment"] is None
+    assert rows[str(family)]["candidates"] == 0
+    assert rows[str(mainnet)]["reclaimed"] > 0
+    assert host.stamp.exists()

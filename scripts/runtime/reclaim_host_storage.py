@@ -803,6 +803,10 @@ class Reclaimer:
 
     def family_plan(self, family: Path) -> FamilyPlan:
         plan = FamilyPlan(family=family)
+        if not family.exists() and not self.segments(family):
+            # A realm that has never run has no log: nothing to keep or reclaim.
+            self._note(f"wal {family}: no log yet")
+            return plan
         floors = self.retention_floor(family)
         if floors is None:
             return plan
