@@ -468,6 +468,123 @@ fn a_cold_start_boot_repair_gap_is_recovering_until_its_own_bound() {
     );
 }
 
+#[test]
+fn a_coverage_dip_when_the_boot_repair_hands_over_keeps_its_own_window() {
+    // Incident demo-0922e9f30da3bf98: the demo worker restarted at 08:05:15,
+    // opened its boot repair gap at 08:05:23, and at 08:08:27 -- 192 s in, on a
+    // sound transport with both cycles run and the gap already closed --
+    // reported `degraded` on `ticker coverage incomplete (166/166 rows, 166/166
+    // topics accepted)`. That refused the funded handover of the 07:53 deploy.
+    // The dip had cleared by 08:09:59, well inside the 2-minute window, but the
+    // boot repair had held that window open from the first heartbeat and spent
+    // it, so the live verdict took over with no grace left.
+    let started_at_ms = 1_000_000;
+    let boot_gap_at_ms = started_at_ms + 8_000;
+    let health = |now_ms: i64, coverage_complete: bool, gap_open: bool| StreamHealth {
+        connected: true,
+        epoch: 2,
+        gap_open,
+        gap_open_since_ms: gap_open.then_some(boot_gap_at_ms),
+        last_frame_ts_ms: Some(now_ms - 1),
+        ticker_capacity: 2,
+        ticker_coverage_complete: coverage_complete,
+        ticker_topics_accepted: 2,
+        kline_topics_accepted: 2,
+        ..StreamHealth::default()
+    };
+    let cycles = |now_ms: i64| {
+        [
+            CycleFreshness::on_cadence(Some(now_ms - 1_000), 60_000),
+            CycleFreshness::on_cadence(Some(now_ms - 500), 60_000),
+        ]
+    };
+    // 187 s in: the boot repair still holds the gap open and coverage is full.
+    let repairing_ms = started_at_ms + 187_000;
+    // 192 s in: the repair closed the gap, and the same heartbeat finds one
+    // symbol's mark past mark_max_age_ms, so the REST ticker lane refills it.
+    let dip_ms = started_at_ms + 192_000;
+    let mut recovery = RecoveryState {
+        transient_started_at_ms: Some(boot_gap_at_ms),
+        reached_ready: false,
+    };
+    assert_eq!(
+        heartbeat_status(
+            &health(repairing_ms, true, true),
+            true,
+            cycles(repairing_ms),
+            started_at_ms,
+            repairing_ms,
+            30_000,
+            &mut recovery,
+        ),
+        "recovering",
+        "the boot repair carries the verdict inside its own bound"
+    );
+    assert_eq!(
+        heartbeat_status(
+            &health(dip_ms, false, false),
+            false,
+            cycles(dip_ms),
+            started_at_ms,
+            dip_ms,
+            30_000,
+            &mut recovery,
+        ),
+        "recovering",
+        "a coverage dip as the boot repair hands over gets the 2-minute window, \
+         not the remains of the boot repair's"
+    );
+    // The bound still holds: a dip that the REST lane cannot close is a fault.
+    let expired_ms = dip_ms + TRANSIENT_RECOVERY_MAX_MS;
+    assert_eq!(
+        heartbeat_status(
+            &health(expired_ms, false, false),
+            false,
+            cycles(expired_ms),
+            started_at_ms,
+            expired_ms,
+            30_000,
+            &mut recovery,
+        ),
+        "degraded",
+        "coverage still short two minutes after the dip is a fault"
+    );
+
+    let mut refilled = RecoveryState {
+        transient_started_at_ms: Some(boot_gap_at_ms),
+        reached_ready: false,
+    };
+    for (now_ms, coverage_complete, gap_open, repair_running) in [
+        (repairing_ms, true, true, true),
+        (dip_ms, false, false, false),
+    ] {
+        heartbeat_status(
+            &health(now_ms, coverage_complete, gap_open),
+            repair_running,
+            cycles(now_ms),
+            started_at_ms,
+            now_ms,
+            30_000,
+            &mut refilled,
+        );
+    }
+    let refilled_ms = dip_ms + 5_000;
+    assert_eq!(
+        heartbeat_status(
+            &health(refilled_ms, true, false),
+            false,
+            cycles(refilled_ms),
+            started_at_ms,
+            refilled_ms,
+            30_000,
+            &mut refilled,
+        ),
+        "ready",
+        "the refilled mark is ready, and nothing paged for the dip"
+    );
+    assert!(refilled.reached_ready);
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_live_epoch_adopts_the_repair_already_started_at_boot() {
     let root = temporary_root("repair-adopts-epoch");

@@ -2730,19 +2730,28 @@ fn heartbeat_status(
     recovery: &mut RecoveryState,
 ) -> &'static str {
     let transport_healthy = stream_transport_healthy(health, now_ms, max_frame_age_ms);
-    let recovery_acceptable = transient_recovery_acceptable(
-        health,
-        repair_running,
-        transport_healthy,
-        &mut recovery.transient_started_at_ms,
-        now_ms,
-    );
     let boot_repair = boot_repair_acceptable(
         health,
         repair_running,
         transport_healthy,
         recovery.reached_ready,
         started_at_ms,
+        now_ms,
+    );
+    // The boot repair is bounded by BOOT_REPAIR_MAX_MS, so it must not also
+    // spend the transient window: a boot gap holds the window open from the
+    // first heartbeat, and the first coverage dip after two minutes of it would
+    // otherwise get no grace at all. Held only while the boot repair itself is
+    // the verdict, so a boot repair that will not close still pages at its own
+    // bound.
+    if boot_repair {
+        recovery.transient_started_at_ms = None;
+    }
+    let recovery_acceptable = transient_recovery_acceptable(
+        health,
+        repair_running,
+        transport_healthy,
+        &mut recovery.transient_started_at_ms,
         now_ms,
     );
     let live_status = match runtime_status(health, repair_running, now_ms, max_frame_age_ms) {

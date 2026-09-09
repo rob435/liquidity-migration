@@ -205,6 +205,76 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     counts what its own message counts or the soak tolerates the dip. The
     refusal itself gets no entry of its own under the no-spam rule; the defect's
     severity does, because it gates every repair below.
+  - Why the dip pages at all, established, and fixed. Incident
+    `demo-0922e9f30da3bf98`, the soak's own fire at 08:08:27
+    (`check_fleet_liveness.py:752`). The worker's contract already tolerates
+    this dip: `transient_recovery_acceptable` (`live.rs:2605-2622`) holds a
+    coverage dip on a sound transport at `recovering` for
+    `TRANSIENT_RECOVERY_MAX_MS` = 120 s. The demo worker got none of it,
+    because that window is armed by the boot repair it does not cover. Its
+    clock resets only on a heartbeat with coverage complete **and** `!gap_open`
+    **and** `!repair_running` (`:2616-2619`), the boot epoch opens a gap and a
+    kline repair that hold all three from the first heartbeat, and the separate
+    `boot_repair_acceptable` grace that carries those (`:2627-2640`, bounded at
+    `BOOT_REPAIR_MAX_MS` = 10 min) requires coverage to be **complete**. So the
+    transient window expires ~2 min into every boot while the boot grace hides
+    that it has, and the first dip after it degrades on the same heartbeat.
+    That is the residue of the `boot_repair_acceptable` fix for incident
+    `mainnet-014ec4a90a2fde5f`, which closed the gap case and left the dip
+    case. Fixed: `heartbeat_status` clears
+    `recovery.transient_started_at_ms` while the boot repair is the verdict
+    (`:2733-2749`), so a dip that ends the boot grace starts its own 120 s. No
+    bound moves: a dip still short 120 s later degrades, and a boot repair that
+    will not close still degrades at `BOOT_REPAIR_MAX_MS`.
+  - Why that is the demo timeline and not a long coverage hole. The worker
+    restarted 08:05:15 (pid `3630401`) and entered epoch 2 at 08:05:23; the
+    page at 08:08:27 is 192 s in, inside the 10-minute boot bound. Its message
+    carries the coverage clause alone — no `no Bybit WebSocket frame`, no
+    `N/M kline topics accepted`, no `repair gap open`, no cycle age — so at that
+    heartbeat the transport was healthy, the gap already closed and both cycles
+    fresh (`check_fleet_liveness.py:283-354`). `degraded` there requires both
+    graces unavailable at once, and the only state that does it is the one
+    above. It cleared inside the window the design already allows: the demo
+    watchdog's 08:09:59 and 08:10:30 runs carry no `worker-status:` page, and
+    [diagnose run
+    `34327669940`](https://github.com/rob435/liquidity-migration/actions/runs/34327669940)
+    reads the demo worker at 08:10:44 as `status=ready`,
+    `bybit_ws_ticker_coverage_complete=true`, `bybit_ws_gap_open=false`,
+    `rest_ticker_failure_count=0`, both lanes inside 25 s — the REST ticker
+    lane armed by incomplete coverage (`live.rs:839-844`) refilled the stale
+    mark, as it is built to. The 08:11:46 reading in STATE.md is the same
+    mechanism from the other side: the worker dips to `recovering` again, and
+    now that it has been `ready` once, the window resets each heartbeat and it
+    does not page.
+  - Proof. `a_coverage_dip_when_the_boot_repair_hands_over_keeps_its_own_window`
+    (`live/tests.rs:472`) replays that timeline on the pure verdict: boot repair
+    at 187 s with full coverage, the gap closing at 192 s on a dip, then the dip
+    persisting to 192 s + 120 s and, on a second state, refilling at 197 s. At
+    the parent commit it fails on the production reading — `left: "degraded"`,
+    `right: "recovering"` — and the two bound assertions pass either way.
+    `cargo test -p signal-worker --locked` passes every target, 155 lib tests
+    included, none failed; `cargo fmt --check` and
+    `cargo clippy --all-targets` are clean on the crate. This container has no venv, so `scripts/dev.sh check` stops at its
+    Ruff stage (`No module named ruff`) and its dependency doctor already reads
+    `warning`; the change is Rust-only and the engine stages it gates ran here
+    directly.
+  - Not what the two repairs named above would have done. Neither is taken:
+    this does not move what the soak accepts by choice and does not change what
+    the message counts. It restores the 120 s the verdict already declares for
+    a dip, so a dip that outlives it still refuses a deploy — which is the
+    behaviour the soak gate is for.
+  - Still not established, and the one reading that settles it. Which coverage
+    input was short. `ticker_coverage_complete` is
+    `fresh_mark_coverage && ws_ticker_coverage_complete()`
+    (`bybit_ws.rs:236-240`): the count of sampled rows with a mark inside
+    `mark_max_age_ms`, and every row carrying `ws_snapshot_seen` with a mark
+    ever seen (`:638-644`). The heartbeat publishes neither, and the two counts
+    the page does print — `ticker_rows` and `ticker_topics_accepted` — are both
+    structurally full whenever the subscription is complete, which is why
+    `166/166, 166/166` decides nothing. The settling reading is those two
+    counts in the heartbeat, beside the symbols they name. It is a worker
+    schema field, so it deploys with an engine handover, and it stays the
+    owner's call.
   - The page now names its cause, on the host. That deploy reset the host
     checkout to `5b9b72b` at 08:05:09 before it reached the soak gate, and the
     watchdog runs Python from that checkout, so the fix is live despite the run
