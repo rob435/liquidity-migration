@@ -12,7 +12,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use engine_types::order_terms::{strategy_decimal, ExactOrderTerms, OrderInputPolicy};
+use engine_types::numeric::{Exact, ExactInstrumentSpec};
+use engine_types::order_terms::{
+    quantize_price, strategy_decimal, ExactOrderTerms, OrderInputPolicy,
+};
 use engine_types::orders::{OrderLookup, OrderLookupRow, TerminalOrderStatus};
 use engine_types::quantize::{quantize_px, round_clean, steps};
 use engine_types::{
@@ -105,11 +108,25 @@ impl OrderReceipt {
     }
 }
 
+/// What one exact status lookup answered.
+#[derive(Clone, Debug, PartialEq)]
+enum ReceiptAnswer {
+    /// The venue stated a disposition for this id.
+    Stated(OrderReceipt),
+    /// The venue's endpoints hold no record of this id. On Bybit that is an
+    /// empty realtime-and-history read; a lookup venue owes
+    /// `OrderLookup::NeverAccepted` endpoint-specific evidence for it.
+    NoRecord,
+    /// The venue answered, and it retains no order under this id at all:
+    /// Hyperliquid's `unknownOid`. Whether that proves anything depends on
+    /// whether the create was ever acknowledged, so the caller judges it.
+    NoDisposition(String),
+}
+
 /// A status lookup read as a receipt, for venues with no receipt endpoint of
-/// their own. Absence of proof is never read as absence of the order: only
-/// `NeverAccepted`, which the adapter owes endpoint-specific evidence for,
-/// becomes `None`.
-fn receipt_from_lookup(lookup: OrderLookup) -> Result<Option<OrderReceipt>, VenueError> {
+/// their own. Absence of proof is never read here as absence of the order:
+/// this function reports what the venue said and nothing more.
+fn receipt_from_lookup(lookup: OrderLookup) -> Result<ReceiptAnswer, VenueError> {
     fn filled(row: &OrderLookupRow) -> Result<f64, VenueError> {
         row.filled_qty.value.to_f64().map_err(|error| {
             VenueError::BadReply(format!(
@@ -118,12 +135,12 @@ fn receipt_from_lookup(lookup: OrderLookup) -> Result<Option<OrderReceipt>, Venu
         })
     }
     Ok(match lookup {
-        OrderLookup::Working(row) => Some(OrderReceipt {
+        OrderLookup::Working(row) => ReceiptAnswer::Stated(OrderReceipt {
             status: "Working".to_string(),
             cumulative_filled_qty: filled(&row)?,
             terminal: false,
         }),
-        OrderLookup::Terminal { status, row } => Some(OrderReceipt {
+        OrderLookup::Terminal { status, row } => ReceiptAnswer::Stated(OrderReceipt {
             status: match status {
                 TerminalOrderStatus::Filled => "Filled",
                 TerminalOrderStatus::Cancelled => "Cancelled",
@@ -133,12 +150,8 @@ fn receipt_from_lookup(lookup: OrderLookup) -> Result<Option<OrderReceipt>, Venu
             cumulative_filled_qty: filled(&row)?,
             terminal: true,
         }),
-        OrderLookup::NeverAccepted => None,
-        OrderLookup::Unknown { reason } => {
-            return Err(VenueError::BadReply(format!(
-                "the venue cannot state this order's disposition: {reason}"
-            )))
-        }
+        OrderLookup::NeverAccepted => ReceiptAnswer::NoRecord,
+        OrderLookup::Unknown { reason } => ReceiptAnswer::NoDisposition(reason),
         OrderLookup::Unavailable => {
             return Err(VenueError::BadRequest(
                 "this venue has no exact order-status lookup, so a canary cannot be proved clean"
@@ -164,7 +177,7 @@ trait CanaryGateway {
         &mut self,
         symbol: SymbolId,
         client_id: &str,
-    ) -> Result<Option<OrderReceipt>, VenueError>;
+    ) -> Result<ReceiptAnswer, VenueError>;
 }
 
 impl CanaryGateway for Venue {
@@ -214,19 +227,17 @@ impl CanaryGateway for Venue {
         &mut self,
         symbol: SymbolId,
         client_id: &str,
-    ) -> Result<Option<OrderReceipt>, VenueError> {
+    ) -> Result<ReceiptAnswer, VenueError> {
         match self {
             #[cfg(feature = "bybit")]
-            Venue::Bybit(gateway) => {
-                Ok(gateway
-                    .order_receipt(symbol, client_id)
-                    .await?
-                    .map(|receipt| OrderReceipt {
-                        terminal: receipt.is_terminal(),
-                        status: receipt.status,
-                        cumulative_filled_qty: receipt.cumulative_filled_qty,
-                    }))
-            }
+            Venue::Bybit(gateway) => Ok(match gateway.order_receipt(symbol, client_id).await? {
+                Some(receipt) => ReceiptAnswer::Stated(OrderReceipt {
+                    terminal: receipt.is_terminal(),
+                    status: receipt.status,
+                    cumulative_filled_qty: receipt.cumulative_filled_qty,
+                }),
+                None => ReceiptAnswer::NoRecord,
+            }),
             #[cfg(any(
                 feature = "binance",
                 feature = "hyperliquid",
@@ -329,9 +340,10 @@ pub async fn run(
         .into_iter()
         .find_map(|(name, rule)| (name == symbol).then_some(rule))
         .ok_or_else(|| format!("venue returned no instrument rule for {symbol}"))?;
+    let spec = exact_spec(&mut venue, &symbol).await;
     let quote = next_fresh_quote(&mut market_feed, SymbolId(0)).await?;
     let now_ms = engine_types::clock::wall_ms();
-    let plan = make_plan(&symbol, rule, quote, now_ms)?;
+    let plan = make_plan(&symbol, rule, spec.as_ref(), quote, now_ms)?;
     println!(
         "canary quote symbol={} bid={} ask={} order_px={} qty={} stop={}",
         symbol,
@@ -374,6 +386,33 @@ fn normalized_symbol(raw: &str) -> Result<String, Box<dyn Error>> {
     Ok(symbol)
 }
 
+/// The venue's own exact instrument capabilities, which are what judge a
+/// price's legality on the way out: Hyperliquid's five significant figures
+/// live here and in no tick. A venue that publishes none is priced on the
+/// instrument tick instead, and the line says so.
+async fn exact_spec(venue: &mut Venue, symbol: &str) -> Option<ExactInstrumentSpec> {
+    let found = match VenueGateway::instrument_specs(venue).await {
+        Ok(specs) => specs
+            .into_iter()
+            .find_map(|(name, spec)| (name == symbol).then_some(spec))
+            .ok_or_else(|| format!("this venue stated no exact spec for {symbol}")),
+        Err(error) => Err(error.to_string()),
+    };
+    match found {
+        Ok(spec) => {
+            println!(
+                "canary exact_spec=venue-stated symbol={symbol} price_precision={:?}",
+                spec.price_precision
+            );
+            Some(spec)
+        }
+        Err(reason) => {
+            println!("canary exact_spec=absent symbol={symbol} reason={reason}");
+            None
+        }
+    }
+}
+
 async fn next_fresh_quote<M: MarketFeed>(
     feed: &mut M,
     wanted: SymbolId,
@@ -393,9 +432,32 @@ async fn next_fresh_quote<M: MarketFeed>(
     Ok(quote)
 }
 
+/// A price the venue's own precision rule accepts, rounded to the passive
+/// side. `quantize_price` is the function every adapter judges an exact price
+/// with, so a price that survives it is legal by construction — including
+/// Hyperliquid's five significant figures, which its tick cannot express.
+fn plan_price(
+    raw: f64,
+    side: Side,
+    rule: InstrumentRule,
+    spec: Option<&ExactInstrumentSpec>,
+) -> Result<(f64, Exact), Box<dyn Error>> {
+    match spec {
+        Some(spec) => {
+            let price = quantize_price(&strategy_decimal(raw)?, side, spec)?;
+            Ok((price.to_f64()?, price))
+        }
+        None => {
+            let price = quantize_px(raw, side, &rule);
+            Ok((price, strategy_decimal(price)?))
+        }
+    }
+}
+
 fn make_plan(
     symbol: &str,
     rule: InstrumentRule,
+    spec: Option<&ExactInstrumentSpec>,
     quote: Quote,
     now_ms: i64,
 ) -> Result<CanaryPlan, Box<dyn Error>> {
@@ -427,11 +489,11 @@ fn make_plan(
     // Fifty basis points is hundreds of ordinary spreads away while staying
     // well inside Bybit's dynamic price band. PostOnly is the wire-level veto
     // against a stale quote turning this proof into a taker order.
-    let px = quantize_px(quote.bid_px * 0.995, Side::Buy, &rule);
+    let (px, exact_px) = plan_price(quote.bid_px * 0.995, Side::Buy, rule, spec)?;
     if !px.is_finite() || px <= 0.0 || px >= quote.bid_px {
         return Err(format!(
-            "cannot place a passive canary below bid {} on tick {}",
-            quote.bid_px, rule.tick_size
+            "cannot place a passive canary below bid {}: the nearest legal price is {px}",
+            quote.bid_px
         )
         .into());
     }
@@ -448,7 +510,9 @@ fn make_plan(
         );
     }
 
-    let stop_px = quantize_px(px * 0.85, Side::Sell, &rule);
+    // Sell rounding: the stop moves away from the price it protects, and it is
+    // the side the adapter quantizes an attached stop with.
+    let (stop_px, exact_stop) = plan_price(px * 0.85, Side::Sell, rule, spec)?;
     if !stop_px.is_finite() || stop_px <= 0.0 || stop_px >= px {
         return Err(format!("cannot form a protective stop below canary price {px}").into());
     }
@@ -462,9 +526,9 @@ fn make_plan(
     }
     let terms = ExactOrderTerms {
         quantity: strategy_decimal(qty)?,
-        limit_price: Some(strategy_decimal(px)?),
-        stop_trigger_price: Some(strategy_decimal(stop_px)?),
-        physical_stop_trigger_price: Some(strategy_decimal(stop_px)?),
+        limit_price: Some(exact_px),
+        stop_trigger_price: Some(exact_stop.clone()),
+        physical_stop_trigger_price: Some(exact_stop),
         input_policy: OrderInputPolicy::StrategyShortestDecimal,
     };
     let request = OrderRequest {
@@ -559,6 +623,25 @@ fn require_fresh_inventory(inventory: &AccountInventory) -> Result<(), Box<dyn E
     Ok(())
 }
 
+/// Both halves of a failed create: what the venue said about the create, and
+/// what the teardown after it could prove. A cleanup that failed too must not
+/// swallow the create error that started it.
+fn create_failed(
+    create: &str,
+    confirmed: Confirmed,
+    cleanup: Result<CleanupOutcome, Box<dyn Error>>,
+) -> Box<dyn Error> {
+    let teardown = match cleanup {
+        Ok(outcome) => format!("cleanup={outcome:?}"),
+        Err(error) => format!("cleanup: {error}"),
+    };
+    format!(
+        "{create}; create_ack={}; {teardown}",
+        confirmed.create_acknowledged
+    )
+    .into()
+}
+
 async fn execute_claimed<G: CanaryGateway, F: OrderFeed>(
     gateway: &mut G,
     order_feed: &mut F,
@@ -580,22 +663,36 @@ async fn execute_claimed<G: CanaryGateway, F: OrderFeed>(
             let _ = gateway
                 .cancel(plan.request.symbol, &plan.request.client_order_id)
                 .await;
-            let cleanup = cleanup(gateway, symbol, plan, start_ms, false, timings).await?;
-            return Err(format!(
-                "venue acknowledged a different client id {:?}; cleanup={cleanup:?}",
-                ack.client_order_id
-            )
-            .into());
+            // The venue accepted an order, so a lookup that finds none under
+            // this id is still a fault.
+            let confirmed = Confirmed {
+                create_acknowledged: true,
+                cancel: false,
+            };
+            let cleanup = cleanup(gateway, symbol, plan, start_ms, confirmed, timings).await;
+            return Err(create_failed(
+                &format!(
+                    "venue acknowledged a different client id {:?}",
+                    ack.client_order_id
+                ),
+                confirmed,
+                cleanup,
+            ));
         }
         Err(error) => {
             let _ = gateway
                 .cancel(plan.request.symbol, &plan.request.client_order_id)
                 .await;
-            let cleanup = cleanup(gateway, symbol, plan, start_ms, false, timings).await?;
-            return Err(format!(
-                "order create was ambiguous or failed: {error}; cleanup={cleanup:?}"
-            )
-            .into());
+            let confirmed = Confirmed {
+                create_acknowledged: false,
+                cancel: false,
+            };
+            let cleanup = cleanup(gateway, symbol, plan, start_ms, confirmed, timings).await;
+            return Err(create_failed(
+                &format!("order create was ambiguous or failed: {error}"),
+                confirmed,
+                cleanup,
+            ));
         }
     };
 
@@ -647,7 +744,10 @@ async fn execute_claimed<G: CanaryGateway, F: OrderFeed>(
         symbol,
         plan,
         start_ms,
-        cancelled_confirmed,
+        Confirmed {
+            create_acknowledged: ack.is_some(),
+            cancel: cancelled_confirmed,
+        },
         timings,
     )
     .await?;
@@ -729,14 +829,28 @@ fn signal_for(update: &OrderUpdate, client_id: &str) -> Option<PrivateSignal> {
     }
 }
 
+/// What the order lifecycle before cleanup actually proved.
+#[derive(Copy, Clone)]
+struct Confirmed {
+    /// The venue acknowledged an order. False is what turns a venue's "I hold
+    /// no order under this id" into proof rather than a fault.
+    create_acknowledged: bool,
+    cancel: bool,
+}
+
 #[derive(Copy, Clone)]
 enum OriginalDisposition {
     Pending,
-    Terminal { cancelled: bool },
+    /// The create was never acknowledged and the venue holds no order under
+    /// this id: there is nothing for it to have accepted.
+    NeverAccepted,
+    Terminal {
+        cancelled: bool,
+    },
 }
 impl OriginalDisposition {
     fn terminal(self) -> bool {
-        matches!(self, Self::Terminal { .. })
+        !matches!(self, Self::Pending)
     }
 }
 
@@ -798,12 +912,13 @@ async fn read_original_receipt<G: CanaryGateway>(
     gateway: &mut G,
     plan: &CanaryPlan,
     state: &mut CleanupState,
+    confirmed: Confirmed,
 ) -> ReceiptObservation {
     match gateway
         .receipt(plan.request.symbol, &plan.request.client_order_id)
         .await
     {
-        Ok(Some(receipt)) => {
+        Ok(ReceiptAnswer::Stated(receipt)) => {
             state.original_filled |= receipt.has_fill();
             let terminal = receipt.is_terminal();
             if terminal {
@@ -820,10 +935,31 @@ async fn read_original_receipt<G: CanaryGateway>(
                 active: !terminal,
             }
         }
-        Ok(None) => ReceiptObservation {
+        // A venue's endpoints can lag their own acceptance, so an empty
+        // record is never read as absence of the order.
+        Ok(ReceiptAnswer::NoRecord) => ReceiptObservation {
             current: true,
             active: false,
         },
+        Ok(ReceiptAnswer::NoDisposition(reason)) if !confirmed.create_acknowledged => {
+            if !state.original.terminal() {
+                state.original = OriginalDisposition::NeverAccepted;
+                println!("canary order_status=never-accepted create_ack=false detail={reason}");
+            }
+            ReceiptObservation {
+                current: true,
+                active: false,
+            }
+        }
+        Ok(ReceiptAnswer::NoDisposition(reason)) => {
+            state.last_problem =
+                format!("the venue retains no order under an acknowledged id: {reason}");
+            tracing::warn!(%reason, "the venue retains no order under the acknowledged canary id");
+            ReceiptObservation {
+                current: false,
+                active: false,
+            }
+        }
         Err(error) => {
             state.last_problem = format!("exact order status failed: {error}");
             tracing::warn!(%error, "exact order status failed during canary cleanup");
@@ -847,7 +983,7 @@ async fn read_close_receipt<G: CanaryGateway>(
         };
     }
     match gateway.receipt(plan.request.symbol, &plan.close_id).await {
-        Ok(Some(receipt)) => {
+        Ok(ReceiptAnswer::Stated(receipt)) => {
             let terminal = receipt.is_terminal();
             state.close = if terminal {
                 RecoveryClose::Terminal
@@ -859,10 +995,21 @@ async fn read_close_receipt<G: CanaryGateway>(
                 active: !terminal,
             }
         }
-        Ok(None) => ReceiptObservation {
+        // This order is what stands between a fill and a flat account, so a
+        // venue that cannot account for it is never a clean scan.
+        Ok(ReceiptAnswer::NoRecord) => ReceiptObservation {
             current: false,
             active: false,
         },
+        Ok(ReceiptAnswer::NoDisposition(reason)) => {
+            state.last_problem =
+                format!("the venue retains no order under the recovery-close id: {reason}");
+            tracing::warn!(%reason, "the venue retains no order under the recovery-close id");
+            ReceiptObservation {
+                current: false,
+                active: false,
+            }
+        }
         Err(error) => {
             state.last_problem = format!("recovery-close status failed: {error}");
             tracing::warn!(%error, "recovery-close status failed during canary cleanup");
@@ -933,10 +1080,10 @@ async fn cleanup<G: CanaryGateway>(
     symbol: &str,
     plan: &CanaryPlan,
     start_ms: i64,
-    terminal_hint: bool,
+    confirmed: Confirmed,
     timings: Timings,
 ) -> Result<CleanupOutcome, Box<dyn Error>> {
-    let mut state = CleanupState::new(terminal_hint);
+    let mut state = CleanupState::new(confirmed.cancel);
     let observation_started = tokio::time::Instant::now();
 
     for attempt in 0..timings.clean_scan_attempts {
@@ -995,7 +1142,7 @@ async fn cleanup<G: CanaryGateway>(
             false
         };
 
-        let original_receipt = read_original_receipt(gateway, plan, &mut state).await;
+        let original_receipt = read_original_receipt(gateway, plan, &mut state, confirmed).await;
         let close_receipt = read_close_receipt(gateway, plan, &mut state).await;
 
         let inventory_state = CleanupInventory::classify(
@@ -1140,8 +1287,52 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
+    use engine_types::numeric::{AssetId, PricePrecision};
+    use engine_types::order_terms::QuantityPolicy;
     use engine_types::{AccountOrder, AccountPosition};
     use engine_venue::VenueName;
+
+    /// Cleanup after a create the venue acknowledged, which is every state
+    /// this command reaches except a failed or ambiguous create.
+    fn acknowledged() -> Confirmed {
+        Confirmed {
+            create_acknowledged: true,
+            cancel: false,
+        }
+    }
+
+    fn stated(answer: ReceiptAnswer) -> OrderReceipt {
+        match answer {
+            ReceiptAnswer::Stated(receipt) => receipt,
+            other => panic!("expected a stated disposition, got {other:?}"),
+        }
+    }
+
+    /// One instrument spec with nothing but the fields a plan is priced and
+    /// sized against.
+    fn spec(precision: PricePrecision, tick: &str, qty_step: &str) -> ExactInstrumentSpec {
+        let exact = |text: &str| Exact::parse_decimal(text).unwrap();
+        ExactInstrumentSpec {
+            native_symbol: "BTC".into(),
+            base_asset: AssetId::Named("BTC".into()),
+            quote_asset: AssetId::Unknown,
+            settlement_asset: AssetId::Unknown,
+            tick_size: Some(exact(tick)),
+            min_price: None,
+            max_price: None,
+            price_precision: precision,
+            qty_step: Some(exact(qty_step)),
+            min_qty: Some(exact(qty_step)),
+            market_qty_step: Some(exact(qty_step)),
+            market_min_qty: Some(exact(qty_step)),
+            max_qty: None,
+            max_market_qty: None,
+            min_notional: None,
+            contract_multiplier: None,
+            fee_assets: None,
+            fee_step: None,
+        }
+    }
 
     fn quote() -> Quote {
         Quote {
@@ -1165,7 +1356,7 @@ mod tests {
     }
 
     fn plan() -> CanaryPlan {
-        make_plan("XRPUSDT", rule(), quote(), 1_000_100).unwrap()
+        make_plan("XRPUSDT", rule(), None, quote(), 1_000_100).unwrap()
     }
 
     fn flat() -> AccountInventory {
@@ -1201,6 +1392,17 @@ mod tests {
         }
     }
 
+    /// One scripted answer from a venue's status endpoint.
+    #[derive(Copy, Clone)]
+    enum Scripted {
+        Status(&'static str),
+        /// The venue's endpoints hold no record of the id.
+        NoRecord,
+        /// The venue answers that it retains no order under the id, which is
+        /// what Hyperliquid's `unknownOid` means.
+        NoDisposition,
+    }
+
     struct FakeGateway {
         sends: Vec<OrderRequest>,
         inventories: VecDeque<AccountInventory>,
@@ -1209,7 +1411,7 @@ mod tests {
         cancel_ok: bool,
         create_error: bool,
         close_error: bool,
-        receipt_script: VecDeque<Option<&'static str>>,
+        receipt_script: VecDeque<Scripted>,
         cancel_ids: Vec<String>,
         execution_ends: Vec<i64>,
     }
@@ -1259,27 +1461,33 @@ mod tests {
             &mut self,
             _symbol: SymbolId,
             client_id: &str,
-        ) -> Result<Option<OrderReceipt>, VenueError> {
+        ) -> Result<ReceiptAnswer, VenueError> {
             if let Some(scripted) = self.receipt_script.pop_front() {
-                return Ok(scripted.map(|status| OrderReceipt {
-                    terminal: status != "New",
-                    status: status.into(),
-                    cumulative_filled_qty: 0.0,
-                }));
+                return Ok(match scripted {
+                    Scripted::Status(status) => ReceiptAnswer::Stated(OrderReceipt {
+                        terminal: status != "New",
+                        status: status.into(),
+                        cumulative_filled_qty: 0.0,
+                    }),
+                    Scripted::NoRecord => ReceiptAnswer::NoRecord,
+                    Scripted::NoDisposition => ReceiptAnswer::NoDisposition(
+                        "Hyperliquid has no retained order for this cloid".into(),
+                    ),
+                });
             }
             let Some(request) = self
                 .sends
                 .iter()
                 .find(|request| request.client_order_id == client_id)
             else {
-                return Ok(None);
+                return Ok(ReceiptAnswer::NoRecord);
             };
             let filled = self
                 .executions
                 .iter()
                 .any(|fill| fill.client_order_id == client_id)
                 || request.close_position;
-            Ok(Some(OrderReceipt {
+            Ok(ReceiptAnswer::Stated(OrderReceipt {
                 status: if filled { "Filled" } else { "Cancelled" }.into(),
                 cumulative_filled_qty: if filled { request.qty } else { 0.0 },
                 terminal: true,
@@ -1331,39 +1539,44 @@ mod tests {
             venue_order_id: "7".into(),
             filled_qty: engine_types::numeric::ExactNumber::venue_decimal("0.0002").unwrap(),
         };
-        let working = receipt_from_lookup(OrderLookup::Working(row.clone()))
-            .unwrap()
-            .unwrap();
+        let working = stated(receipt_from_lookup(OrderLookup::Working(row.clone())).unwrap());
         assert!(!working.is_terminal());
         assert!(working.has_fill());
 
-        let cancelled = receipt_from_lookup(OrderLookup::Terminal {
-            status: TerminalOrderStatus::Cancelled,
-            row: OrderLookupRow {
-                filled_qty: engine_types::numeric::ExactNumber::venue_decimal("0").unwrap(),
-                ..row.clone()
-            },
-        })
-        .unwrap()
-        .unwrap();
+        let cancelled = stated(
+            receipt_from_lookup(OrderLookup::Terminal {
+                status: TerminalOrderStatus::Cancelled,
+                row: OrderLookupRow {
+                    filled_qty: engine_types::numeric::ExactNumber::venue_decimal("0").unwrap(),
+                    ..row.clone()
+                },
+            })
+            .unwrap(),
+        );
         assert!(cancelled.is_terminal() && cancelled.is_cancelled() && !cancelled.has_fill());
 
-        let rejected = receipt_from_lookup(OrderLookup::Terminal {
-            status: TerminalOrderStatus::Rejected,
-            row,
-        })
-        .unwrap()
-        .unwrap();
+        let rejected = stated(
+            receipt_from_lookup(OrderLookup::Terminal {
+                status: TerminalOrderStatus::Rejected,
+                row,
+            })
+            .unwrap(),
+        );
         assert!(rejected.is_terminal() && !rejected.is_cancelled());
 
         assert_eq!(
             receipt_from_lookup(OrderLookup::NeverAccepted).unwrap(),
-            None
+            ReceiptAnswer::NoRecord
         );
-        assert!(receipt_from_lookup(OrderLookup::Unknown {
-            reason: "no retained order".into()
-        })
-        .is_err());
+        // The venue's own words, handed back for the cleanup loop to judge
+        // against the create rather than read as absence here.
+        assert_eq!(
+            receipt_from_lookup(OrderLookup::Unknown {
+                reason: "no retained order".into()
+            })
+            .unwrap(),
+            ReceiptAnswer::NoDisposition("no retained order".into())
+        );
         assert!(receipt_from_lookup(OrderLookup::Unavailable).is_err());
     }
 
@@ -1383,6 +1596,92 @@ mod tests {
         assert!(plan.request.qty >= rule().min_qty);
         assert!(plan.request.stop.unwrap().trigger_px < px);
         assert!(!plan.request.reduce_only);
+    }
+
+    #[test]
+    fn a_hyperliquid_price_carries_five_significant_figures_not_a_tick() {
+        // Hyperliquid's BTC: szDecimals 5, so its finest tick is 0.1 while a
+        // price may carry no more than five significant figures. The tick
+        // alone produced 79077.6, which the adapter refuses before the wire.
+        let venue_spec = spec(
+            PricePrecision::SignificantFigures {
+                max_digits: 5,
+                max_decimals: 1,
+                integer_exception: true,
+            },
+            "0.1",
+            "0.00001",
+        );
+        let rule = InstrumentRule {
+            tick_size: 0.1,
+            qty_step: 1e-5,
+            min_qty: 1e-5,
+            min_notional: 10.0,
+        };
+        let quote = Quote {
+            bid_px: 79_475.0,
+            bid_qty: 1.0,
+            ask_px: 79_476.0,
+            ask_qty: 1.0,
+            venue_ts_ms: 1_000_000,
+            recv_ns: 1,
+            seq: 1,
+        };
+
+        let plan = make_plan("BTCUSDT", rule, Some(&venue_spec), quote, 1_000_100).unwrap();
+        let terms = plan.request.exact_terms.as_ref().unwrap();
+        assert_eq!(limit_px(&plan.request), 79_077.0);
+        assert_eq!(
+            terms
+                .limit_price
+                .as_ref()
+                .unwrap()
+                .to_decimal_string()
+                .unwrap(),
+            "79077"
+        );
+        assert_eq!(plan.request.stop.unwrap().trigger_px, 67_216.0);
+        // The venue's own judge, the one the adapter refuses an order with.
+        terms
+            .validate_wire_grid(&venue_spec, plan.request.kind, QuantityPolicy::Normal)
+            .unwrap();
+
+        let on_the_tick = make_plan("BTCUSDT", rule, None, quote, 1_000_100).unwrap();
+        assert_eq!(limit_px(&on_the_tick.request), 79_077.6);
+        assert!(on_the_tick
+            .request
+            .exact_terms
+            .as_ref()
+            .unwrap()
+            .validate_wire_grid(
+                &venue_spec,
+                on_the_tick.request.kind,
+                QuantityPolicy::Normal
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn a_tick_venue_is_priced_exactly_as_it_was_before_the_exact_spec() {
+        let venue_spec = spec(PricePrecision::Tick, "0.0001", "0.1");
+        let with_spec =
+            make_plan("XRPUSDT", rule(), Some(&venue_spec), quote(), 1_000_100).unwrap();
+        let on_the_tick = plan();
+        assert_eq!(limit_px(&with_spec.request), 1.393);
+        assert_eq!(with_spec.request.stop.unwrap().trigger_px, 1.1841);
+        assert_eq!(limit_px(&with_spec.request), limit_px(&on_the_tick.request));
+        assert_eq!(
+            with_spec.request.stop.unwrap().trigger_px,
+            on_the_tick.request.stop.unwrap().trigger_px
+        );
+        assert_eq!(with_spec.request.qty, on_the_tick.request.qty);
+        with_spec
+            .request
+            .exact_terms
+            .as_ref()
+            .unwrap()
+            .validate_wire_grid(&venue_spec, with_spec.request.kind, QuantityPolicy::Normal)
+            .unwrap();
     }
 
     #[test]
@@ -1461,7 +1760,7 @@ mod tests {
             seq: 1,
         };
         validate_rule(mexc_rule).unwrap();
-        let plan = make_plan("BTCUSDT", mexc_rule, quote, 1_000_100).unwrap();
+        let plan = make_plan("BTCUSDT", mexc_rule, None, quote, 1_000_100).unwrap();
         assert_eq!(plan.request.qty, mexc_rule.min_qty);
         assert!(limit_px(&plan.request) < quote.bid_px);
 
@@ -1495,7 +1794,7 @@ mod tests {
             seq: 1,
         };
         validate_rule(hyperliquid_rule).unwrap();
-        let plan = make_plan("BTCUSDT", hyperliquid_rule, quote, 1_000_100).unwrap();
+        let plan = make_plan("BTCUSDT", hyperliquid_rule, None, quote, 1_000_100).unwrap();
         let px = limit_px(&plan.request);
         assert!(px < quote.bid_px);
         assert!(plan.request.qty > hyperliquid_rule.min_qty);
@@ -1520,7 +1819,7 @@ mod tests {
             ask_qty: 0.0,
             ..quote()
         };
-        let plan = make_plan("XRPUSDT", rule(), unstated, 1_000_100).unwrap();
+        let plan = make_plan("XRPUSDT", rule(), None, unstated, 1_000_100).unwrap();
         assert!(limit_px(&plan.request) < unstated.bid_px);
         for broken in [-1.0, f64::NAN, f64::INFINITY] {
             let bad_bid = Quote {
@@ -1528,7 +1827,7 @@ mod tests {
                 ..quote()
             };
             assert!(
-                make_plan("XRPUSDT", rule(), bad_bid, 1_000_100).is_err(),
+                make_plan("XRPUSDT", rule(), None, bad_bid, 1_000_100).is_err(),
                 "a bid size of {broken} was accepted"
             );
             let bad_ask = Quote {
@@ -1536,7 +1835,7 @@ mod tests {
                 ..quote()
             };
             assert!(
-                make_plan("XRPUSDT", rule(), bad_ask, 1_000_100).is_err(),
+                make_plan("XRPUSDT", rule(), None, bad_ask, 1_000_100).is_err(),
                 "an ask size of {broken} was accepted"
             );
         }
@@ -1813,11 +2112,11 @@ mod tests {
             create_error: true,
             close_error: false,
             receipt_script: VecDeque::from([
-                None,
-                None,
-                Some("New"),
-                Some("Cancelled"),
-                Some("Cancelled"),
+                Scripted::NoRecord,
+                Scripted::NoRecord,
+                Scripted::Status("New"),
+                Scripted::Status("Cancelled"),
+                Scripted::Status("Cancelled"),
             ]),
             cancel_ids: Vec::new(),
             execution_ends: Vec::new(),
@@ -1857,7 +2156,12 @@ mod tests {
             cancel_ok: true,
             create_error: false,
             close_error: false,
-            receipt_script: VecDeque::from([None, None, None, None]),
+            receipt_script: VecDeque::from([
+                Scripted::NoRecord,
+                Scripted::NoRecord,
+                Scripted::NoRecord,
+                Scripted::NoRecord,
+            ]),
             cancel_ids: Vec::new(),
             execution_ends: Vec::new(),
         };
@@ -2017,7 +2321,7 @@ mod tests {
             execution_ends: Vec::new(),
         };
 
-        let error = cleanup(&mut gateway, "XRPUSDT", &plan, 1, false, timings())
+        let error = cleanup(&mut gateway, "XRPUSDT", &plan, 1, acknowledged(), timings())
             .await
             .unwrap_err()
             .to_string();
@@ -2064,7 +2368,7 @@ mod tests {
             execution_ends: Vec::new(),
         };
 
-        let error = cleanup(&mut gateway, "XRPUSDT", &plan, 1, false, timings())
+        let error = cleanup(&mut gateway, "XRPUSDT", &plan, 1, acknowledged(), timings())
             .await
             .unwrap_err()
             .to_string();
@@ -2092,18 +2396,18 @@ mod tests {
             create_error: false,
             close_error: true,
             receipt_script: VecDeque::from([
-                Some("Cancelled"),
-                Some("Cancelled"),
-                None,
-                Some("Cancelled"),
-                Some("Filled"),
-                Some("Cancelled"),
-                Some("Filled"),
+                Scripted::Status("Cancelled"),
+                Scripted::Status("Cancelled"),
+                Scripted::NoRecord,
+                Scripted::Status("Cancelled"),
+                Scripted::Status("Filled"),
+                Scripted::Status("Cancelled"),
+                Scripted::Status("Filled"),
             ]),
             cancel_ids: Vec::new(),
             execution_ends: Vec::new(),
         };
-        let outcome = cleanup(&mut gateway, "XRPUSDT", &plan, 1, false, timings())
+        let outcome = cleanup(&mut gateway, "XRPUSDT", &plan, 1, acknowledged(), timings())
             .await
             .unwrap();
         assert!(outcome.close_attempted);
@@ -2140,10 +2444,20 @@ mod tests {
         };
         let mut limits = timings();
         limits.clean_scan_attempts = 3;
-        let error = cleanup(&mut gateway, "XRPUSDT", &plan, 1, true, limits)
-            .await
-            .unwrap_err()
-            .to_string();
+        let error = cleanup(
+            &mut gateway,
+            "XRPUSDT",
+            &plan,
+            1,
+            Confirmed {
+                create_acknowledged: true,
+                cancel: true,
+            },
+            limits,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(
             error.contains("two consecutive flat account scans"),
             "{error}"
@@ -2159,5 +2473,88 @@ mod tests {
             "no close is warranted by this account"
         );
         assert_eq!(gateway.cancel_ids, vec![plan.request.client_order_id]);
+    }
+
+    fn unacknowledged_create(script: [Scripted; 4]) -> FakeGateway {
+        FakeGateway {
+            sends: Vec::new(),
+            inventories: VecDeque::from([flat(), flat(), flat(), flat()]),
+            working: Vec::new(),
+            executions: Vec::new(),
+            cancel_ok: true,
+            create_error: true,
+            close_error: false,
+            receipt_script: VecDeque::from(script),
+            cancel_ids: Vec::new(),
+            execution_ends: Vec::new(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_create_is_named_even_when_the_cleanup_after_it_also_fails() {
+        let plan = plan();
+        let mut gateway = unacknowledged_create([Scripted::NoRecord; 4]);
+        let mut feed = FakeFeed {
+            updates: VecDeque::new(),
+        };
+
+        let error = execute_claimed(&mut gateway, &mut feed, "XRPUSDT", &plan, timings())
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("lost create reply"), "{error}");
+        assert!(error.contains("create_ack=false"), "{error}");
+        assert!(
+            error.contains("cleanup: canary cleanup could not prove"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_venue_holding_no_order_after_an_unacknowledged_create_is_never_accepted() {
+        let plan = plan();
+        let mut gateway = unacknowledged_create([Scripted::NoDisposition; 4]);
+        let mut feed = FakeFeed {
+            updates: VecDeque::new(),
+        };
+
+        let error = execute_claimed(&mut gateway, &mut feed, "XRPUSDT", &plan, timings())
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("lost create reply"), "{error}");
+        assert!(error.contains("create_ack=false"), "{error}");
+        assert!(error.contains("original_terminal: true"), "{error}");
+        assert!(!error.contains("could not prove"), "{error}");
+        assert_eq!(
+            gateway.execution_ends.len(),
+            2,
+            "the two flat scans are what proves the account clean"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_venue_holding_no_order_the_engine_acknowledged_is_still_a_fault() {
+        let plan = plan();
+        let mut gateway = FakeGateway {
+            create_error: false,
+            ..unacknowledged_create([Scripted::NoDisposition; 4])
+        };
+        let mut feed = FakeFeed {
+            updates: VecDeque::new(),
+        };
+
+        let error = execute_claimed(&mut gateway, &mut feed, "XRPUSDT", &plan, timings())
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("could not prove"), "{error}");
+        assert!(
+            error.contains("retains no order under an acknowledged id"),
+            "{error}"
+        );
     }
 }
