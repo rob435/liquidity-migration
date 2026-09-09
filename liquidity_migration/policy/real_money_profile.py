@@ -9,8 +9,8 @@ bytes for the demo and the funded realm; the committed
 that by a test.
 
 The capital reference tracks observed venue equity on both accounts, so every
-cap below is a ratio of the wallet and the declared 100 USDT scale is only a
-floor. The two live dials here are ``RM_CARRY_STOP_LOSS_FRACTION`` and
+cap below is a ratio of the wallet and the declared 100 USDT is only the scale
+those ratios are written at. The two live dials here are ``RM_CARRY_STOP_LOSS_FRACTION`` and
 ``RM_ROLLING_LOSS_FRACTION``; any other ``RM_*`` line in an env file is refused
 by name.
 """
@@ -44,7 +44,7 @@ REAL_MONEY_DIAL_PREFIX = "RM_"
 
 # Fixed constants, not dials.
 _ENTRY_LEVERAGE = 5.0  # venue margin leverage requested per order
-_EQUITY_FLOOR_USDT = 100.0  # reference floor against unreadable balances
+_CAPITAL_REFERENCE_USDT = 100.0  # the scale the caps are declared at; the reference follows equity
 _EXPAND_DEAD_BAND_FRACTION = 0.05  # envelope expands only past this band
 _CARRY_MAX_NEW_ENTRIES_PER_CYCLE = 10
 _LONG_MAX_NEW_ENTRIES_PER_CYCLE = 5
@@ -106,12 +106,12 @@ def parse_real_money_dials(environment: Mapping[str, str]) -> RealMoneyDials:
 def render_real_money_profile_json(
     dials: RealMoneyDials | None = None,
     *,
-    capital_reference_usdt: float = _EQUITY_FLOOR_USDT,
+    capital_reference_usdt: float = _CAPITAL_REFERENCE_USDT,
 ) -> dict[str, Any]:
     """Build the profile document. ``capital_reference_usdt`` is only a scale.
 
     The declared number sizes the caps in the instant before the first equity
-    read; at the floor those caps are the smallest the runtime can ever hold.
+    read; from then on every cap is a ratio of verified equity, with no floor.
 
     The multipliers below are the effective fleet values. The account caps
     bound the book; a target past them is refused per entry by the engine's
@@ -126,8 +126,6 @@ def render_real_money_profile_json(
     reference = float(capital_reference_usdt)
     if not math.isfinite(reference) or reference <= 0.0:
         raise ValueError("capital_reference_usdt must be finite and positive")
-    if _EQUITY_FLOOR_USDT > reference:
-        raise ValueError("the equity floor cannot exceed the declared capital reference")
 
     account_gross = reference * _ENTRY_LEVERAGE
     margin_cap = reference * 0.70
@@ -139,7 +137,6 @@ def render_real_money_profile_json(
         "capital_reference": {
             "mode": "account_equity",
             "equity_fraction": 1.0,
-            "floor_usdt": _EQUITY_FLOOR_USDT,
             "expand_dead_band_fraction": _EXPAND_DEAD_BAND_FRACTION,
         },
         "account_risk": {
@@ -170,7 +167,7 @@ def render_real_money_profile_json(
 def render_real_money_profile(
     dials: RealMoneyDials | None = None,
     *,
-    capital_reference_usdt: float = _EQUITY_FLOOR_USDT,
+    capital_reference_usdt: float = _CAPITAL_REFERENCE_USDT,
 ) -> tuple[bytes, OperationalProfile]:
     """Render, prove, and return the exact bytes to install."""
 

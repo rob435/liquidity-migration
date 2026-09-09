@@ -124,16 +124,14 @@ class CapitalReferenceSettings:
         is linear in the reference, but the load-time proof is still re-run at
         each rebase because ``max_leverage`` and ``quantity_tolerance`` are not.
 
-    ``floor_usdt`` is the minimum viable reference for new exposure, not a
-    lower bound on the economic reference. Below it, entries stop while the
-    reference and loss budget continue contracting with verified equity.
-    Unreadable balances do not authorize expansion. The dead band applies
-    only to expansion; contraction follows equity down immediately.
+    The reference has no floor: it contracts with verified equity all the way
+    down, and every cap scaled from it contracts with it. Unreadable balances
+    do not authorize expansion. The dead band applies only to expansion;
+    contraction follows equity down immediately.
     """
 
     mode: str = CAPITAL_REFERENCE_FIXED
     equity_fraction: float = 1.0
-    floor_usdt: float = 0.0
     expand_dead_band_fraction: float = 0.05
 
     @property
@@ -288,7 +286,7 @@ def _parse_capital_reference(value: object) -> CapitalReferenceSettings:
         value,
         label="operational profile capital_reference",
         fields={"mode"},
-        optional=frozenset({"equity_fraction", "floor_usdt", "expand_dead_band_fraction"}),
+        optional=frozenset({"equity_fraction", "expand_dead_band_fraction"}),
     )
     mode = str(row["mode"])
     if mode not in {CAPITAL_REFERENCE_FIXED, CAPITAL_REFERENCE_ACCOUNT_EQUITY}:
@@ -307,19 +305,9 @@ def _parse_capital_reference(value: object) -> CapitalReferenceSettings:
     )
     if dead_band >= 1.0:
         raise ValueError("capital_reference.expand_dead_band_fraction must be below 1")
-    floor = _positive_float(
-        row.get("floor_usdt", 0.0),
-        label="capital_reference.floor_usdt",
-        allow_zero=True,
-    )
-    if mode == CAPITAL_REFERENCE_ACCOUNT_EQUITY and floor <= 0.0:
-        # Without a floor, an unreadable or near-zero balance produces a
-        # degenerate envelope rather than a refusal.
-        raise ValueError("capital_reference.floor_usdt must be positive in account_equity mode")
     return CapitalReferenceSettings(
         mode=mode,
         equity_fraction=equity_fraction,
-        floor_usdt=floor,
         expand_dead_band_fraction=dead_band,
     )
 
@@ -368,11 +356,6 @@ def load_operational_profile_bytes(
         ),
     )
     _validate_profile_envelopes(profile)
-    if (
-        profile.capital_reference.tracks_equity
-        and profile.capital_reference.floor_usdt > profile.capital_reference_usdt
-    ):
-        raise ValueError("capital_reference.floor_usdt cannot exceed capital_reference_usdt")
     return profile
 
 

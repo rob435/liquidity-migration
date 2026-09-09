@@ -476,7 +476,6 @@ fn only_the_window_binds() -> engine_risk::KernelConfig {
             tracks_equity: false,
             reference_usdt: 250_000.0,
             equity_fraction: 1.0,
-            floor_usdt: 100.0,
             expand_dead_band_fraction: 0.05,
             gross_notional_multiple: 2.0,
             disaster_stop_fraction: 0.35,

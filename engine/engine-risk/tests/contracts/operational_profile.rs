@@ -33,7 +33,7 @@ fn the_committed_profile_loads_and_says_what_the_file_says() {
 
     // Every assertion below is the literal number in the file. If the owner
     // changes a cap, this test is where the engine finds out. The declared
-    // 100 is the floor the caps are written at; the reference follows equity.
+    // 100 is the scale the caps are written at; the reference follows equity.
     assert_eq!(cfg.envelope.reference_usdt, 100.0);
     assert_eq!(cfg.envelope.max_component_gross_notional_usdt, 500.0);
     assert_eq!(cfg.envelope.max_initial_margin_usdt, 70.0);
@@ -44,10 +44,9 @@ fn the_committed_profile_loads_and_says_what_the_file_says() {
     assert_eq!(cfg.envelope.gross_notional_multiple, 5.0);
     assert_eq!(cfg.envelope.account_gross_cap_usdt(), 500.0);
 
-    // Both accounts' reference follows the wallet, floored at 100.
+    // Both accounts' reference follows the wallet.
     assert!(cfg.envelope.tracks_equity);
     assert_eq!(cfg.envelope.equity_fraction, 1.0);
-    assert_eq!(cfg.envelope.floor_usdt, 100.0);
     assert_eq!(cfg.envelope.expand_dead_band_fraction, 0.05);
 }
 
@@ -66,7 +65,6 @@ fn nothing_in_the_profile_is_pinned_to_a_dollar_figure() {
         cfg.envelope.max_initial_margin_usdt,
         cfg.envelope.reference_usdt * 0.7
     );
-    assert_eq!(cfg.envelope.floor_usdt, cfg.envelope.reference_usdt);
 }
 
 #[test]

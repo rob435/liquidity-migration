@@ -60,12 +60,7 @@ const ACCOUNT_RISK_KEYS: &[&str] = &[
     "quantity_tolerance",
 ];
 
-const CAPITAL_REFERENCE_KEYS: &[&str] = &[
-    "mode",
-    "equity_fraction",
-    "floor_usdt",
-    "expand_dead_band_fraction",
-];
+const CAPITAL_REFERENCE_KEYS: &[&str] = &["mode", "equity_fraction", "expand_dead_band_fraction"];
 
 /// The numbers the kernel needs that the profile does not carry.
 #[derive(Clone, Copy, Debug)]
@@ -219,21 +214,10 @@ pub fn kernel_config_from_profile(
     // in money at the declared reference; this is that same number.
     let gross_notional_multiple = account_gross / reference_usdt;
 
-    let (tracks_equity, equity_fraction, floor_usdt, expand_dead_band_fraction) = match root
+    let (tracks_equity, equity_fraction, expand_dead_band_fraction) = match root
         .get("capital_reference")
     {
-        None => (
-            false,
-            1.0,
-            // No capital_reference block means the reference is pinned, and
-            // the floor is only ever read on the equity-tracking path. The
-            // reference itself is the honest value for "the reference never
-            // falls below this" when it never moves; Python's 0.0 default
-            // would trip the kernel's own positivity check for a number
-            // that cannot be reached.
-            reference_usdt,
-            0.05,
-        ),
+        None => (false, 1.0, 0.05),
         Some(value) => {
             let row = value
                 .as_object()
@@ -257,19 +241,7 @@ pub fn kernel_config_from_profile(
                 optional_number(row, "equity_fraction", "capital_reference")?.unwrap_or(1.0);
             let dead_band = optional_number(row, "expand_dead_band_fraction", "capital_reference")?
                 .unwrap_or(0.05);
-            let floor = optional_number(row, "floor_usdt", "capital_reference")?
-                .unwrap_or(if tracks { 0.0 } else { reference_usdt });
-            if tracks && floor <= 0.0 {
-                return Err(bad(
-                    "capital_reference.floor_usdt must be positive in account_equity mode",
-                ));
-            }
-            if floor > reference_usdt {
-                return Err(bad(
-                    "capital_reference.floor_usdt cannot exceed capital_reference_usdt",
-                ));
-            }
-            (tracks, fraction, floor, dead_band)
+            (tracks, fraction, dead_band)
         }
     };
 
@@ -289,7 +261,6 @@ pub fn kernel_config_from_profile(
         tracks_equity,
         reference_usdt,
         equity_fraction,
-        floor_usdt,
         expand_dead_band_fraction,
         gross_notional_multiple,
         disaster_stop_fraction,

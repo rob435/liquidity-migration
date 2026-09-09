@@ -88,13 +88,6 @@ impl Kernel {
         self.latest_account_observed_ns = self.latest_account_observed_ns.max(view.observed_ns);
     }
 
-    fn require_viable_reference(&self) -> Result<(), DenyReason> {
-        if self.envelope.viable_for_new_exposure() {
-            Ok(())
-        } else {
-            Err(unknown("verified equity is below the minimum viable capital reference; new physical exposure is refused"))
-        }
-    }
     pub fn register_order(&mut self, id: &str, intent: &Intent, qty: f64) {
         let px = match intent.kind {
             OrderKind::Limit { px, .. } => px,
@@ -405,7 +398,6 @@ impl Kernel {
             ));
         }
         self.observe_reference(&view, true);
-        self.require_viable_reference()?;
         if !self.loss_window.valid() {
             return Err(unknown(
                 "closed-trade account-unit valuation is unavailable or invalid",

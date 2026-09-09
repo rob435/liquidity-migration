@@ -150,9 +150,6 @@ impl Kernel {
                 max_age_ns: self.cfg.max_account_view_age_ns,
             });
         }
-        // A virtual sleeve exit may create physical exposure. It does not
-        // bypass the viability threshold merely because it is a sleeve exit.
-        self.require_viable_reference()?;
         if view.observed_ns < self.latest_account_observed_ns {
             return Err(unknown(
                 "virtual reduction would add physical risk against an older account view",

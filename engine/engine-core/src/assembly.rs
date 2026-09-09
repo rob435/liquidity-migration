@@ -213,7 +213,6 @@ struct EnvelopeSection {
     tracks_equity: bool,
     reference_usdt: f64,
     equity_fraction: f64,
-    floor_usdt: f64,
     expand_dead_band_fraction: f64,
     gross_notional_multiple: f64,
     disaster_stop_fraction: f64,
@@ -263,7 +262,6 @@ pub fn risk(section: &toml::Table) -> Result<Kernel, Box<dyn Error>> {
             tracks_equity: parsed.envelope.tracks_equity,
             reference_usdt: parsed.envelope.reference_usdt,
             equity_fraction: parsed.envelope.equity_fraction,
-            floor_usdt: parsed.envelope.floor_usdt,
             expand_dead_band_fraction: parsed.envelope.expand_dead_band_fraction,
             gross_notional_multiple: parsed.envelope.gross_notional_multiple,
             disaster_stop_fraction: parsed.envelope.disaster_stop_fraction,
@@ -418,7 +416,6 @@ leverage = 2.0
 tracks_equity = true
 reference_usdt = 100.0
 equity_fraction = 1.0
-floor_usdt = 100.0
 expand_dead_band_fraction = 0.05
 gross_notional_multiple = 2.0
 disaster_stop_fraction = 0.35

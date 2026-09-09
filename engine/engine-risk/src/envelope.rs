@@ -10,7 +10,6 @@ pub(crate) struct Envelope {
     gross_notional_multiple: Exact,
     disaster_stop_fraction: Exact,
     equity_fraction: Exact,
-    floor_usdt: Exact,
     expansion_multiple: Exact,
     reference_usdt: Exact,
 }
@@ -23,7 +22,6 @@ impl Envelope {
             gross_notional_multiple: policy(cfg.gross_notional_multiple),
             disaster_stop_fraction: policy(cfg.disaster_stop_fraction),
             equity_fraction: policy(cfg.equity_fraction),
-            floor_usdt: policy(cfg.floor_usdt),
             expansion_multiple: Exact::one() + policy(cfg.expand_dead_band_fraction),
             reference_usdt,
         }
@@ -47,8 +45,6 @@ impl Envelope {
         if !self.tracks_equity || !equity.is_positive() {
             return false;
         }
-        // `floor_usdt` is a viability threshold, not invented economic capital.
-        // A shrinking account must keep shrinking its loss/margin allowances.
         let target = equity * &self.equity_fraction;
         let current = &self.reference_usdt;
         if close_enough(&target, current) {
@@ -60,9 +56,6 @@ impl Envelope {
         }
         self.reference_usdt = target;
         true
-    }
-    pub(crate) fn viable_for_new_exposure(&self) -> bool {
-        !self.tracks_equity || self.reference_usdt >= self.floor_usdt
     }
     /// What this position loses if its stop fills at the trigger, charged at
     /// the wider of the intent's own stop distance and `disaster_stop_fraction`.
@@ -103,7 +96,6 @@ mod tests {
             tracks_equity: true,
             reference_usdt: 1000.0,
             equity_fraction: 0.75,
-            floor_usdt: 1.0,
             expand_dead_band_fraction: 0.05,
             gross_notional_multiple: 10.0,
             disaster_stop_fraction: 0.35,

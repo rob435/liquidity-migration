@@ -28,7 +28,6 @@ fn mainnet_config() -> KernelConfig {
             tracks_equity: true,
             reference_usdt: 100.0,
             equity_fraction: 1.0,
-            floor_usdt: 100.0,
             expand_dead_band_fraction: 0.05,
             // 175 of account gross over a 100 reference.
             gross_notional_multiple: 1.75,

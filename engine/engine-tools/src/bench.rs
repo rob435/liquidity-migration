@@ -442,7 +442,6 @@ fn benchmark_risk() -> Result<engine_risk::Kernel, EngineError> {
             tracks_equity: false,
             reference_usdt: 10_000.0,
             equity_fraction: 1.0,
-            floor_usdt: 10_000.0,
             expand_dead_band_fraction: 0.0,
             gross_notional_multiple: 100.0,
             disaster_stop_fraction: 0.35,

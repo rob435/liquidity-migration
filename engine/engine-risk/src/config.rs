@@ -41,10 +41,6 @@ pub struct EnvelopeConfig {
     pub reference_usdt: f64,
     /// Share of equity the reference tracks. In (0, 1].
     pub equity_fraction: f64,
-    /// Minimum viable reference for new exposure when tracking equity.
-    /// Kept under the existing configuration spelling for compatibility; this
-    /// threshold never inflates the economic reference or loss allowance.
-    pub floor_usdt: f64,
     /// Expansion needs a move larger than this; contraction is immediate.
     pub expand_dead_band_fraction: f64,
     /// Account gross notional cap, as a multiple of the reference.
@@ -64,7 +60,6 @@ pub struct EnvelopeConfig {
 impl EnvelopeConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         positive(self.reference_usdt, "reference_usdt")?;
-        positive(self.floor_usdt, "floor_usdt")?;
         positive(self.gross_notional_multiple, "gross_notional_multiple")?;
         if !self.equity_fraction.is_finite() || self.equity_fraction <= 0.0 {
             return Err(bad("equity_fraction must be positive"));

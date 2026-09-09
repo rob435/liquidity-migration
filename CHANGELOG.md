@@ -10,6 +10,45 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-09 — `floor_usdt` is removed: the capital reference has no fixed anchor. The owner's call, 19:40 UTC, after the audit batch's F11 change had turned the 100 USDT floor into an entry halt for the 36.8 USDT Bybit mainnet account. The reference and every cap scaled from it now follow verified equity all the way down; the only USDT figure left in the profile is the scale the ratios are written at.**
+  - Removed. `EnvelopeConfig::floor_usdt`, `Envelope::viable_for_new_exposure()`
+    and the kernel's `require_viable_reference()` with its deny `verified
+    equity is below the minimum viable capital reference; new physical exposure
+    is refused` (`engine-risk/src/{config,envelope,kernel}.rs`,
+    `kernel/portfolio.rs`). `capital_reference.floor_usdt` is no longer a key
+    either profile reader accepts (`engine-risk/src/profile.rs`,
+    `liquidity_migration/core/operational_profile.py`; a profile still carrying
+    it is refused as an unknown key), and the `[risk.envelope]` TOML block
+    loses the field (`engine-core/src/assembly.rs`, `engine/engine.toml`,
+    `tests/fixtures/history/*.toml`). The renderer
+    `liquidity_migration/policy/real_money_profile.py` stops writing it, so
+    `configs/operational.json` is its exact output again at sha256
+    `0dd6be5adb7eab17f08afbef45d04d913584732c98469e70cb88be12419bbd09` (was
+    `b0d2da84…0a2d`) and the twelve `operational_profile_sha256` pins in the
+    four `deploy/engine.*.toml.template` files move with it. The research
+    twin `long_live_physics.py` drops the floor from
+    `LivePhysicsCapitalReference` and `_risk_admits_target`.
+  - What holds at the registered dials. `capital_reference_usdt` 100 is only
+    the scale: gross cap 5×, symbol cap 0.5×, margin cap 0.7× and rolling-loss
+    budget 0.1× of the reference, where the reference is verified equity × 1.0
+    with a 5% expansion dead band and immediate contraction. Against the
+    16:30 UTC mainnet reading of 36.8 USDT that is a 184 USDT gross cap, an
+    18.4 USDT symbol cap, a 25.8 USDT margin cap and a 3.68 USDT rolling-loss
+    budget, and entries are admitted inside them. Order size has its own
+    floors (venue minimums, the sleeves' `entry_floor_usdt` 6 USDT); the
+    profile has none.
+  - Kept. `DenyReason::LossGuardTripped { equity_usdt, floor_usdt }` stays in
+    `engine-types/src/risk.rs` as a record shape the log reader must keep
+    parsing; nothing writes it.
+  - Proof. `engine-risk/tests/contracts/envelope.rs`
+    `audit_equity_below_the_declared_scale_shrinks_the_budget_and_keeps_admitting_entries`
+    (equity 50: reference 50, rolling budget 5, the entry and the exit both
+    allowed) and `the_reference_follows_equity_to_any_level_and_the_allowance_with_it`
+    (equity 1: reference 1, the entry denied `EnvelopeBreached`);
+    `tests/research/backtest/test_long_live_physics.py::test_audit_equity_contraction_scales_the_caps_without_a_floor`;
+    `tests/policy/test_real_money_arming.py::test_committed_profile_is_the_default_render`
+    pins the new bytes. The profile bytes and the engine tree both changed, so
+    the next `deploy` restarts both Bybit realms.
 - **2026-09-09 — `engine sim` heavy sweep, 17:19 UTC onward: three pre-existing replay and accounting faults surface once the venue task reorders commands. One is fixed at the root — live and replay reduced an `amounts: None` fill by different rules — and the two others are reported here with their seeds. None can reach a funded log.**
   - Found how. `sim::one_seed_replays_byte_for_byte_under_heavy_faults` (seed
     7, `--seconds 300 --symbols 2 --crashes 2 --faults heavy`) went red under
@@ -138,9 +177,8 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     and `the_viability_threshold_never_floors_the_economic_reference` (renamed
     from `the_floor_bounds_the_envelope_rather_than_collapsing_it`), plus
     `test_audit_viability_floor_does_not_invent_equity_or_admit_new_exposure` in
-    `tests/research/backtest/test_long_live_physics.py`. The semantics changed
-    and the dials did not: `configs/operational.json` still reads
-    `capital_reference_usdt` 100.0, `equity_fraction` 1.0, `floor_usdt` 100.0.
+    `tests/research/backtest/test_long_live_physics.py`. Superseded the same
+    evening: `floor_usdt` is removed altogether (the entry above).
   - F01/F04/F06/F07/F08/F24 and F09 in part, MEXC (`1e2cfc22`).
     **F01, account binding.** `engine-venue/src/venues/mexc/account_binding.rs`
     reads a root-controlled registry at
@@ -264,26 +302,17 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     evidence promotes it` instead of the posture line and does not call
     `stop_funded_units`; those units are already `disabled inactive` from the
     `42dd7446` deploy, so host state is unchanged. hyperliquid keeps its own
-    `live-canary` line. Two consequences to expect on the funded fleet. The
+    `live-canary` line. One consequence to expect on the funded fleet: the
     MEXC gateway no longer constructs until
     `/etc/liquidity-migration/mexc-account-bindings.json` exists, which covers
     `verify-account-identity`, `attest-flat` and `canary-order` on that realm as
     well as the stopped engine, and the bound identity is `uid-<account_uid>`,
     not the derived `key-<8 bytes of sha256(api key)>` that
-    `engine-mexc.env` holds today. And at the registered dials, a realm whose
-    verified equity is below `floor_usdt` 100.0 now refuses new physical
-    exposure and contracts its reference and rolling-loss allowance with
-    equity, where before the reference was floored at 100. The host read at
-    16:30–16:32 UTC (`scripts/ops.sh curve mainnet 3`) puts the mainnet
-    account at 36.42–36.82 USDT with three positions open, so under
-    `capital_reference.mode = "account_equity"`, `equity_fraction` 1.0 and
-    `floor_usdt` 100.0 the funded engine would refuse every new entry after
-    this deploy (`verified equity is below the minimum viable capital
-    reference; new physical exposure is refused`), while reductions, stops and
-    cancels flow. Demo reads the same profile but stood at 1,554–1,555 USDT in
-    the same reading, so it is not affected. The dial is the owner's: lower `floor_usdt` in
-    `configs/operational.json` to the smallest account the sleeves can trade
-    at their venue minimums, or accept the halt; neither is chosen here.
+    `engine-mexc.env` holds today. The entry halt the F11 change would have
+    caused at the registered dials (mainnet at 36.42–36.82 USDT with three
+    positions open against `floor_usdt` 100.0, read 16:30–16:32 UTC by
+    `scripts/ops.sh curve mainnet 3`; demo at 1,554–1,555 USDT unaffected)
+    never ships: the floor is removed in the entry above.
     Deploy templates and the realm renderer now carry the `uid-` identity
     prefix and the `live-canary` wording for MEXC
     (`liquidity_migration/policy/realms.py`, `deploy/engine.mexc.env.template`,

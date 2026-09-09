@@ -200,7 +200,6 @@ class LivePhysicsCapitalReference:
     configured_seed_usdt: float
     tracks_equity: bool
     equity_fraction: float
-    floor_usdt: float
     expand_dead_band_fraction: float
     account_gross_cap_multiple_reference: float
     account_margin_cap_multiple_reference: float
@@ -220,12 +219,6 @@ class LivePhysicsCapitalReference:
                 raise ValueError(f"capital reference {label} must be positive and finite")
         if self.equity_fraction > 1.0:
             raise ValueError("capital reference equity_fraction cannot exceed 1")
-        if not math.isfinite(self.floor_usdt) or self.floor_usdt < 0.0:
-            raise ValueError("capital reference floor_usdt must be finite and non-negative")
-        if self.tracks_equity and self.floor_usdt <= 0.0:
-            raise ValueError("tracking capital reference floor_usdt must be positive")
-        if self.floor_usdt > self.configured_seed_usdt:
-            raise ValueError("capital reference floor_usdt cannot exceed its configured seed")
         if (
             not math.isfinite(self.expand_dead_band_fraction)
             or self.expand_dead_band_fraction < 0.0
@@ -513,11 +506,6 @@ def resolve_live_physics_configuration(
         configured_seed_usdt=capital,
         tracks_equity=capital_settings.tracks_equity,
         equity_fraction=capital_settings.equity_fraction,
-        floor_usdt=(
-            capital_settings.floor_usdt
-            if capital_settings.tracks_equity or capital_settings.floor_usdt > 0.0
-            else capital
-        ),
         expand_dead_band_fraction=capital_settings.expand_dead_band_fraction,
         account_gross_cap_multiple_reference=(operational.account_risk.max_account_gross_notional_usdt / capital),
         account_margin_cap_multiple_reference=(operational.account_risk.max_initial_margin_usdt / capital),
@@ -567,7 +555,6 @@ def capital_reference_after_equity(
     equity = float(equity_usdt)
     if not config.tracks_equity or not math.isfinite(equity) or equity <= 0.0:
         return current
-    # The minimum viable reference is an admission threshold, not capital.
     target = equity * config.equity_fraction
     if math.isclose(
         target,
@@ -1214,7 +1201,6 @@ def simulate_long_live_physics(
         "minimum_reference_usdt": capital_reference_state.minimum_usdt,
         "maximum_reference_usdt": capital_reference_state.maximum_usdt,
         "equity_fraction": capital_reference.equity_fraction,
-        "floor_usdt": capital_reference.floor_usdt,
         "expand_dead_band_fraction": capital_reference.expand_dead_band_fraction,
         "close_enough_relative_tolerance": CAPITAL_REFERENCE_CLOSE_REL_TOL,
         "close_enough_absolute_tolerance_usdt": CAPITAL_REFERENCE_CLOSE_ABS_TOL,
@@ -2115,16 +2101,6 @@ def _risk_admits_target(
         or target_leverage <= 0.0
     ):
         return False
-    if capital_reference.tracks_equity and current_reference_usdt < capital_reference.floor_usdt:
-        held = positions.get(symbol)
-        mark = _finite(marks.get(symbol), 0.0)
-        standing = (
-            abs(held.quantity * mark) if held is not None and mark > 0.0
-            else abs(held.target_notional_usdt) if held is not None
-            else 0.0
-        )
-        if abs(float(target_notional_usdt)) > standing:
-            return False
     gross = 0.0
     margin = 0.0
     for held_symbol, position in positions.items():

@@ -42,17 +42,14 @@ fn observe(kernel: &mut Kernel, equity: f64) -> RiskVerdict {
 }
 
 #[test]
-fn audit_equity_below_viability_never_inflates_the_rolling_loss_reference() {
+fn audit_equity_below_the_declared_scale_shrinks_the_budget_and_keeps_admitting_entries() {
     let mut cfg = equity_tracking_config();
-    cfg.envelope.floor_usdt = 100.0;
     cfg.max_rolling_loss_fraction = 0.1;
     let mut kernel = Kernel::new(cfg).unwrap();
     let verdict = observe(&mut kernel, 50.0);
     assert_eq!(kernel.capital_reference_usdt(), 50.0);
     assert_eq!(kernel.rolling_loss().limit_usdt, 5.0);
-    assert!(matches!(verdict, RiskVerdict::Deny {
-        reason: DenyReason::UnknownState { ref detail }
-    } if detail.contains("minimum viable")));
+    assert_eq!(verdict, RiskVerdict::Allow { qty: 1.0 });
     let held = view(50.0, vec![position(BUSDT, Side::Buy, 1.0, 10.0, true)], SEC);
     assert_eq!(
         kernel.assess(&exit(CARRY, BUSDT, Side::Sell, 1.0, 10.0, SEC), &held, SEC),
@@ -195,13 +192,13 @@ fn unknown_equity_moves_nothing_and_refuses() {
 }
 
 #[test]
-fn the_viability_threshold_never_floors_the_economic_reference() {
-    let mut cfg = equity_tracking_config();
-    cfg.envelope.floor_usdt = 500.0;
-    let mut kernel = Kernel::new(cfg).expect("config");
+fn the_reference_follows_equity_to_any_level_and_the_allowance_with_it() {
+    let mut kernel = Kernel::new(equity_tracking_config()).expect("config");
     assert!(matches!(
         observe(&mut kernel, 1.0),
-        RiskVerdict::Deny { .. }
+        RiskVerdict::Deny {
+            reason: DenyReason::EnvelopeBreached { .. }
+        }
     ));
     assert_eq!(kernel.capital_reference_usdt(), 1.0);
 }
@@ -219,14 +216,6 @@ fn an_equity_fraction_can_hold_the_book_below_the_wallet() {
 #[test]
 // test_the_profile_refuses_an_unbounded_or_oversized_anchor
 fn the_config_refuses_an_unbounded_or_oversized_anchor() {
-    let mut zero_floor = equity_tracking_config();
-    zero_floor.envelope.floor_usdt = 0.0;
-    assert!(Kernel::new(zero_floor)
-        .err()
-        .expect("must refuse")
-        .detail
-        .contains("floor_usdt must be positive"));
-
     let mut oversized = equity_tracking_config();
     oversized.envelope.equity_fraction = 1.5;
     assert!(Kernel::new(oversized)

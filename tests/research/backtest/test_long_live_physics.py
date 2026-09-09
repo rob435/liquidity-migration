@@ -90,7 +90,6 @@ def _capital_reference(
         configured_seed_usdt=configured_seed_usdt,
         tracks_equity=True,
         equity_fraction=1.0,
-        floor_usdt=100.0,
         expand_dead_band_fraction=0.05,
         account_gross_cap_multiple_reference=account_gross_cap_multiple_reference,
         account_margin_cap_multiple_reference=account_margin_cap_multiple_reference,
@@ -127,11 +126,17 @@ def test_capital_reference_contracts_immediately_outside_close_tolerance() -> No
     assert capital_reference_after_equity(1_000.0, 999.0, config=capital) == 999.0
 
 
-def test_audit_viability_floor_does_not_invent_equity_or_admit_new_exposure() -> None:
+def test_audit_equity_contraction_scales_the_caps_without_a_floor() -> None:
     capital = _capital_reference()
     assert capital_reference_after_equity(100.0, 50.0, config=capital) == 50.0
-    assert not long_live_physics._risk_admits_target(
+    assert long_live_physics._risk_admits_target(
         positions={}, marks={}, symbol="AAAUSDT", target_notional_usdt=5.0,
+        target_leverage=5.0, account_equity_usdt=50.0,
+        capital_reference=capital, current_reference_usdt=50.0,
+    )
+    # Gross cap is 5 x the 50 USDT reference; the same order at 251 is refused.
+    assert not long_live_physics._risk_admits_target(
+        positions={}, marks={}, symbol="AAAUSDT", target_notional_usdt=251.0,
         target_leverage=5.0, account_equity_usdt=50.0,
         capital_reference=capital, current_reference_usdt=50.0,
     )
@@ -186,7 +191,6 @@ def test_research_rule_provenance_matches_the_registered_live_profile() -> None:
     assert capital.configured_seed_usdt == pytest.approx(100.0)
     assert capital.tracks_equity is True
     assert capital.equity_fraction == pytest.approx(1.0)
-    assert capital.floor_usdt == pytest.approx(100.0)
     assert capital.expand_dead_band_fraction == pytest.approx(0.05)
     assert capital.account_gross_cap_multiple_reference == pytest.approx(5.0)
     assert capital.account_margin_cap_multiple_reference == pytest.approx(0.7)
