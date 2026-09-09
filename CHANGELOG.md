@@ -10,7 +10,7 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
-- **2026-09-09 — Incident id `mexc-a361f5d18861421a` fires seven times on a healthy mexc engine, at 00:44:29, ~01:24:29, 01:51:36, 02:11:34, 02:21:45, 02:31:32 and 02:41:43 UTC: MEXC's designed 600 s private-stream resync publishes `may_open=false` for the length of its history sweep, and the 30 s watchdog read seven of those windows. Seven false pages in sixteen resyncs across two engine generations and a deploy, one on-call session each. The sweep's length is now read off the source rather than guessed — it is one signed request per followed symbol, issued sequentially, so it runs tens of seconds against a 30 s watchdog period, and the catch is close to a coin flip by construction. The current generation paged on five of its seven resyncs and on the last four consecutively, one wake per ten minutes. Nothing was impaired at any point. Fixed: the heartbeat now publishes the operator latch and the private-stream readiness bit as separate fields, and the watchdog pages on a stream that stays unusable past 180 s rather than on a sweep in progress. That fix is deployed as `d835b62` with a healthy receipt. It shipped with its new `private-stream:` reference registered in none of the three places the reference it replaced was in — the table that attaches a unit's journal to a page, the one that holds a realm key across a deploy, and the on-call diagnostic's own heartbeat digest — so a genuinely dead stream would have paged with no journal, re-paged after every deploy, and shown nothing in the only host reading the routine may take. All three are now registered. The mechanism's first live resync under the fix is after the last reading here, so the quiet is not yet observed. The one candidate fix that would move when the engine admits entries is untaken and still the owner's.**
+- **2026-09-09 — Incident id `mexc-a361f5d18861421a` fires seven times on a healthy mexc engine, at 00:44:29, ~01:24:29, 01:51:36, 02:11:34, 02:21:45, 02:31:32 and 02:41:43 UTC: MEXC's designed 600 s private-stream resync publishes `may_open=false` for the length of its history sweep, and the 30 s watchdog read seven of those windows. Seven false pages in sixteen resyncs across two engine generations and a deploy, one on-call session each. The sweep's length is now read off the source rather than guessed — it is one signed request per followed symbol, issued sequentially, so it runs tens of seconds against a 30 s watchdog period, and the catch is close to a coin flip by construction. The current generation paged on five of its seven resyncs and on the last four consecutively, one wake per ten minutes. Nothing was impaired at any point. Fixed: the heartbeat now publishes the operator latch and the private-stream readiness bit as separate fields, and the watchdog pages on a stream that stays unusable past 180 s rather than on a sweep in progress. That fix is deployed as `d835b62` with a healthy receipt. It shipped with its new `private-stream:` reference registered in none of the three places the reference it replaced was in — the table that attaches a unit's journal to a page, the one that holds a realm key across a deploy, and the on-call diagnostic's own heartbeat digest — so a genuinely dead stream would have paged with no journal, re-paged after every deploy, and shown nothing in the only host reading the routine may take. All three are now registered. The mechanism is settled on the host: the first resync under the fix, at 03:50:51, was read 12 s in at `stream_resets=1`, `private_stream_ready=false`, `private_stream_unready_ms=7440` and `may_open=true` — the exact sample that paged seven times, now reporting healthy, with no page. The one candidate fix that would move when the engine admits entries is untaken and still the owner's.**
   - Not the incident that id names. `incident_id` is `sha256(scope + the newly
     due alert keys)[:16]` (`scripts/runtime/check_fleet_liveness.py:1170`), so
     every `may-open:liquidity-migration-engine-mexc.service` page carries
@@ -225,12 +225,23 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     03:41:52, and demo and mainnet `ok … warnings-present-no-critical` on their
     rolling-loss NOTICEs. The equity recorder pushes 10 samples at 03:40:21,
     03:41:21 and 03:42:21, so the two new fields do not break it.
-  - What this receipt does not show. The mexc engine's socket logged in at
-    03:40:51, so its first 600 s resync under the fix falls at about 03:50:51,
-    after the last reading here — `stream_resets=0` and `uptime_s=130` say so.
-    The fix is installed and the fleet is healthy; a resync passing quietly
-    under it is not yet observed, and the reading that settles it is the next
-    mexc `stream_resets` above 0 with `may_open=true` and no page.
+  - Settled: the first resync under the fix passed quietly, and the reading
+    caught it mid-sweep.
+    [Diagnose run `34308672704`](https://github.com/rob435/liquidity-migration/actions/runs/34308672704)
+    (03:50:37–03:51:05) reads the mexc engine at 03:51:03, 12 s after the
+    03:50:51 grid point: `engine_commit=d835b62`, pid `3559376`,
+    `uptime_s=607`, `stream_resets=1`, `private_stream_ready=false`,
+    `private_stream_unready_ms=7440`, and `may_open=true`. That is the exact
+    sample that paged seven times — readiness down, sweep in flight — and it
+    now reports a healthy latch. No eighth page fired from it, and 7 440 ms is
+    far short of the 180 000 ms limit, so no `private-stream:` page either.
+    `strategy_errors=[]`, `entry_blockers=0`, `positions=0`, `orders_sent=0`,
+    `NRestarts=0`; `account_observed_wall_ts_ms` is null for the sweep, which
+    is the account view correctly untrusted while it runs.
+  - It also times a sweep directly for the first time, which every earlier
+    reading could only bound: 7.44 s elapsed and still running at the sample.
+    That is consistent with the 15–25 s derivation and is a floor, not a
+    length — the reading landed inside the window, not at its end.
   - The split left its new key unrouted, and the next session found it. A new
     alert reference has to be registered in the tables that decide what a page
     carries and how a deploy treats it, and `private-stream:` was in none of
