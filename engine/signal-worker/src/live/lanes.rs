@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) struct LaneContext<'a> {
-    pub(super) stream: &'a mut BybitPublicStream,
+    pub(super) stream: &'a mut Box<dyn PublicStream>,
     pub(super) pending: &'a mut BTreeMap<(String, i64), ConfirmedKline>,
     pub(super) lane_tx: &'a mpsc::Sender<LaneCompletion>,
     pub(super) lanes: &'a mut LaneState,

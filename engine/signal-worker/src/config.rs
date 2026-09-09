@@ -7,6 +7,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::universe::UniverseRules;
+use crate::venue::PublicVenueKind;
 use crate::worker::WorkerError;
 use crate::SCHEMA_VERSION;
 pub use engine_strategies::native_common::SignalConfigIdentity as ConfigIdentity;
@@ -123,6 +124,16 @@ pub struct SourceContract {
     pub whale_period: String,
     pub mark_max_age_ms: i64,
     pub universe_identity_required: bool,
+    /// The venue funding, klines, tickers and instruments come from: one of
+    /// `bybit`, `mexc`, `hyperliquid`. A realm's JSON that omits the key reads
+    /// as `bybit`; naming it changes that realm's feature identity, because
+    /// `signal_feature_contract_sha256` hashes this whole block.
+    #[serde(default = "default_public_venue")]
+    pub public_venue: String,
+}
+
+fn default_public_venue() -> String {
+    "bybit".to_owned()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -548,6 +559,39 @@ impl SignalWorkerConfig {
             engine_path,
         })
     }
+
+    /// The realm's public data source. `validate_config` refuses a config whose
+    /// `sources.public_venue` this cannot parse, so `load` never returns one.
+    pub fn public_venue(&self) -> Result<PublicVenueKind, WorkerError> {
+        PublicVenueKind::parse(&self.sources.public_venue)
+    }
+
+    /// The settle coin an instrument row must state for this worker to follow
+    /// the name: the public venue's, not Bybit's.
+    pub fn settle_coin(&self) -> Result<&'static str, WorkerError> {
+        Ok(self.public_venue()?.settle_coin())
+    }
+
+    /// The public venue when it is not the default, for the source-history
+    /// checkpoint key. A realm reading another venue has a different history —
+    /// Bybit klines are not MEXC klines, and its stored features cannot be
+    /// continued — but folding the name in unconditionally would move every
+    /// Bybit realm's key and cold-start them all, so the default folds in
+    /// nothing.
+    pub(crate) fn non_default_public_venue(&self) -> Option<&str> {
+        (self.sources.public_venue != default_public_venue())
+            .then_some(self.sources.public_venue.as_str())
+    }
+
+    /// The venue host whose instrument table the realm's universe was derived
+    /// from. A realm reading a non-Bybit venue names that venue's own host:
+    /// the listings behind the snapshot came from there.
+    pub fn universe_endpoint(&self) -> &str {
+        match self.public_venue() {
+            Ok(PublicVenueKind::Mexc) => crate::venue::mexc::rest_host(),
+            _ => crate::worker::realm_endpoint(self),
+        }
+    }
 }
 
 fn resolve_destinations(
@@ -809,6 +853,7 @@ fn validate_config(
     machine.universe.validate()?;
     machine.llm_gate.validate()?;
     let source = &machine.sources;
+    PublicVenueKind::parse(&source.public_venue)?;
     if source.bybit_category != "linear"
         || source.bybit_settle_coin != "USDT"
         || source.bybit_mainnet_host != "api.bybit.com"
@@ -950,11 +995,11 @@ pub fn is_sha256(value: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
-        carry_source_history_hours, sha256_hex, validate_source_history_bounds, SignalWorkerConfig,
-        MAX_CARRY_SOURCE_HISTORY_HOURS, MAX_LONG_COLD_START_LOOKBACK_DAYS, REALMS,
-        SOURCE_HISTORY_PADDING_HOURS,
+        carry_source_history_hours, sha256_hex, validate_source_history_bounds, PublicVenueKind,
+        SignalWorkerConfig, MAX_CARRY_SOURCE_HISTORY_HOURS, MAX_LONG_COLD_START_LOOKBACK_DAYS,
+        REALMS, SOURCE_HISTORY_PADDING_HOURS,
     };
     use engine_strategies::native_carry::plan::{
         ExecutionRules as CarryExecutionRules, StrategyConfig as CarryStrategyConfig,
@@ -1043,7 +1088,98 @@ mod tests {
         assert!(validate_source_history_bounds(&long, &carry).is_err());
     }
 
-    fn checked_realm_config(realm: &str) -> SignalWorkerConfig {
+    /// A realm's JSON either names the venue it reads or omits the key and
+    /// reads Bybit. The default is what keeps a Bybit realm's feature identity
+    /// and its journals where they are.
+    #[test]
+    fn a_realm_config_reads_the_venue_it_names_and_bybit_when_it_names_none() {
+        for realm in REALMS {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(std::path::Path::parent)
+                .unwrap();
+            let raw: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(root.join(format!("configs/signal-worker.{realm}.json"))).unwrap(),
+            )
+            .unwrap();
+            let named = raw["sources"]
+                .get("public_venue")
+                .and_then(serde_json::Value::as_str);
+            let config = checked_realm_config(realm);
+            assert_eq!(config.sources.public_venue, named.unwrap_or("bybit"));
+            assert_eq!(
+                config.public_venue().unwrap(),
+                PublicVenueKind::parse(&config.sources.public_venue).unwrap(),
+                "{realm}"
+            );
+            assert_eq!(
+                config.non_default_public_venue(),
+                named.filter(|v| *v != "bybit")
+            );
+        }
+        assert_eq!(
+            checked_realm_config("demo").public_venue().unwrap(),
+            PublicVenueKind::Bybit
+        );
+        assert_eq!(
+            checked_realm_config("mainnet").public_venue().unwrap(),
+            PublicVenueKind::Bybit
+        );
+        assert_eq!(
+            checked_realm_config("mexc").public_venue().unwrap(),
+            PublicVenueKind::Mexc
+        );
+    }
+
+    /// The checkpoint key of a realm reading another venue's public data must
+    /// differ from the same realm's Bybit key, and every Bybit realm's key
+    /// must be byte-identical to the one before this seam existed: folding the
+    /// venue in unconditionally would cold-start the funded Bybit realms.
+    #[test]
+    fn the_source_history_key_moves_only_for_a_realm_that_names_another_venue() {
+        let mut config = checked_realm_config("demo");
+        let bybit_key = crate::worker::source_history_hash(&config);
+        config.sources.public_venue = "bybit".into();
+        assert_eq!(crate::worker::source_history_hash(&config), bybit_key);
+        assert_eq!(config.non_default_public_venue(), None);
+
+        let mut moved = std::collections::BTreeSet::from([bybit_key]);
+        for venue in ["mexc", "hyperliquid"] {
+            config.sources.public_venue = venue.into();
+            let key = crate::worker::source_history_hash(&config);
+            assert!(super::is_sha256(&key));
+            assert!(moved.insert(key), "{venue} shares another venue's key");
+        }
+
+        // The funded Bybit realms' keys, pinned. A change here cold-starts
+        // that realm's worker: the checkpoint it holds is refused and every
+        // rolling feature is rebuilt from the venue.
+        for realm in ["demo", "mainnet"] {
+            assert_eq!(
+                crate::worker::source_history_hash(&checked_realm_config(realm)),
+                "37a187971998f9d067634cc0bd439816d0837f34e1762ce77913d7d5afb08fea",
+                "{realm} source-history key moved"
+            );
+        }
+    }
+
+    /// A realm that names another venue is a config the loader accepts; the
+    /// build refusing to open that venue is a separate, later failure.
+    #[test]
+    fn a_named_venue_survives_the_config_contract() {
+        let mut config = checked_realm_config("mexc");
+        for venue in ["mexc", "hyperliquid", "bybit"] {
+            config.sources.public_venue = venue.into();
+            assert_eq!(
+                config.public_venue().unwrap(),
+                PublicVenueKind::parse(venue).unwrap()
+            );
+        }
+        config.sources.public_venue = "binance".into();
+        assert!(config.public_venue().is_err());
+    }
+
+    pub(crate) fn checked_realm_config(realm: &str) -> SignalWorkerConfig {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(std::path::Path::parent)

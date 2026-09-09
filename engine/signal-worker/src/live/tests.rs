@@ -13,7 +13,6 @@ use super::{
     FUNDING_PUBLICATION_LAG_MS, LANE_COMPLETION_QUEUE_CAPACITY, STARTUP_MAX_MS,
     TRANSIENT_RECOVERY_MAX_MS,
 };
-use crate::bybit_ws::{BybitPublicStream, StreamContinuity};
 use crate::config::SignalWorkerConfig;
 use crate::history::{coverage_repair_start, CoverageRef};
 use crate::model::{
@@ -22,6 +21,8 @@ use crate::model::{
     SignalPayloadEnvelope, UniverseIdentity, UniverseMode, WireEvent,
 };
 use crate::store::AtomicJsonStore;
+use crate::venue::bybit::BybitPublicStream;
+use crate::venue::{PublicStream, StreamContinuity};
 use crate::worker::{SignalWorker, WorkerError};
 use crate::SCHEMA_VERSION;
 use crate::{DAY_MS, HOUR_MS};
@@ -627,8 +628,9 @@ async fn a_repair_restarted_without_an_epoch_keeps_the_live_one() {
     };
     let mut runner =
         LiveRunner::new_with_universe(checked_demo_config(), test_universe(), options).unwrap();
-    let mut stream =
-        BybitPublicStream::inert_for_test(vec!["BTCUSDT".into(), "ETHUSDT".into()]).unwrap();
+    let mut stream: Box<dyn PublicStream> = Box::new(
+        BybitPublicStream::inert_for_test(vec!["BTCUSDT".into(), "ETHUSDT".into()]).unwrap(),
+    );
     let mut pending = BTreeMap::new();
     let (lane_tx, _lane_rx) = tokio::sync::mpsc::channel(1);
     let mut lanes = LaneState {
@@ -1047,7 +1049,11 @@ async fn whale_fetch_waits_for_commit_ack_before_retaining_the_next_result() {
 async fn a_realm_that_names_a_listing_venue_holds_until_the_listing_arrives() {
     let root = temporary_root("listing-filter");
     let _ = std::fs::remove_dir_all(&root);
-    let config = checked_hyperliquid_config();
+    // The listing filter is a universe rule, not a realm: no checked-in realm
+    // reads one venue's instruments while its engine trades another, so the
+    // rule is set here on a realm whose rows the domain takes.
+    let mut config = checked_demo_config();
+    config.universe.listed_on = Some("hyperliquid".to_owned());
     let options = LiveRunOptions {
         state_dir: root.join("state"),
         spool_dir: root.join("spool"),
@@ -1062,7 +1068,8 @@ async fn a_realm_that_names_a_listing_venue_holds_until_the_listing_arrives() {
         runner.listing_source.as_ref().map(|source| source.venue()),
         Some(super::ListingVenue::Hyperliquid)
     );
-    let mut stream = BybitPublicStream::inert_for_test(vec!["BTCUSDT".into()]).unwrap();
+    let mut stream: Box<dyn PublicStream> =
+        Box::new(BybitPublicStream::inert_for_test(vec!["BTCUSDT".into()]).unwrap());
     let mut pending = BTreeMap::new();
     let (lane_tx, _lane_rx) = tokio::sync::mpsc::channel(1);
     let available_at_ms = 100 * DAY_MS;
@@ -1162,8 +1169,9 @@ async fn malformed_source_lanes_retry_without_stopping_long() {
     };
     let mut runner =
         LiveRunner::new_with_universe(checked_demo_config(), universe, options).unwrap();
-    let mut stream =
-        BybitPublicStream::inert_for_test(vec!["BTCUSDT".into(), "ETHUSDT".into()]).unwrap();
+    let mut stream: Box<dyn PublicStream> = Box::new(
+        BybitPublicStream::inert_for_test(vec!["BTCUSDT".into(), "ETHUSDT".into()]).unwrap(),
+    );
     let mut pending = BTreeMap::new();
     let (lane_tx, _lane_rx) = tokio::sync::mpsc::channel(1);
     let mut lanes = LaneState {
@@ -1382,8 +1390,9 @@ async fn an_instrument_refresh_held_off_by_funding_starts_when_that_pass_ends() 
     };
     let mut runner =
         LiveRunner::new_with_universe(checked_demo_config(), test_universe(), options).unwrap();
-    let mut stream =
-        BybitPublicStream::inert_for_test(vec!["BTCUSDT".into(), "ETHUSDT".into()]).unwrap();
+    let mut stream: Box<dyn PublicStream> = Box::new(
+        BybitPublicStream::inert_for_test(vec!["BTCUSDT".into(), "ETHUSDT".into()]).unwrap(),
+    );
     let mut pending = BTreeMap::new();
     let (lane_tx, _lane_rx) = tokio::sync::mpsc::channel(1);
     let mut lanes = LaneState {
@@ -1435,8 +1444,9 @@ async fn malformed_websocket_rows_open_a_repairable_gap_without_stopping_long() 
     };
     let mut runner =
         LiveRunner::new_with_universe(checked_demo_config(), test_universe(), options).unwrap();
-    let mut stream =
-        BybitPublicStream::inert_for_test(vec!["BTCUSDT".into(), "ETHUSDT".into()]).unwrap();
+    let mut stream: Box<dyn PublicStream> = Box::new(
+        BybitPublicStream::inert_for_test(vec!["BTCUSDT".into(), "ETHUSDT".into()]).unwrap(),
+    );
     let available_at_ms = 100 * DAY_MS;
 
     runner
@@ -1458,7 +1468,7 @@ async fn malformed_websocket_rows_open_a_repairable_gap_without_stopping_long() 
     let mut lanes = LaneState::default();
     runner
         .handle_stream_event(
-            StreamEvent::KlineClosed(crate::bybit_ws::ConfirmedKline {
+            StreamEvent::KlineClosed(crate::venue::ConfirmedKline {
                 symbol: "BTCUSDT".into(),
                 available_at_ms,
                 row: vec![
@@ -1549,8 +1559,9 @@ async fn revised_source_history_is_rejected_before_durable_mutation() {
         })
         .unwrap();
     let state_before = serde_json::to_vec(runner.durable.worker().state()).unwrap();
-    let mut stream =
-        BybitPublicStream::inert_for_test(vec!["BTCUSDT".into(), "ETHUSDT".into()]).unwrap();
+    let mut stream: Box<dyn PublicStream> = Box::new(
+        BybitPublicStream::inert_for_test(vec!["BTCUSDT".into(), "ETHUSDT".into()]).unwrap(),
+    );
     let mut pending = BTreeMap::new();
     let (lane_tx, _lane_rx) = tokio::sync::mpsc::channel(1);
     let mut lanes = LaneState {
@@ -1661,7 +1672,7 @@ async fn revised_source_history_is_rejected_before_durable_mutation() {
     lanes.repair = false;
     pending.insert(
         ("BTCUSDT".into(), open_ts_ms),
-        crate::bybit_ws::ConfirmedKline {
+        crate::venue::ConfirmedKline {
             symbol: "BTCUSDT".into(),
             available_at_ms,
             row: kline_wire(open_ts_ms, "101"),
@@ -1698,8 +1709,9 @@ async fn durable_lane_commit_error_still_terminates_the_shared_loop() {
     };
     let mut runner =
         LiveRunner::new_with_universe(checked_demo_config(), test_universe(), options).unwrap();
-    let mut stream =
-        BybitPublicStream::inert_for_test(vec!["BTCUSDT".into(), "ETHUSDT".into()]).unwrap();
+    let mut stream: Box<dyn PublicStream> = Box::new(
+        BybitPublicStream::inert_for_test(vec!["BTCUSDT".into(), "ETHUSDT".into()]).unwrap(),
+    );
     let mut pending = BTreeMap::new();
     let (lane_tx, _lane_rx) = tokio::sync::mpsc::channel(1);
     let mut lanes = LaneState {
@@ -2035,18 +2047,6 @@ fn durable_carry_catchup_crosses_delivery_without_post_delivery_refetch() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-fn checked_hyperliquid_config() -> SignalWorkerConfig {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    SignalWorkerConfig::load(
-        root.join("configs/signal-worker.hyperliquid.json"),
-        root.join("configs/long_native_v12.json"),
-        root.join("configs/lane2_carry_hold_v7.json"),
-        root.join("configs/operational.json"),
-        root.join("deploy/engine.hyperliquid.toml.template"),
-    )
-    .unwrap()
-}
-
 fn turnover_ticker(symbol: &str, turnover: &str) -> BybitTickerWire {
     BybitTickerWire {
         symbol: symbol.into(),
@@ -2173,7 +2173,7 @@ fn the_venues_real_instrument_lists_normalize() {
         let payload: Value =
             serde_json::from_slice(&std::fs::read(path).expect("readable file")).unwrap();
         for value in payload["result"]["list"].as_array().expect("result.list") {
-            all.push(super::instrument_wire(value).expect("wire row"));
+            all.push(crate::venue::bybit::instrument_wire(value).expect("wire row"));
         }
     }
     let observed = 1_788_436_000_000;
@@ -2204,7 +2204,7 @@ fn the_venues_real_instrument_lists_normalize() {
             .as_array()
             .expect("result.list")
             .iter()
-            .map(|value| crate::bybit_ws::ticker_wire(value).expect("ticker wire row"))
+            .map(|value| crate::venue::bybit::ticker_wire(value).expect("ticker wire row"))
             .collect::<Vec<_>>();
         let (kept, rejected) =
             crate::normalize::normalize_tickers_reporting(observed, observed + 1, &rows)
@@ -2437,12 +2437,13 @@ async fn a_universe_refresh_hands_the_replacement_stream_the_old_transport_histo
     };
     let runner =
         LiveRunner::new_with_universe(checked_demo_config(), test_universe(), options).unwrap();
-    let outgoing = BybitPublicStream::inert_for_test(vec!["BTCUSDT".into()]).unwrap();
+    let outgoing: Box<dyn PublicStream> =
+        Box::new(BybitPublicStream::inert_for_test(vec!["BTCUSDT".into()]).unwrap());
     let gap_opened_at_ms = 100 * DAY_MS;
     outgoing.mark_source_fault(gap_opened_at_ms);
 
     let (symbols, continuity) = runner
-        .stream_reconfiguration(&outgoing)
+        .stream_reconfiguration(&*outgoing)
         .expect("a moved symbol set rebuilds the stream");
 
     assert!(symbols.contains(&"ETHUSDT".to_owned()));

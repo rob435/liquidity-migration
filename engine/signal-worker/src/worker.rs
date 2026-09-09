@@ -364,12 +364,15 @@ pub struct SignalWorker {
     state: WorkerState,
     suppressed_output_kinds: BTreeSet<&'static str>,
     routing_verification_required: bool,
+    /// The public venue's settle coin; an instrument row stating another coin
+    /// is not a name this worker follows.
+    settle_coin: &'static str,
 }
 
-/// The venue host whose instrument list bounds what this realm's account may
-/// trade. Demo observes mainnet market data but can only trade what the demo
-/// venue lists. `mexc` and `hyperliquid` are bounded by Bybit mainnet's list;
-/// each of those engines refuses any symbol its own venue does not list.
+/// The Bybit host a realm's Bybit reads use: the demo venue for `demo`, which
+/// can only trade what that venue lists, and mainnet for every other realm. A
+/// realm whose `sources.public_venue` is not Bybit reads its instrument table
+/// from its own venue instead — see [`SignalWorkerConfig::universe_endpoint`].
 pub fn realm_endpoint(config: &SignalWorkerConfig) -> &str {
     match config.live.environment.as_str() {
         "demo" => config.sources.bybit_demo_host.as_str(),
@@ -412,11 +415,13 @@ impl SignalWorker {
         validate_source_generation(&source_generation)?;
         output_source(&config.routing.source, &source_generation, true)?;
         output_source(&config.routing.source, &source_generation, false)?;
+        let settle_coin = config.settle_coin()?;
         Ok(Self {
             state: WorkerState::new(&config, universe, source_generation),
             config,
             suppressed_output_kinds: BTreeSet::new(),
             routing_verification_required: false,
+            settle_coin,
         })
     }
 
@@ -465,7 +470,8 @@ impl SignalWorker {
             .collect::<BTreeSet<_>>();
         state.funding_coverage_mut().restore(&carry_symbols)?;
         state.whale_coverage_mut().restore(&carry_symbols)?;
-        restore_instrument_trading_intervals(&mut state, &config)?;
+        let settle_coin = config.settle_coin()?;
+        restore_instrument_trading_intervals(&mut state, &config, settle_coin)?;
         if state.last_carry_scorer_ts_ms.is_none() {
             state.last_carry_scorer_ts_ms = state.last_carry_decision_ts_ms;
         }
@@ -529,6 +535,7 @@ impl SignalWorker {
             state,
             suppressed_output_kinds: BTreeSet::new(),
             routing_verification_required,
+            settle_coin,
         };
         worker.retain_owned_tickers();
         if worker.state.last_observed_ts_ms > 0 {
@@ -877,12 +884,12 @@ impl SignalWorker {
             &next,
             &allowed,
             observed_ts_ms,
-            &self.config.sources.bybit_settle_coin,
+            self.settle_coin,
         )?;
         let mut current = next.clone();
         for symbol in &allowed {
             if let Some(row) = next.get(symbol) {
-                if instrument_is_trading(row, &self.config.sources.bybit_settle_coin)
+                if instrument_is_trading(row, self.settle_coin)
                     || row.delivery_time_ms.is_some_and(|clock| clock > 0)
                 {
                     self.state.instrument_status_unknown_since_ms.remove(symbol);
@@ -1618,11 +1625,16 @@ impl SignalWorker {
         (marks, presettlement)
     }
 
+    #[cfg(test)]
+    pub(crate) fn settle_coin(&self) -> &'static str {
+        self.settle_coin
+    }
+
     fn is_trading_instrument(&self, symbol: &str) -> bool {
         self.state
             .instruments
             .get(symbol)
-            .is_some_and(|row| instrument_is_trading(row, &self.config.sources.bybit_settle_coin))
+            .is_some_and(|row| instrument_is_trading(row, self.settle_coin))
     }
 
     fn was_trading_instrument_at(&self, symbol: &str, decision_ts_ms: i64) -> bool {
@@ -1994,6 +2006,7 @@ fn instrument_is_trading(row: &InstrumentObservation, settle_coin: &str) -> bool
 fn restore_instrument_trading_intervals(
     state: &mut WorkerState,
     config: &SignalWorkerConfig,
+    settle_coin: &str,
 ) -> Result<(), WorkerError> {
     let allowed = state
         .universe
@@ -2027,7 +2040,7 @@ fn restore_instrument_trading_intervals(
         if state.instrument_trading_intervals.contains_key(symbol) {
             continue;
         }
-        let interval = if instrument_is_trading(row, &config.sources.bybit_settle_coin) {
+        let interval = if instrument_is_trading(row, settle_coin) {
             let from = row
                 .launch_time_ms
                 .filter(|clock| *clock > 0 && *clock <= row.observed_ts_ms)
@@ -2418,9 +2431,9 @@ fn state_part_hash<T: Serialize>(value: &T) -> String {
     sha256_hex(&bytes)
 }
 
-fn source_history_hash(config: &SignalWorkerConfig) -> String {
+pub(crate) fn source_history_hash(config: &SignalWorkerConfig) -> String {
     let source = &config.sources;
-    state_part_hash(&(
+    let base = (
         &source.bybit_category,
         &source.bybit_settle_coin,
         &source.bybit_mainnet_host,
@@ -2433,7 +2446,11 @@ fn source_history_hash(config: &SignalWorkerConfig) -> String {
         source.universe_identity_required,
         &config.live.public_market_realm,
         &config.routing.source,
-    ))
+    );
+    match config.non_default_public_venue() {
+        Some(venue) => state_part_hash(&(base, venue)),
+        None => state_part_hash(&base),
+    }
 }
 
 fn validate_source_generation(value: &str) -> Result<(), WorkerError> {

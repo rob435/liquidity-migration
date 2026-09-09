@@ -1,22 +1,14 @@
 use super::*;
+use crate::http::percent_encode;
 
 pub(super) fn spawn_instrument_lane(
     lane_tx: mpsc::Sender<LaneCompletion>,
-    instrument_client: PublicHttpClient,
-    ticker_client: PublicHttpClient,
+    venue: Arc<dyn PublicVenue>,
     listing: Option<ListingSource>,
-    category: String,
     max_pages: usize,
 ) {
     tokio::spawn(async move {
-        let result = fetch_universe_inputs(
-            instrument_client,
-            ticker_client,
-            listing,
-            category,
-            max_pages,
-        )
-        .await;
+        let result = fetch_universe_inputs(venue.as_ref(), listing, max_pages).await;
         let _ = lane_tx.send(LaneCompletion::Instruments(result)).await;
     });
 }
@@ -257,15 +249,12 @@ pub(super) fn read_gate_candidates(path: &Path) -> Result<Option<FetchedGate>, W
 }
 
 pub(super) async fn fetch_universe_inputs(
-    instrument_client: PublicHttpClient,
-    ticker_client: PublicHttpClient,
+    venue: &dyn PublicVenue,
     listing_source: Option<ListingSource>,
-    category: String,
     max_pages: usize,
 ) -> Result<FetchedUniverseInputs, WorkerError> {
-    let instruments =
-        fetch_instrument_snapshot(instrument_client, category.clone(), max_pages).await?;
-    let tickers = fetch_ticker_page(ticker_client, category).await?;
+    let instruments = venue.instruments(max_pages).await?;
+    let tickers = venue.ticker_page().await?;
     let listing = match listing_source {
         Some(source) => match source.fetch().await {
             Ok(listed) => Some(Ok(listed)),
@@ -281,32 +270,9 @@ pub(super) async fn fetch_universe_inputs(
     })
 }
 
-/// The whole ticker page, unfiltered: the universe ranks every listed name.
-pub(super) async fn fetch_ticker_page(
-    client: PublicHttpClient,
-    category: String,
-) -> Result<FetchedTickers, WorkerError> {
-    let request_started_at_ms = wall_ms()?;
-    let query = format!("category={}", percent_encode(&category));
-    let (payload, available_at_ms) = client.get("/v5/market/tickers", &query).await?;
-    let rows = result_list(bybit_result(&payload)?)?
-        .iter()
-        .map(ticker_wire)
-        .collect::<Result<Vec<_>, _>>()?;
-    let fetched = FetchedTickers {
-        request_started_at_ms,
-        observed_ts_ms: available_at_ms,
-        available_at_ms,
-        rows,
-    };
-    validate_fetched_tickers(&fetched)?;
-    Ok(fetched)
-}
-
 pub(super) fn spawn_funding_fetch_lane(
     lane_tx: mpsc::Sender<LaneCompletion>,
-    client: PublicHttpClient,
-    category: String,
+    venue: Arc<dyn PublicVenue>,
     page_limit: usize,
     jobs: Vec<FundingJob>,
     instruments: Arc<BTreeMap<String, crate::model::InstrumentObservation>>,
@@ -314,14 +280,7 @@ pub(super) fn spawn_funding_fetch_lane(
     tokio::spawn(async move {
         let mut succeeded = true;
         for job in jobs {
-            let result = fetch_funding_job(
-                client.clone(),
-                category.clone(),
-                page_limit,
-                job,
-                &instruments,
-            )
-            .await;
+            let result = fetch_funding_job(venue.as_ref(), page_limit, job, &instruments).await;
             let fetched_without_failures = result
                 .as_ref()
                 .is_ok_and(|fetched| fetched.failures.is_empty());
@@ -391,8 +350,7 @@ pub(super) async fn send_whale_chunk_and_wait(
 
 pub(super) fn spawn_repair_lane(
     lane_tx: mpsc::Sender<LaneCompletion>,
-    client: PublicHttpClient,
-    category: String,
+    venue: Arc<dyn PublicVenue>,
     page_limit: usize,
     jobs: Vec<(String, i64, i64)>,
     end_ms: i64,
@@ -400,7 +358,7 @@ pub(super) fn spawn_repair_lane(
 ) {
     tokio::spawn(async move {
         for job in jobs {
-            let result = fetch_kline_job(client.clone(), category.clone(), page_limit, job).await;
+            let result = fetch_kline_job(venue.as_ref(), page_limit, job).await;
             if !send_repair_chunk_and_wait(&lane_tx, result).await {
                 break;
             }
@@ -429,98 +387,12 @@ pub(super) async fn send_repair_chunk_and_wait(
     resume_rx.await == Ok(true)
 }
 
-pub(super) async fn fetch_instrument_snapshot(
-    client: PublicHttpClient,
-    category: String,
-    max_pages: usize,
-) -> Result<FetchedInstruments, WorkerError> {
-    let observed_ts_ms = wall_ms()?;
-    let mut by_symbol = BTreeMap::new();
-    let mut available_at_ms = observed_ts_ms;
-    for status in ["Closed", "Delivering", "Trading"] {
-        let mut cursor: Option<String> = None;
-        for _ in 0..max_pages {
-            let mut query = format!(
-                "category={}&status={status}&limit=1000",
-                percent_encode(&category)
-            );
-            if let Some(value) = &cursor {
-                query.push_str("&cursor=");
-                query.push_str(&percent_encode(value));
-            }
-            let (payload, received) = client.get("/v5/market/instruments-info", &query).await?;
-            available_at_ms = available_at_ms.max(received);
-            let result = bybit_result(&payload)?;
-            for value in result_list(result)? {
-                let row = instrument_wire(value)?;
-                by_symbol.insert(row.symbol.to_ascii_uppercase(), row);
-            }
-            let next = result
-                .get("nextPageCursor")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned);
-            if next.is_none() {
-                cursor = None;
-                break;
-            }
-            if next == cursor {
-                return Err(WorkerError::network(format!(
-                    "Bybit {status} instruments cursor did not advance"
-                )));
-            }
-            cursor = next;
-        }
-        if cursor.is_some() {
-            return Err(WorkerError::network(format!(
-                "Bybit {status} instruments pagination exceeded configured page bound"
-            )));
-        }
-    }
-    let fetched = FetchedInstruments {
-        observed_ts_ms,
-        available_at_ms,
-        rows: by_symbol.into_values().collect(),
-    };
-    validate_fetched_instruments(&fetched)?;
-    Ok(fetched)
-}
-
-pub(super) async fn fetch_ticker_snapshot(
-    client: PublicHttpClient,
-    category: String,
-    allowed: BTreeSet<String>,
-) -> Result<FetchedTickers, WorkerError> {
-    let request_started_at_ms = wall_ms()?;
-    let query = format!("category={}", percent_encode(&category));
-    let (payload, available_at_ms) = client.get("/v5/market/tickers", &query).await?;
-    let rows = result_list(bybit_result(&payload)?)?
-        .iter()
-        .filter(|value| {
-            value
-                .get("symbol")
-                .and_then(Value::as_str)
-                .is_some_and(|symbol| allowed.contains(&symbol.to_ascii_uppercase()))
-        })
-        .map(ticker_wire)
-        .collect::<Result<Vec<_>, _>>()?;
-    let fetched = FetchedTickers {
-        request_started_at_ms,
-        observed_ts_ms: available_at_ms,
-        available_at_ms,
-        rows,
-    };
-    validate_fetched_tickers(&fetched)?;
-    Ok(fetched)
-}
-
 pub(super) async fn fetch_kline_job(
-    client: PublicHttpClient,
-    category: String,
+    venue: &dyn PublicVenue,
     page_limit: usize,
     (symbol, start, end): KlineJob,
 ) -> Result<FetchedKlineJobs, WorkerError> {
-    let result = fetch_klines(client, &category, page_limit, &symbol, start, end).await;
+    let result = venue.klines(&symbol, start, end, page_limit).await;
     match result {
         Ok((rows, available_at_ms)) => Ok(FetchedKlineJobs {
             batches: vec![(
@@ -543,8 +415,7 @@ pub(super) async fn fetch_kline_job(
 }
 
 pub(super) async fn fetch_funding_job(
-    client: PublicHttpClient,
-    category: String,
+    venue: &dyn PublicVenue,
     page_limit: usize,
     (symbol, checked_from_ms, checked_through_ms, emit_lifecycle): FundingJob,
     instruments: &BTreeMap<String, crate::model::InstrumentObservation>,
@@ -554,16 +425,15 @@ pub(super) async fn fetch_funding_job(
         .and_then(|row| row.funding_interval_min)
         .filter(|minutes| *minutes > 0 && *minutes % 60 == 0)
         .map(|minutes| minutes / 60);
-    let result = fetch_funding(
-        client,
-        &category,
-        page_limit,
-        &symbol,
-        checked_from_ms,
-        checked_through_ms,
-        interval_hours,
-    )
-    .await;
+    let result = venue
+        .funding(
+            &symbol,
+            checked_from_ms,
+            checked_through_ms,
+            page_limit,
+            interval_hours,
+        )
+        .await;
     let (rows, available_at_ms) = match result {
         Ok(fetched) => fetched,
         Err(error) if error.is_lane_local_source_failure() => {
@@ -860,71 +730,6 @@ pub(super) fn closed_kline_end(now_ms: i64) -> i64 {
     publishable_ms - publishable_ms.rem_euclid(HOUR_MS)
 }
 
-pub(super) fn source_grid_slots(
-    start_ms: i64,
-    end_ms: i64,
-    step_ms: i64,
-    end_inclusive: bool,
-) -> Result<usize, WorkerError> {
-    if start_ms < 0 || end_ms < start_ms || step_ms <= 0 {
-        return Err(WorkerError::state("source fetch range is invalid"));
-    }
-    let remainder = start_ms.rem_euclid(step_ms);
-    let first = if remainder == 0 {
-        start_ms
-    } else {
-        start_ms
-            .checked_add(step_ms - remainder)
-            .ok_or_else(|| WorkerError::state("source fetch range overflowed"))?
-    };
-    let Some(last_bound) = end_inclusive
-        .then_some(end_ms)
-        .or_else(|| end_ms.checked_sub(1))
-    else {
-        return Ok(0);
-    };
-    if first > last_bound {
-        return Ok(0);
-    }
-    usize::try_from((last_bound - first) / step_ms + 1)
-        .map_err(|_| WorkerError::state("source fetch row bound exceeds usize"))
-}
-
-pub(super) fn validate_source_grid_timestamp(
-    timestamp_ms: i64,
-    start_ms: i64,
-    end_ms: i64,
-    step_ms: i64,
-    end_inclusive: bool,
-    label: &str,
-) -> Result<(), WorkerError> {
-    let in_range = timestamp_ms >= start_ms
-        && if end_inclusive {
-            timestamp_ms <= end_ms
-        } else {
-            timestamp_ms < end_ms
-        };
-    if !in_range || timestamp_ms.rem_euclid(step_ms) != 0 {
-        return Err(WorkerError::network(format!(
-            "{label} is outside the requested source grid"
-        )));
-    }
-    Ok(())
-}
-
-pub(super) fn validate_source_page_rows(
-    actual: usize,
-    limit: usize,
-    label: &str,
-) -> Result<(), WorkerError> {
-    if actual > limit {
-        return Err(WorkerError::network(format!(
-            "{label} response exceeded the requested page limit"
-        )));
-    }
-    Ok(())
-}
-
 pub(super) fn whale_fetch_bounds(
     start_ms: i64,
     end_ms: i64,
@@ -933,153 +738,6 @@ pub(super) fn whale_fetch_bounds(
     let query_end_ms = end_ms - end_ms.rem_euclid(FIVE_MIN_MS);
     let retained_row_cap = source_grid_slots(start_ms, end_ms, FIVE_MIN_MS, true)?;
     Ok((query_start_ms, query_end_ms, retained_row_cap))
-}
-
-pub(super) async fn fetch_klines(
-    client: PublicHttpClient,
-    category: &str,
-    page_limit: usize,
-    symbol: &str,
-    start: i64,
-    end: i64,
-) -> Result<(Vec<Vec<Value>>, i64), WorkerError> {
-    let page_row_cap = page_limit;
-    let retained_row_cap = source_grid_slots(start, end, HOUR_MS, false)?;
-    let limit = i64::try_from(page_limit)
-        .map_err(|_| WorkerError::config("kline page limit exceeds i64"))?;
-    let span = (limit - 1).max(0) * HOUR_MS;
-    let mut cursor = start;
-    let mut by_time = BTreeMap::<i64, Vec<Value>>::new();
-    let mut available = start;
-    while cursor < end {
-        let window_end = (cursor + span).min(end - HOUR_MS);
-        let query = format!(
-            "category={}&symbol={}&interval=60&start={cursor}&end={window_end}&limit={limit}",
-            percent_encode(category),
-            percent_encode(symbol),
-        );
-        let mut list = Vec::new();
-        for _ in 0..2 {
-            let (payload, received) = client.get("/v5/market/kline", &query).await?;
-            available = available.max(received);
-            list = result_list(bybit_result(&payload)?)?.to_vec();
-            validate_source_page_rows(list.len(), page_row_cap, "Bybit kline")?;
-            if !list.is_empty() {
-                break;
-            }
-        }
-        for value in list {
-            let row = value
-                .as_array()
-                .ok_or_else(|| WorkerError::network("Bybit kline row is not an array"))?
-                .clone();
-            let ts = wire_i64(row.first(), "Bybit kline timestamp")?;
-            validate_source_grid_timestamp(
-                ts,
-                start,
-                end,
-                HOUR_MS,
-                false,
-                "Bybit kline timestamp",
-            )?;
-            match by_time.get(&ts) {
-                Some(existing) if existing != &row => {
-                    return Err(WorkerError::network(
-                        "Bybit kline pagination returned conflicting duplicate",
-                    ));
-                }
-                Some(_) => {}
-                None => {
-                    if by_time.len() >= retained_row_cap {
-                        return Err(WorkerError::network(
-                            "Bybit kline response exceeded the requested grid cardinality",
-                        ));
-                    }
-                    by_time.insert(ts, row);
-                }
-            }
-        }
-        cursor = window_end.saturating_add(HOUR_MS);
-    }
-    let rows = by_time.into_values().collect::<Vec<_>>();
-    normalize_kline_rows(symbol, available, &rows)?;
-    Ok((rows, available))
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn fetch_funding(
-    client: PublicHttpClient,
-    category: &str,
-    page_limit: usize,
-    symbol: &str,
-    start: i64,
-    end: i64,
-    interval_hours: Option<i64>,
-) -> Result<(Vec<BybitFundingWire>, i64), WorkerError> {
-    let page_row_cap = page_limit;
-    let retained_row_cap = source_grid_slots(start, end, HOUR_MS, true)?;
-    let interval = interval_hours.map(Value::from);
-    let mut cursor = start;
-    let mut available = start;
-    let mut by_time = BTreeMap::new();
-    let page_limit = i64::try_from(page_limit)
-        .map_err(|_| WorkerError::config("funding page limit exceeds i64"))?;
-    let window_span = (page_limit - 1).max(0) * HOUR_MS;
-    while cursor <= end {
-        let window_end = cursor.saturating_add(window_span).min(end);
-        let query = format!(
-            "category={}&symbol={}&startTime={cursor}&endTime={window_end}&limit={page_limit}",
-            percent_encode(category),
-            percent_encode(symbol),
-        );
-        let (payload, received) = client.get("/v5/market/funding/history", &query).await?;
-        available = available.max(received);
-        let list = result_list(bybit_result(&payload)?)?;
-        validate_source_page_rows(list.len(), page_row_cap, "Bybit funding")?;
-        for value in list {
-            let timestamp = value
-                .get("fundingRateTimestamp")
-                .cloned()
-                .ok_or_else(|| WorkerError::network("Bybit funding row lacks timestamp"))?;
-            let rate = value
-                .get("fundingRate")
-                .cloned()
-                .ok_or_else(|| WorkerError::network("Bybit funding row lacks rate"))?;
-            let key = wire_i64(Some(&timestamp), "Bybit funding timestamp")?;
-            let row = BybitFundingWire {
-                funding_rate_timestamp: timestamp,
-                funding_rate: rate,
-                funding_interval_hour: interval.clone(),
-            };
-            validate_source_grid_timestamp(
-                key,
-                start,
-                end,
-                HOUR_MS,
-                true,
-                "Bybit funding timestamp",
-            )?;
-            if !by_time.contains_key(&key) && by_time.len() >= retained_row_cap {
-                return Err(WorkerError::network(
-                    "Bybit funding response exceeded the requested grid cardinality",
-                ));
-            }
-            if let Some(existing) = by_time.insert(key, row.clone()) {
-                if existing != row {
-                    return Err(WorkerError::network(
-                        "Bybit funding pagination returned conflicting duplicate",
-                    ));
-                }
-            }
-        }
-        if window_end == end {
-            break;
-        }
-        cursor = window_end.saturating_add(1);
-    }
-    let rows = by_time.into_values().collect::<Vec<_>>();
-    normalize_funding_rows(symbol, available, &rows)?;
-    Ok((rows, available))
 }
 
 pub(super) async fn fetch_whale_symbol(
@@ -1163,78 +821,6 @@ pub(super) async fn fetch_whale_symbol(
     }
     normalize_whales(available, &rows)?;
     Ok((rows, available))
-}
-
-pub(super) fn bybit_result(payload: &Value) -> Result<&Value, WorkerError> {
-    if payload.get("retCode").and_then(Value::as_i64) != Some(0) {
-        return Err(WorkerError::network(format!(
-            "Bybit retCode={} retMsg={}",
-            payload.get("retCode").unwrap_or(&Value::Null),
-            payload.get("retMsg").unwrap_or(&Value::Null)
-        )));
-    }
-    payload
-        .get("result")
-        .ok_or_else(|| WorkerError::network("Bybit response lacks result"))
-}
-
-pub(super) fn result_list(result: &Value) -> Result<&Vec<Value>, WorkerError> {
-    result
-        .get("list")
-        .and_then(Value::as_array)
-        .ok_or_else(|| WorkerError::network("Bybit result lacks list"))
-}
-
-pub(super) fn instrument_wire(value: &Value) -> Result<BybitInstrumentWire, WorkerError> {
-    let symbol = value
-        .get("symbol")
-        .and_then(Value::as_str)
-        .ok_or_else(|| WorkerError::network("Bybit instrument lacks symbol"))?
-        .to_owned();
-    Ok(BybitInstrumentWire {
-        symbol,
-        contract_type: text(value, "contractType"),
-        symbol_type: text(value, "symbolType"),
-        status: text(value, "status"),
-        base_coin: text(value, "baseCoin"),
-        quote_coin: text(value, "quoteCoin"),
-        settle_coin: text(value, "settleCoin"),
-        launch_time: value.get("launchTime").cloned(),
-        delivery_time: value.get("deliveryTime").cloned(),
-        price_filter: object_map(value, "priceFilter")?,
-        lot_size_filter: object_map(value, "lotSizeFilter")?,
-        funding_interval: value.get("fundingInterval").cloned(),
-        is_pre_listing: value
-            .get("isPreListing")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-    })
-}
-
-pub(super) fn object_map(value: &Value, key: &str) -> Result<BTreeMap<String, Value>, WorkerError> {
-    value
-        .get(key)
-        .and_then(Value::as_object)
-        .map(|object| {
-            object
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect()
-        })
-        .ok_or_else(|| WorkerError::network(format!("Bybit instrument lacks {key}")))
-}
-
-pub(super) fn text(value: &Value, key: &str) -> Option<String> {
-    value.get(key).and_then(Value::as_str).map(str::to_owned)
-}
-
-pub(super) fn wire_i64(value: Option<&Value>, label: &str) -> Result<i64, WorkerError> {
-    match value {
-        Some(Value::Number(number)) => number.as_i64(),
-        Some(Value::String(text)) => text.parse().ok(),
-        _ => None,
-    }
-    .ok_or_else(|| WorkerError::network(format!("{label} is not an integer")))
 }
 
 #[cfg(test)]

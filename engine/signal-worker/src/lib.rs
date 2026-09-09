@@ -5,7 +5,6 @@
 //! the registered rolling features, and emits typed observations for native
 //! reducers. It has no account, key, signer, or order type.
 
-pub mod bybit_ws;
 pub mod config;
 pub mod features;
 mod history;
@@ -18,6 +17,7 @@ pub mod store;
 #[path = "../../test-support/io.rs"]
 mod test_io;
 pub mod universe;
+pub mod venue;
 pub mod worker;
 
 pub use config::{ConfigIdentity, SignalWorkerConfig};

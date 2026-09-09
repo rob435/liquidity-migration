@@ -11,9 +11,14 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message};
 use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 
+use super::ticker_wire;
 use crate::http::wall_ms;
 use crate::model::BybitTickerWire;
 use crate::normalize::{normalize_kline_rows, normalize_ticker_strict};
+use crate::venue::{
+    BoxFuture, ConfirmedKline, PublicStream, StreamContinuity, StreamEvent, StreamHealth,
+    TickerSample,
+};
 use crate::worker::WorkerError;
 use crate::HOUR_MS;
 
@@ -27,80 +32,6 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 fn public_linear_url() -> &'static str {
     engine_public::VenueRealm::Demo.public_ws()
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ConfirmedKline {
-    pub symbol: String,
-    pub available_at_ms: i64,
-    pub row: Vec<Value>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum StreamEvent {
-    EpochStarted {
-        epoch: u64,
-        observed_ts_ms: i64,
-        reconnected: bool,
-    },
-    GapOpened {
-        epoch: u64,
-        observed_ts_ms: i64,
-    },
-    KlineClosed(ConfirmedKline),
-    Fault(String),
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct StreamHealth {
-    pub connected: bool,
-    pub epoch: u64,
-    pub gap_open: bool,
-    pub gap_open_since_ms: Option<i64>,
-    pub reconnect_count: u64,
-    pub fault_count: u64,
-    pub last_frame_ts_ms: Option<i64>,
-    pub ticker_rows: usize,
-    pub ticker_capacity: usize,
-    pub ticker_coverage_complete: bool,
-    pub ticker_topics_accepted: usize,
-    pub ticker_topics_quarantined: usize,
-    pub kline_topics_accepted: usize,
-    pub kline_topics_quarantined: usize,
-    pub queued_frames: usize,
-    pub queue_capacity: usize,
-}
-
-/// The transport history a replacement stream must continue. Epoch numbering
-/// is the token `mark_gap_repaired` matches, so it must never restart while
-/// repair lanes from the outgoing stream are still in flight; the gap stamp and
-/// the two counters are what the heartbeat and the on-call page read.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct StreamContinuity {
-    pub epoch: u64,
-    pub gap_open: bool,
-    pub gap_open_since_ms: Option<i64>,
-    pub reconnect_count: u64,
-    pub fault_count: u64,
-}
-
-impl From<&StreamHealth> for StreamContinuity {
-    fn from(health: &StreamHealth) -> Self {
-        Self {
-            epoch: health.epoch,
-            gap_open: health.gap_open,
-            gap_open_since_ms: health.gap_open_since_ms,
-            reconnect_count: health.reconnect_count,
-            fault_count: health.fault_count,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct TickerSample {
-    pub observed_ts_ms: i64,
-    pub available_at_ms: i64,
-    pub rows: Vec<BybitTickerWire>,
 }
 
 pub struct BybitPublicStream {
@@ -311,6 +242,48 @@ impl BybitPublicStream {
 
     pub fn symbols(&self) -> &BTreeSet<String> {
         &self.symbols
+    }
+}
+
+impl PublicStream for BybitPublicStream {
+    fn next_event(&mut self) -> BoxFuture<'_, Option<StreamEvent>> {
+        Box::pin(BybitPublicStream::next_event(self))
+    }
+
+    fn sample_tickers(&self, observed_ts_ms: i64, max_age_ms: i64) -> Option<TickerSample> {
+        BybitPublicStream::sample_tickers(self, observed_ts_ms, max_age_ms)
+    }
+
+    fn mark_gap_repaired(&self, epoch: u64) -> bool {
+        BybitPublicStream::mark_gap_repaired(self, epoch)
+    }
+
+    fn mark_source_fault(&self, observed_ts_ms: i64) {
+        BybitPublicStream::mark_source_fault(self, observed_ts_ms);
+    }
+
+    fn reconcile_tickers(
+        &self,
+        epoch: u64,
+        rows: &[BybitTickerWire],
+        request_started_at_ms: i64,
+        received_at_ms: i64,
+    ) -> bool {
+        BybitPublicStream::reconcile_tickers(
+            self,
+            epoch,
+            rows,
+            request_started_at_ms,
+            received_at_ms,
+        )
+    }
+
+    fn health(&self) -> StreamHealth {
+        BybitPublicStream::health(self)
+    }
+
+    fn symbols(&self) -> &BTreeSet<String> {
+        BybitPublicStream::symbols(self)
     }
 }
 
@@ -1386,33 +1359,6 @@ fn topic_local_subscription_refusal(ret_code: Option<i64>, ret_msg: &str) -> boo
     ]
     .iter()
     .any(|needle| message.contains(needle))
-}
-
-pub(crate) fn ticker_wire(value: &Value) -> Result<BybitTickerWire, WorkerError> {
-    let symbol = value
-        .get("symbol")
-        .and_then(Value::as_str)
-        .ok_or_else(|| WorkerError::network("Bybit ticker lacks symbol"))?
-        .to_ascii_uppercase();
-    Ok(BybitTickerWire {
-        symbol,
-        mark_observed_ts_ms: None,
-        funding_observed_ts_ms: None,
-        schedule_observed_ts_ms: None,
-        last_price: value.get("lastPrice").cloned(),
-        mark_price: value.get("markPrice").cloned(),
-        index_price: value.get("indexPrice").cloned(),
-        bid1_price: value.get("bid1Price").cloned(),
-        ask1_price: value.get("ask1Price").cloned(),
-        bid1_size: value.get("bid1Size").cloned(),
-        ask1_size: value.get("ask1Size").cloned(),
-        open_interest: value.get("openInterest").cloned(),
-        open_interest_value: value.get("openInterestValue").cloned(),
-        turnover24h: value.get("turnover24h").cloned(),
-        volume24h: value.get("volume24h").cloned(),
-        funding_rate: value.get("fundingRate").cloned(),
-        next_funding_time: value.get("nextFundingTime").cloned(),
-    })
 }
 
 fn merge_ticker(existing: &mut CachedTicker, incoming: BybitTickerWire, received_at_ms: i64) {

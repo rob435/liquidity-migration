@@ -8,21 +8,22 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::time::MissedTickBehavior;
 
-use crate::bybit_ws::{
-    ticker_wire, BybitPublicStream, ConfirmedKline, StreamContinuity, StreamEvent, StreamHealth,
-    TickerSample,
-};
 use crate::config::SignalWorkerConfig;
 use crate::features::carry_decision_at;
-use crate::http::{percent_encode, wall_ms, PublicHttpClient};
+use crate::http::{wall_ms, PublicHttpClient};
 use crate::model::{
-    BinanceWhaleWire, BootstrapCoverage, BybitFundingWire, BybitInstrumentWire, BybitTickerWire,
-    InstrumentTradingInterval, SourceCoverage, WireEvent,
+    BinanceWhaleWire, BootstrapCoverage, BybitFundingWire, InstrumentTradingInterval,
+    SourceCoverage, WireEvent,
 };
 use crate::normalize::{
     normalize_funding_rows, normalize_instruments, normalize_kline_rows, normalize_whales,
 };
 use crate::store::atomic_write;
+use crate::venue::{
+    open_public_venue, source_grid_slots, validate_fetched_tickers, validate_source_grid_timestamp,
+    validate_source_page_rows, wire_i64, ConfirmedKline, FetchedInstruments, FetchedTickers,
+    PublicStream, PublicVenue, StreamContinuity, StreamEvent, StreamHealth, TickerSample,
+};
 use crate::worker::{
     required_carry_history_hours, spool_class_caps, DurableSignalWorker, WorkerError,
 };
@@ -139,11 +140,8 @@ pub struct LiveRunner {
     shutdown: Option<ShutdownSignal>,
     config: SignalWorkerConfig,
     durable: DurableSignalWorker,
-    bybit: PublicHttpClient,
-    /// The realm's own venue host, whose instrument list bounds what the
-    /// account may trade. Mainnet's is the public host; demo's is the demo
-    /// venue.
-    bybit_instruments: PublicHttpClient,
+    /// The realm's public data source, named by `sources.public_venue`.
+    venue: Arc<dyn PublicVenue>,
     binance: PublicHttpClient,
     /// Present exactly when `universe.listed_on` names a venue.
     listing_source: Option<ListingSource>,
@@ -211,12 +209,6 @@ enum LaneCompletion {
     },
 }
 
-struct FetchedInstruments {
-    observed_ts_ms: i64,
-    available_at_ms: i64,
-    rows: Vec<BybitInstrumentWire>,
-}
-
 /// The venue's whole instrument list from the realm host plus the whole
 /// ticker page from the public host: everything the universe is derived from.
 struct FetchedUniverseInputs {
@@ -240,13 +232,6 @@ struct FetchedWhales {
     available_at_ms: i64,
     rows: Vec<BinanceWhaleWire>,
     coverage: Vec<SourceCoverage>,
-}
-
-struct FetchedTickers {
-    request_started_at_ms: i64,
-    observed_ts_ms: i64,
-    available_at_ms: i64,
-    rows: Vec<BybitTickerWire>,
 }
 
 struct FetchedKlineBatch {
@@ -304,32 +289,6 @@ fn lane_source_failure(label: &str, error: WorkerError) -> Result<(), WorkerErro
 struct FetchedKlineJobs {
     batches: Vec<(String, FetchedKlineBatch)>,
     failures: Vec<(String, String)>,
-}
-
-fn validate_fetched_instruments(fetched: &FetchedInstruments) -> Result<(), WorkerError> {
-    normalize_instruments(
-        fetched.observed_ts_ms,
-        fetched.available_at_ms,
-        &fetched.rows,
-    )
-    .map(drop)
-}
-
-/// A whole ticker page: rows that fail are left out downstream, but a page
-/// with rows and nothing usable is a failed fetch.
-fn validate_fetched_tickers(fetched: &FetchedTickers) -> Result<(), WorkerError> {
-    let (kept, rejected) = crate::normalize::normalize_tickers_reporting(
-        fetched.observed_ts_ms,
-        fetched.available_at_ms,
-        &fetched.rows,
-    )?;
-    if kept.is_empty() && !rejected.rows.is_empty() {
-        return Err(WorkerError::input(format!(
-            "no usable ticker rows: {}",
-            rejected.summary("ticker").unwrap_or_default()
-        )));
-    }
-    Ok(())
 }
 
 /// One WebSocket sample: every row must be right, or the stream has a gap.
@@ -520,25 +479,9 @@ impl LiveRunner {
                 }
             }
         };
-        let bybit_host = match config.live.public_market_realm.as_str() {
-            "mainnet" => &config.sources.bybit_mainnet_host,
-            _ => return Err(WorkerError::config("unsupported public market realm")),
-        };
         let request_budget = Arc::new(Semaphore::new(config.live.max_parallel_requests));
-        let bybit = PublicHttpClient::new(
-            bybit_host,
-            config.live.request_timeout_ms,
-            config.live.request_retries,
-            config.live.retry_base_ms,
-            Arc::clone(&request_budget),
-        )?;
-        let bybit_instruments = PublicHttpClient::new(
-            crate::worker::realm_endpoint(&config),
-            config.live.request_timeout_ms,
-            config.live.request_retries,
-            config.live.retry_base_ms,
-            Arc::clone(&request_budget),
-        )?;
+        let venue =
+            open_public_venue(config.public_venue()?, &config, Arc::clone(&request_budget))?;
         let listing_source = open_listing_source(&config, Arc::clone(&request_budget))?;
         let binance = PublicHttpClient::new(
             &config.sources.binance_host,
@@ -551,8 +494,7 @@ impl LiveRunner {
             shutdown: Some(shutdown),
             config,
             durable,
-            bybit,
-            bybit_instruments,
+            venue,
             binance,
             listing_source,
             last_listing: None,
@@ -583,25 +525,9 @@ impl LiveRunner {
         universe: crate::model::UniverseIdentity,
         options: LiveRunOptions,
     ) -> Result<Self, WorkerError> {
-        let bybit_host = match config.live.public_market_realm.as_str() {
-            "mainnet" => &config.sources.bybit_mainnet_host,
-            _ => return Err(WorkerError::config("unsupported public market realm")),
-        };
         let request_budget = Arc::new(Semaphore::new(config.live.max_parallel_requests));
-        let bybit = PublicHttpClient::new(
-            bybit_host,
-            config.live.request_timeout_ms,
-            config.live.request_retries,
-            config.live.retry_base_ms,
-            Arc::clone(&request_budget),
-        )?;
-        let bybit_instruments = PublicHttpClient::new(
-            crate::worker::realm_endpoint(&config),
-            config.live.request_timeout_ms,
-            config.live.request_retries,
-            config.live.retry_base_ms,
-            Arc::clone(&request_budget),
-        )?;
+        let venue =
+            open_public_venue(config.public_venue()?, &config, Arc::clone(&request_budget))?;
         let listing_source = open_listing_source(&config, Arc::clone(&request_budget))?;
         let binance = PublicHttpClient::new(
             &config.sources.binance_host,
@@ -620,8 +546,7 @@ impl LiveRunner {
             shutdown: None,
             config,
             durable,
-            bybit,
-            bybit_instruments,
+            venue,
             binance,
             listing_source,
             last_listing: None,
@@ -764,11 +689,7 @@ impl LiveRunner {
         let run_started_at_ms = wall_ms()?;
         let symbols = self.kline_symbols();
         let pending_limit = pending_kline_limit(symbols.len());
-        let mut stream = BybitPublicStream::spawn(
-            self.stream_symbols(),
-            self.config.live.request_timeout_ms,
-            self.config.live.retry_base_ms,
-        )?;
+        let mut stream = self.venue.open_stream(self.stream_symbols())?;
         let (lane_tx, mut lane_rx) = mpsc::channel(LANE_COMPLETION_QUEUE_CAPACITY);
         let mut lanes = LaneState {
             instruments_ready: !self.durable.worker().state().instruments.is_empty(),
@@ -794,10 +715,8 @@ impl LiveRunner {
         lanes.instruments = true;
         spawn_instrument_lane(
             lane_tx.clone(),
-            self.bybit_instruments.clone(),
-            self.bybit.clone(),
+            Arc::clone(&self.venue),
             self.listing_source.clone(),
-            self.config.sources.bybit_category.clone(),
             self.config.live.instrument_max_pages,
         );
         lanes.tickers = true;
@@ -911,7 +830,7 @@ impl LiveRunner {
     fn handle_stream_event(
         &mut self,
         event: StreamEvent,
-        stream: &mut BybitPublicStream,
+        stream: &mut Box<dyn PublicStream>,
         pending: &mut BTreeMap<(String, i64), ConfirmedKline>,
         pending_limit: usize,
         lane_tx: &mpsc::Sender<LaneCompletion>,
@@ -979,7 +898,7 @@ impl LiveRunner {
 
     fn commit_stream_ticker_sample(
         &mut self,
-        stream: &mut BybitPublicStream,
+        stream: &mut Box<dyn PublicStream>,
         sample: TickerSample,
     ) -> Result<(), WorkerError> {
         let fetched = FetchedTickers {
@@ -1004,7 +923,7 @@ impl LiveRunner {
 
     fn recover_stream_source_fault(
         &mut self,
-        stream: &mut BybitPublicStream,
+        stream: &mut Box<dyn PublicStream>,
         pending: &mut BTreeMap<(String, i64), ConfirmedKline>,
         lane_tx: &mpsc::Sender<LaneCompletion>,
         lanes: &mut LaneState,
@@ -1028,7 +947,7 @@ impl LiveRunner {
 
     fn flush_pending_klines_or_recover(
         &mut self,
-        stream: &mut BybitPublicStream,
+        stream: &mut Box<dyn PublicStream>,
         pending: &mut BTreeMap<(String, i64), ConfirmedKline>,
         lane_tx: &mpsc::Sender<LaneCompletion>,
         lanes: &mut LaneState,
@@ -1213,7 +1132,7 @@ impl LiveRunner {
 
     fn advance_kline_watermark(
         &mut self,
-        stream: &mut BybitPublicStream,
+        stream: &mut Box<dyn PublicStream>,
         lane_tx: &mpsc::Sender<LaneCompletion>,
         lanes: &mut LaneState,
     ) -> Result<(), WorkerError> {
@@ -1297,8 +1216,7 @@ impl LiveRunner {
         lanes.repair = true;
         spawn_repair_lane(
             lane_tx.clone(),
-            self.bybit.clone(),
-            self.config.sources.bybit_category.clone(),
+            Arc::clone(&self.venue),
             self.config.live.kline_page_limit,
             jobs,
             end_ms,
@@ -1362,10 +1280,8 @@ impl LiveRunner {
         lanes.instruments = true;
         spawn_instrument_lane(
             lane_tx.clone(),
-            self.bybit_instruments.clone(),
-            self.bybit.clone(),
+            Arc::clone(&self.venue),
             self.listing_source.clone(),
-            self.config.sources.bybit_category.clone(),
             self.config.live.instrument_max_pages,
         );
     }
@@ -1408,7 +1324,7 @@ impl LiveRunner {
                     ranges.entry(range).or_insert(false);
                 }
             }
-            if current_trading_instrument(state, symbol, &self.config.sources.bybit_settle_coin) {
+            if current_trading_instrument(state, symbol, self.venue.settle_coin()) {
                 for range in instrument_source_ranges(
                     state,
                     symbol,
@@ -1442,10 +1358,14 @@ impl LiveRunner {
                 }
             }
         }
-        let client = self.bybit.clone();
-        let category = self.config.sources.bybit_category.clone();
         let page_limit = self.config.live.funding_page_limit;
-        spawn_funding_fetch_lane(lane_tx, client, category, page_limit, jobs, intervals);
+        spawn_funding_fetch_lane(
+            lane_tx,
+            Arc::clone(&self.venue),
+            page_limit,
+            jobs,
+            intervals,
+        );
         Ok(())
     }
 
@@ -1471,7 +1391,7 @@ impl LiveRunner {
                     DAY_MS,
                 ));
             }
-            if current_trading_instrument(state, symbol, &self.config.sources.bybit_settle_coin) {
+            if current_trading_instrument(state, symbol, self.venue.settle_coin()) {
                 ranges.extend(instrument_source_ranges(
                     state,
                     symbol,
@@ -1506,11 +1426,10 @@ impl LiveRunner {
     }
 
     fn spawn_ticker_lane(&self, lane_tx: mpsc::Sender<LaneCompletion>) -> Result<(), WorkerError> {
-        let client = self.bybit.clone();
-        let category = self.config.sources.bybit_category.clone();
+        let venue = Arc::clone(&self.venue);
         let allowed = self.kline_symbols().into_iter().collect();
         tokio::spawn(async move {
-            let result = fetch_ticker_snapshot(client, category, allowed).await;
+            let result = venue.ticker_snapshot(allowed).await;
             let _ = lane_tx.send(LaneCompletion::Tickers(result)).await;
         });
         Ok(())
@@ -1518,10 +1437,8 @@ impl LiveRunner {
 
     async fn refresh_instruments(&mut self) -> Result<(), WorkerError> {
         let fetched = fetch_universe_inputs(
-            self.bybit_instruments.clone(),
-            self.bybit.clone(),
+            self.venue.as_ref(),
             self.listing_source.clone(),
-            self.config.sources.bybit_category.clone(),
             self.config.live.instrument_max_pages,
         )
         .await?;
@@ -1597,7 +1514,8 @@ impl LiveRunner {
             &self.config.universe,
             crate::universe::UniverseInputs {
                 environment: &self.config.live.environment,
-                endpoint: crate::worker::realm_endpoint(&self.config),
+                endpoint: self.config.universe_endpoint(),
+                settle_coin: self.venue.settle_coin(),
                 snapshot_ts_ms: fetched
                     .instruments
                     .observed_ts_ms
@@ -1629,28 +1547,14 @@ impl LiveRunner {
     }
 
     async fn refresh_tickers(&mut self) -> Result<(), WorkerError> {
-        let query = format!(
-            "category={}",
-            percent_encode(&self.config.sources.bybit_category)
-        );
-        let (payload, available) = self.bybit.get("/v5/market/tickers", &query).await?;
         let allowed: BTreeSet<String> = self.kline_symbols().into_iter().collect();
-        let rows = result_list(bybit_result(&payload)?)?
-            .iter()
-            .filter(|value| {
-                value
-                    .get("symbol")
-                    .and_then(Value::as_str)
-                    .is_some_and(|symbol| allowed.contains(&symbol.to_ascii_uppercase()))
-            })
-            .map(ticker_wire)
-            .collect::<Result<Vec<_>, _>>()?;
+        let fetched = self.venue.ticker_snapshot(allowed).await?;
         self.commit(WireEvent::BybitTickerSnapshot {
             schema_version: SCHEMA_VERSION,
             sequence: self.next_sequence()?,
-            observed_ts_ms: available,
-            available_at_ms: available,
-            rows,
+            observed_ts_ms: fetched.observed_ts_ms,
+            available_at_ms: fetched.available_at_ms,
+            rows: fetched.rows,
         })
     }
 
@@ -1695,13 +1599,7 @@ impl LiveRunner {
     }
 
     async fn fetch_kline_job(&self, job: KlineJob) -> Result<FetchedKlineJobs, WorkerError> {
-        fetch_kline_job(
-            self.bybit.clone(),
-            self.config.sources.bybit_category.clone(),
-            self.config.live.kline_page_limit,
-            job,
-        )
-        .await
+        fetch_kline_job(self.venue.as_ref(), self.config.live.kline_page_limit, job).await
     }
 
     async fn refresh_funding(&mut self, start: i64, end: i64) -> Result<(), WorkerError> {
@@ -1719,8 +1617,7 @@ impl LiveRunner {
         let mut failures = Vec::new();
         for job in jobs {
             let fetched = fetch_funding_job(
-                self.bybit.clone(),
-                self.config.sources.bybit_category.clone(),
+                self.venue.as_ref(),
                 self.config.live.funding_page_limit,
                 job,
                 &instruments,
@@ -1845,11 +1742,7 @@ impl LiveRunner {
                 if historical_target {
                     instrument_trading_at(state, symbol, source_through_ms)
                 } else {
-                    current_trading_instrument(
-                        state,
-                        symbol,
-                        &self.config.sources.bybit_settle_coin,
-                    )
+                    current_trading_instrument(state, symbol, self.venue.settle_coin())
                 }
             })
             .cloned()
@@ -1952,7 +1845,7 @@ impl LiveRunner {
     fn long_gap_symbols(&self, data_through_ms: i64) -> Option<Vec<String>> {
         let state = self.durable.worker().state();
         for symbol in [self.config.long.regime_symbol.as_str(), "ETHUSDT"] {
-            if !current_trading_instrument(state, symbol, &self.config.sources.bybit_settle_coin) {
+            if !current_trading_instrument(state, symbol, self.venue.settle_coin()) {
                 return None;
             }
             let ranges = instrument_source_ranges(
@@ -1977,11 +1870,7 @@ impl LiveRunner {
                 .long_symbols
                 .iter()
                 .filter(|symbol| {
-                    current_trading_instrument(
-                        state,
-                        symbol,
-                        &self.config.sources.bybit_settle_coin,
-                    )
+                    current_trading_instrument(state, symbol, self.venue.settle_coin())
                 })
                 .filter(|symbol| {
                     let ranges = instrument_source_ranges(
@@ -2034,8 +1923,7 @@ impl LiveRunner {
                     || symbol == "ETHUSDT"
                     || state.instruments.get(symbol).is_some_and(|row| {
                         row.status.as_deref() == Some("Trading")
-                            && row.settle_coin.as_deref()
-                                == Some(self.config.sources.bybit_settle_coin.as_str())
+                            && row.settle_coin.as_deref() == Some(self.venue.settle_coin())
                             && !row.is_prelisting
                     })
             });
@@ -2070,8 +1958,7 @@ impl LiveRunner {
         for symbol in self.kline_symbols() {
             if state.instruments.get(&symbol).is_some_and(|row| {
                 row.status.as_deref() == Some("Trading")
-                    && row.settle_coin.as_deref()
-                        == Some(self.config.sources.bybit_settle_coin.as_str())
+                    && row.settle_coin.as_deref() == Some(self.venue.settle_coin())
                     && !row.is_prelisting
             }) {
                 critical.insert(symbol);
@@ -2084,7 +1971,7 @@ impl LiveRunner {
     /// the replacement stream must carry over. `None` when the set is unchanged.
     fn stream_reconfiguration(
         &self,
-        stream: &BybitPublicStream,
+        stream: &dyn PublicStream,
     ) -> Option<(Vec<String>, StreamContinuity)> {
         let desired = self.stream_symbols().into_iter().collect::<BTreeSet<_>>();
         if &desired == stream.symbols() {
@@ -2096,16 +1983,11 @@ impl LiveRunner {
         ))
     }
 
-    fn reconfigure_stream(&self, stream: &mut BybitPublicStream) -> Result<(), WorkerError> {
-        let Some((desired, continuity)) = self.stream_reconfiguration(stream) else {
+    fn reconfigure_stream(&self, stream: &mut Box<dyn PublicStream>) -> Result<(), WorkerError> {
+        let Some((desired, continuity)) = self.stream_reconfiguration(&**stream) else {
             return Ok(());
         };
-        *stream = BybitPublicStream::spawn_continuing(
-            desired,
-            self.config.live.request_timeout_ms,
-            self.config.live.retry_base_ms,
-            continuity,
-        )?;
+        *stream = self.venue.open_stream_continuing(desired, continuity)?;
         Ok(())
     }
 
@@ -2140,9 +2022,7 @@ impl LiveRunner {
             .any(|value| value == symbol);
         let carry_end_ms = self.carry_source_through(end_ms);
         let mut ranges = Vec::new();
-        if long_support
-            && current_trading_instrument(state, symbol, &self.config.sources.bybit_settle_coin)
-        {
+        if long_support && current_trading_instrument(state, symbol, self.venue.settle_coin()) {
             ranges.extend(instrument_source_ranges(
                 state,
                 symbol,
@@ -2164,8 +2044,7 @@ impl LiveRunner {
                         HOUR_MS,
                     ));
                 }
-                if current_trading_instrument(state, symbol, &self.config.sources.bybit_settle_coin)
-                {
+                if current_trading_instrument(state, symbol, self.venue.settle_coin()) {
                     ranges.extend(instrument_source_ranges(
                         state,
                         symbol,
@@ -2174,11 +2053,7 @@ impl LiveRunner {
                         HOUR_MS,
                     ));
                 }
-            } else if current_trading_instrument(
-                state,
-                symbol,
-                &self.config.sources.bybit_settle_coin,
-            ) {
+            } else if current_trading_instrument(state, symbol, self.venue.settle_coin()) {
                 ranges.extend(instrument_source_ranges(
                     state,
                     symbol,
@@ -2322,10 +2197,11 @@ impl LiveRunner {
                 invalid.push(format!("{symbol}:absent"));
                 continue;
             };
-            if row.settle_coin.as_deref() != Some(self.config.sources.bybit_settle_coin.as_str())
+            if row.settle_coin.as_deref() != Some(self.venue.settle_coin())
                 || row.contract_type.as_deref() != Some("LinearPerpetual")
             {
-                invalid.push(format!("{symbol}:not_usdt_linear"));
+                let settle_coin = self.venue.settle_coin().to_ascii_lowercase();
+                invalid.push(format!("{symbol}:not_{settle_coin}_linear"));
             }
         }
         if invalid.is_empty() {

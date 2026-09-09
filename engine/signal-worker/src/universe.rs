@@ -91,6 +91,9 @@ impl UniverseRules {
 pub struct UniverseInputs<'a> {
     pub environment: &'a str,
     pub endpoint: &'a str,
+    /// The coin the source venue margins its perpetuals in. A row that settles
+    /// in anything else is outside the domain.
+    pub settle_coin: &'a str,
     pub snapshot_ts_ms: i64,
     pub available_at_ms: i64,
     pub instruments: &'a [InstrumentObservation],
@@ -135,6 +138,7 @@ pub fn same_membership(left: &UniverseIdentity, right: &UniverseIdentity) -> boo
 
 fn in_crypto_perpetual_domain(
     row: &InstrumentObservation,
+    settle_coin: &str,
     excluded: &BTreeSet<&str>,
     listing: Option<&BTreeSet<String>>,
 ) -> bool {
@@ -144,7 +148,7 @@ fn in_crypto_perpetual_domain(
         .map(|value| value.trim().to_ascii_lowercase())
         .unwrap_or_default();
     row.status.as_deref() == Some("Trading")
-        && row.settle_coin.as_deref() == Some("USDT")
+        && row.settle_coin.as_deref() == Some(settle_coin)
         && row.contract_type.as_deref() == Some("LinearPerpetual")
         && !row.is_prelisting
         && row.delivery_time_ms.is_none_or(|clock| clock <= 0)
@@ -191,8 +195,13 @@ pub fn derive_universe(
     if inputs.snapshot_ts_ms <= 0 || inputs.available_at_ms < inputs.snapshot_ts_ms {
         return Err(WorkerError::input("universe refresh clock is invalid"));
     }
-    if !is_realm(inputs.environment) || inputs.endpoint.trim().is_empty() {
-        return Err(WorkerError::input("universe realm or endpoint is invalid"));
+    if !is_realm(inputs.environment)
+        || inputs.endpoint.trim().is_empty()
+        || inputs.settle_coin.trim().is_empty()
+    {
+        return Err(WorkerError::input(
+            "universe realm, endpoint or settle coin is invalid",
+        ));
     }
     let listing = match (rules.listed_on.as_deref(), inputs.listing) {
         (Some(venue), None) => {
@@ -207,7 +216,7 @@ pub fn derive_universe(
     let domain: BTreeMap<&str, &InstrumentObservation> = inputs
         .instruments
         .iter()
-        .filter(|row| in_crypto_perpetual_domain(row, &excluded, listing))
+        .filter(|row| in_crypto_perpetual_domain(row, inputs.settle_coin, &excluded, listing))
         .map(|row| (row.symbol.as_str(), row))
         .collect();
     let mut turnover: BTreeMap<&str, f64> = BTreeMap::new();
@@ -396,11 +405,35 @@ mod tests {
         listing: Option<&BTreeSet<String>>,
         previous: Option<&UniverseIdentity>,
     ) -> Result<UniverseIdentity, WorkerError> {
+        derive_in_realm(
+            rules,
+            "demo",
+            "api-demo.bybit.com",
+            "USDT",
+            instruments,
+            tickers,
+            listing,
+            previous,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn derive_in_realm(
+        rules: &UniverseRules,
+        environment: &str,
+        endpoint: &str,
+        settle_coin: &str,
+        instruments: &[InstrumentObservation],
+        tickers: &[TickerObservation],
+        listing: Option<&BTreeSet<String>>,
+        previous: Option<&UniverseIdentity>,
+    ) -> Result<UniverseIdentity, WorkerError> {
         derive_universe(
             rules,
             UniverseInputs {
-                environment: "demo",
-                endpoint: "api-demo.bybit.com",
+                environment,
+                endpoint,
+                settle_coin,
                 snapshot_ts_ms: 1000 * DAY_MS,
                 available_at_ms: 1000 * DAY_MS + 5,
                 instruments,
@@ -460,6 +493,90 @@ mod tests {
         assert!(universe_is_resolved(&universe));
         assert_eq!(universe.artifact_sha256.len(), 64);
         assert_ne!(universe.artifact_sha256, universe.file_sha256);
+    }
+
+    /// The domain follows the source venue's own settle coin. Hyperliquid
+    /// margins in USDC while its symbols keep the engine's `USDT` spelling, and
+    /// the two Bybit realms still derive the same membership from the same page
+    /// pair.
+    #[test]
+    fn the_domain_follows_the_venues_settle_coin() {
+        let usdt = vec![instrument("AAAUSDT", 400), instrument("BBBUSDT", 400)];
+        let usdc = usdt
+            .iter()
+            .cloned()
+            .map(|mut row| {
+                row.settle_coin = Some("USDC".into());
+                row
+            })
+            .collect::<Vec<_>>();
+        let tickers = vec![ticker("AAAUSDT", 9e6), ticker("BBBUSDT", 8e6)];
+        let bybit_demo = derive_in_realm(
+            &rules(),
+            "demo",
+            "api-demo.bybit.com",
+            "USDT",
+            &usdt,
+            &tickers,
+            None,
+            None,
+        )
+        .unwrap();
+        let bybit_mainnet = derive_in_realm(
+            &rules(),
+            "mainnet",
+            "api.bybit.com",
+            "USDT",
+            &usdt,
+            &tickers,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(same_membership(&bybit_demo, &bybit_mainnet));
+        let hyperliquid = derive_in_realm(
+            &rules(),
+            "hyperliquid",
+            "api.hyperliquid.xyz",
+            "USDC",
+            &usdc,
+            &tickers,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(same_membership(&bybit_demo, &hyperliquid));
+        // The venue's coin is the only one the domain takes: the same rows read
+        // through the other venue's coin leave nothing to rank.
+        for (settle_coin, instruments) in [("USDT", &usdc), ("USDC", &usdt)] {
+            let error = derive_in_realm(
+                &rules(),
+                "hyperliquid",
+                "api.hyperliquid.xyz",
+                settle_coin,
+                instruments,
+                &tickers,
+                None,
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("no tradable crypto perpetual"),
+                "{error}"
+            );
+        }
+        let error = derive_in_realm(
+            &rules(),
+            "demo",
+            "api-demo.bybit.com",
+            "  ",
+            &usdt,
+            &tickers,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("settle coin"), "{error}");
     }
 
     #[test]

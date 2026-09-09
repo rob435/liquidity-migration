@@ -8,6 +8,7 @@
     "carry_sleeve": "carry"
   },
   "sources": {
+    "public_venue": "hyperliquid",
     "bybit_category": "linear",
     "bybit_settle_coin": "USDT",
     "bybit_mainnet_host": "api.bybit.com",
@@ -38,7 +39,6 @@
     "instrument_max_pages": 10
   },
   "universe": {
-    "listed_on": "hyperliquid",
     "exclude_symbols": [
       "BUSDUSDT",
       "DAIUSDT",

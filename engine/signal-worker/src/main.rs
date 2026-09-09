@@ -47,6 +47,7 @@ struct ConfigCheck<'a> {
     environment: &'a str,
     public_market_realm: &'a str,
     public_bybit_host: &'a str,
+    public_venue: &'a str,
     long_destination: u16,
     carry_destination: u16,
     live_long_source_pattern: String,
@@ -69,31 +70,9 @@ async fn run() -> Result<(), WorkerError> {
     match command {
         Command::Check(common) => {
             let config = load_common(&common)?;
-            let check = ConfigCheck {
-                schema_version: signal_worker::SCHEMA_VERSION,
-                kind: "liquidity_migration_signal_worker_config_check",
-                status: "ok",
-                credential_free: true,
-                environment: &config.live.environment,
-                public_market_realm: &config.live.public_market_realm,
-                public_bybit_host: &config.sources.bybit_mainnet_host,
-                long_destination: config.long_destination,
-                carry_destination: config.carry_destination,
-                live_long_source_pattern: format!(
-                    "{}.g{{source_generation}}.long",
-                    config.routing.source
-                ),
-                live_carry_source_pattern: format!(
-                    "{}.g{{source_generation}}.carry",
-                    config.routing.source
-                ),
-                config: &config.identity,
-                universe_rules: &config.universe,
-                llm_gate: &config.llm_gate,
-            };
             println!(
                 "{}",
-                serde_json::to_string(&check)
+                serde_json::to_string(&config_check(&config))
                     .map_err(|error| WorkerError::json("encode config check", error))?
             );
             Ok(())
@@ -128,6 +107,29 @@ async fn run() -> Result<(), WorkerError> {
                 None => Ok(()),
             }
         }
+    }
+}
+
+fn config_check(config: &SignalWorkerConfig) -> ConfigCheck<'_> {
+    ConfigCheck {
+        schema_version: signal_worker::SCHEMA_VERSION,
+        kind: "liquidity_migration_signal_worker_config_check",
+        status: "ok",
+        credential_free: true,
+        environment: &config.live.environment,
+        public_market_realm: &config.live.public_market_realm,
+        public_bybit_host: &config.sources.bybit_mainnet_host,
+        public_venue: &config.sources.public_venue,
+        long_destination: config.long_destination,
+        carry_destination: config.carry_destination,
+        live_long_source_pattern: format!("{}.g{{source_generation}}.long", config.routing.source),
+        live_carry_source_pattern: format!(
+            "{}.g{{source_generation}}.carry",
+            config.routing.source
+        ),
+        config: &config.identity,
+        universe_rules: &config.universe,
+        llm_gate: &config.llm_gate,
     }
 }
 
@@ -262,7 +264,56 @@ fn reject_overlapping_paths(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_args, Command};
+    use super::{config_check, parse_args, Command};
+
+    /// `scripts/ops.sh deploy` reads this object. Its keys are the contract, so
+    /// the venue seam adds one and moves none.
+    #[test]
+    fn the_demo_config_check_object_names_the_public_venue_and_nothing_new() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .unwrap();
+        let config = signal_worker::SignalWorkerConfig::load(
+            root.join("configs/signal-worker.demo.json"),
+            root.join("configs/long_native_v12.json"),
+            root.join("configs/lane2_carry_hold_v7.json"),
+            root.join("configs/operational.json"),
+            root.join("deploy/engine.demo.toml.template"),
+        )
+        .unwrap();
+        let encoded = serde_json::to_string(&config_check(&config)).unwrap();
+        let decoded: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            decoded
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec![
+                "carry_destination",
+                "config",
+                "credential_free",
+                "environment",
+                "kind",
+                "live_carry_source_pattern",
+                "live_long_source_pattern",
+                "llm_gate",
+                "long_destination",
+                "public_bybit_host",
+                "public_market_realm",
+                "public_venue",
+                "schema_version",
+                "status",
+                "universe_rules",
+            ]
+        );
+        assert!(
+            encoded.contains(r#""public_bybit_host":"api.bybit.com","public_venue":"bybit""#),
+            "{encoded}"
+        );
+    }
 
     #[test]
     fn live_requires_every_durable_path() {

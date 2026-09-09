@@ -172,6 +172,7 @@ fn test_config() -> SignalWorkerConfig {
             whale_period: "5m_eod".into(),
             mark_max_age_ms: 30_000,
             universe_identity_required: true,
+            public_venue: "bybit".into(),
         },
         live: LiveAcquisitionConfig {
             environment: "demo".into(),
@@ -4086,4 +4087,60 @@ fn a_refetched_settlement_keeps_the_interval_it_was_first_observed_with() {
         .apply(batch(3, "-0.002", 8))
         .expect_err("a settled rate that moved is still a rewrite");
     assert!(error.to_string().contains("BTCUSDT"), "{error}");
+}
+
+/// A realm follows the names its own venue settles: Hyperliquid margins every
+/// perpetual in USDC, so a `settleCoin: USDC` row is a trading instrument there
+/// and nowhere else, and Bybit's rows read exactly as before.
+#[test]
+fn the_worker_judges_instruments_by_its_venues_settle_coin() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let load = |realm: &str| {
+        SignalWorkerConfig::load(
+            root.join(format!("configs/signal-worker.{realm}.json")),
+            root.join("configs/long_native_v12.json"),
+            root.join("configs/lane2_carry_hold_v7.json"),
+            root.join("configs/operational.json"),
+            root.join(format!("deploy/engine.{realm}.toml.template")),
+        )
+        .unwrap()
+    };
+    let hyperliquid = SignalWorker::new(load("hyperliquid")).unwrap();
+    let demo = SignalWorker::new(load("demo")).unwrap();
+    let mexc = SignalWorker::new(load("mexc")).unwrap();
+    assert_eq!(hyperliquid.settle_coin(), "USDC");
+    assert_eq!(demo.settle_coin(), "USDT");
+    assert_eq!(mexc.settle_coin(), "USDT");
+
+    let row = |settle: &str| InstrumentObservation {
+        symbol: "BTCUSDT".into(),
+        observed_ts_ms: 1,
+        available_at_ms: 1,
+        contract_type: Some("LinearPerpetual".into()),
+        symbol_type: None,
+        status: Some("Trading".into()),
+        base_coin: Some("BTC".into()),
+        quote_coin: None,
+        settle_coin: Some(settle.into()),
+        launch_time_ms: Some(1),
+        delivery_time_ms: None,
+        tick_size: None,
+        qty_step: None,
+        min_order_qty: None,
+        min_notional_value: None,
+        max_order_qty: None,
+        max_market_order_qty: None,
+        funding_interval_min: Some(60),
+        is_prelisting: false,
+    };
+    assert!(instrument_is_trading(
+        &row("USDC"),
+        hyperliquid.settle_coin()
+    ));
+    assert!(!instrument_is_trading(
+        &row("USDT"),
+        hyperliquid.settle_coin()
+    ));
+    assert!(instrument_is_trading(&row("USDT"), demo.settle_coin()));
+    assert!(!instrument_is_trading(&row("USDC"), demo.settle_coin()));
 }

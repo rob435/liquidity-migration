@@ -17,7 +17,7 @@ The execution engine and signal worker run in Rust; Python runs market-tape capt
 | **Equity Recorder** | Python | Read-only heartbeat and recorder status sampling, one line per minute | None | None | `liquidity-migration-equity-recorder.service` |
 
 ### Realm Isolation
-Every account-owning realm is strictly segregated across all resources:
+Every account-owning realm is strictly segregated across all resources. The realms, and every unit, user, path and env file derived from them, come from [`deploy/realms.tsv`](../deploy/realms.tsv); see [operations.md](operations.md) §Realm table.
 
 | Fleet realm | Engine venue name | Heartbeat venue / realm | Lease file |
 | :--- | :--- | :--- | :--- |
@@ -28,7 +28,7 @@ Every account-owning realm is strictly segregated across all resources:
 
 * **No Fallback**: No realm can access, inherit, or fall back to another's state, sockets, or credentials.
 * **Leases**: Each engine acquires an exclusive single-writer lockfile named `/run/lock/liquidity-migration/<venue>-<realm>-user-<id>.lock`. Venues added after Bybit qualify the realm with the venue name. MEXC exposes no numeric account id, so its id is `key-` plus the first eight bytes of `sha256(api key)` in hex; Hyperliquid's is the master account address in lower case, and the engine checks the signing key is one of that account's `extraAgents` before it trades.
-* **Public data**: every realm's worker reads Bybit mainnet public data; the realm names the account its observations are consumed by, not the source of the features.
+* **Public data**: each realm's worker reads the public data of the venue its `sources.public_venue` names (`configs/signal-worker.<realm>.json`): Bybit mainnet for `demo` and `mainnet`, MEXC for `mexc`, Hyperliquid for `hyperliquid`. Funding, settlement clock, klines, tickers and instruments come from that venue natively through `engine/signal-worker/src/venue/`; the Binance top-trader ratio and the LLM gate file are shared by every realm. A realm's checkpoint key folds the venue in, so switching venue cold-starts its features.
 
 ---
 

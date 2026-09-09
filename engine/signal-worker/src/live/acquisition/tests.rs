@@ -1,4 +1,5 @@
 use super::*;
+use crate::venue::bybit::BybitPublicVenue;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -62,8 +63,7 @@ async fn repair_lane_commits_one_symbol_and_stops_without_fetching_the_suffix() 
     let (tx, mut rx) = mpsc::channel(1);
     spawn_repair_lane(
         tx,
-        client,
-        "linear".into(),
+        Arc::new(BybitPublicVenue::for_http_test(client, "linear")),
         100,
         vec![
             ("BTCUSDT".into(), 2 * HOUR_MS, 3 * HOUR_MS),
@@ -108,9 +108,9 @@ async fn funding_job_preserves_disjoint_coverage_and_emits_settlements_once() {
         "funding_interval_min": 60, "is_prelisting": false
     }))
     .unwrap();
+    let venue = BybitPublicVenue::for_http_test(client, "linear");
     let fetched = fetch_funding_job(
-        client,
-        "linear".into(),
+        &venue,
         100,
         ("BTCUSDT".into(), HOUR_MS, 5 * HOUR_MS, true),
         &BTreeMap::from([("BTCUSDT".into(), instrument)]),
@@ -153,8 +153,7 @@ async fn funding_lane_continues_after_one_source_failure_and_reports_incomplete(
     let (tx, mut rx) = mpsc::channel(1);
     spawn_funding_fetch_lane(
         tx,
-        client,
-        "linear".into(),
+        Arc::new(BybitPublicVenue::for_http_test(client, "linear")),
         100,
         vec![
             ("BTCUSDT".into(), 0, HOUR_MS, false),
@@ -345,7 +344,7 @@ async fn closed_global_budget_remains_a_fatal_error() {
     let budget = Arc::new(Semaphore::new(1));
     let client = PublicHttpClient::for_http_test("http://127.0.0.1:1".into(), Arc::clone(&budget));
     budget.close();
-    let result =
-        fetch_kline_job(client, "linear".into(), 100, ("BTCUSDT".into(), 0, HOUR_MS)).await;
+    let venue = BybitPublicVenue::for_http_test(client, "linear");
+    let result = fetch_kline_job(&venue, 100, ("BTCUSDT".into(), 0, HOUR_MS)).await;
     assert!(matches!(result, Err(error) if !error.is_lane_local_source_failure()));
 }
