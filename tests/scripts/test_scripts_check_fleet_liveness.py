@@ -620,6 +620,56 @@ def test_carry_cycle_age_runs_from_the_boundarys_publishable_funding_print(tmp_p
     assert "carry cycle is 296s old (limit 180s)" in alerts[0].message
 
 
+def test_a_blocked_spool_class_is_named_beside_the_stalled_lane(tmp_path: Path) -> None:
+    # Incident host-22826ce0bb838311: the mexc worker's heartbeat as read at
+    # 07:11:03 UTC. The aggregate reads false and one class is at its cap, so a
+    # LongWatermark commit is refused every kline tick while a carry watermark
+    # coalesces onto a pending path and stays fresh. Without the spool clause
+    # the page names only the effect.
+    heartbeat = tmp_path / "heartbeat.json"
+    unit = "liquidity-migration-signal-worker-mexc.service"
+    updated_ms = 1_788_937_863_247
+    payload = {
+        "kind": "liquidity_migration_signal_worker_heartbeat",
+        "status": "degraded",
+        "updated_at_ms": updated_ms,
+        "bybit_ws_connected": True,
+        "bybit_ws_gap_open": False,
+        "bybit_ws_ticker_coverage_complete": True,
+        "bybit_ws_ticker_topics_quarantined": 0,
+        "bybit_ws_kline_topics_quarantined": 0,
+        "bybit_ws_last_frame_ts_ms": updated_ms - 1_000,
+        "bybit_ws_max_frame_age_ms": 30_000,
+        "last_long_cycle_completed_wall_ts_ms": 1_788_937_493_362,
+        "last_carry_cycle_completed_wall_ts_ms": 1_788_937_853_448,
+        "long_cycle_cadence_ms": 60_000,
+        "carry_cycle_cadence_ms": 60_000,
+        "spool_backpressured": False,
+        "spool_backpressured_classes": ["current"],
+    }
+    heartbeat.write_text(json.dumps(payload))
+    alerts = liveness.evaluate_engine_heartbeat(unit, heartbeat, now=updated_ms / 1000)
+    assert [alert.key for alert in alerts] == [f"worker-status:{unit}"]
+    assert alerts[0].message == (
+        f"{unit} reports 'degraded': signal spool refuses new files in class 'current'; "
+        "LONG cycle is 370s old (limit 180s)"
+    )
+
+    # Several classes are named in one clause, and an empty or absent list adds
+    # nothing, so a worker that publishes neither reads exactly as before.
+    heartbeat.write_text(json.dumps(dict(payload, spool_backpressured_classes=["current", "catchup"])))
+    alerts = liveness.evaluate_engine_heartbeat(unit, heartbeat, now=updated_ms / 1000)
+    assert "signal spool refuses new files in classes 'catchup', 'current';" in alerts[0].message
+    quiet = dict(payload, spool_backpressured_classes=[])
+    without = {key: value for key, value in payload.items() if key != "spool_backpressured_classes"}
+    for rows in (quiet, without):
+        heartbeat.write_text(json.dumps(rows))
+        alerts = liveness.evaluate_engine_heartbeat(unit, heartbeat, now=updated_ms / 1000)
+        assert alerts[0].message == (
+            f"{unit} reports 'degraded': LONG cycle is 370s old (limit 180s)"
+        )
+
+
 def test_incomplete_ticker_coverage_says_how_short_the_fill_is(tmp_path: Path) -> None:
     heartbeat = tmp_path / "heartbeat.json"
     payload = {

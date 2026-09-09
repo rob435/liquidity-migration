@@ -311,6 +311,19 @@ def _signal_worker_detail(payload: dict[str, object], *, now: float) -> str:
         reasons.append(f"{ticker_quarantined:g} ticker topics quarantined")
     if kline_quarantined is not None and kline_quarantined > 0:
         reasons.append(f"{kline_quarantined:g} kline topics quarantined")
+    # A spool class at its own cap refuses that class's new files while the
+    # aggregate spool_backpressured stays false, so the only other symptom is a
+    # lane whose cycle clock stops advancing. This clause is the cause; the
+    # cycle ages below are its effect, and they read first without it.
+    blocked_classes = payload.get("spool_backpressured_classes")
+    if isinstance(blocked_classes, list):
+        named = sorted({row for row in blocked_classes if isinstance(row, str) and row})
+        if named:
+            reasons.append(
+                "signal spool refuses new files in "
+                + ("class " if len(named) == 1 else "classes ")
+                + ", ".join(f"{row!r}" for row in named)
+            )
     now_ms = now * 1000
     for lane, completed_key, cadence_key, due_key in (
         ("LONG", "last_long_cycle_completed_wall_ts_ms", "long_cycle_cadence_ms", None),

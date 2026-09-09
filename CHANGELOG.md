@@ -10,6 +10,96 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-09 — Incident id `host-22826ce0bb838311`, first page 07:08:08 UTC: the mexc signal worker's LONG lane stopped completing at 07:04:53 and its watchdog has paged CRITICAL every 30 s since, with the age climbing one second per second — `193s` at 07:08:08 through `345s` at 07:10:39. The carry lane in the same worker stays fresh. Nothing is impaired in money terms: the mexc realm holds no positions, `orders_sent=0`, and its futures wallet is empty. The cause is read off the heartbeat: the worker's `current` signal-spool class is at its 8-file cap, so every `LongWatermark` commit is refused and the lane's completion clock cannot advance, while a carry watermark coalesces onto an already-pending path, projects no new file, and is admitted. The repository's own fault is that the page never says so — the heartbeat publishes `spool_backpressured_classes=["current"]` next to the aggregate `spool_backpressured=false`, the watchdog reads only the aggregate, and the operator gets the effect (`LONG cycle is 345s old`) with no mention of the spool. Fixed: the degraded reason now names the blocked class. Why `current` is not draining is not established, and the reading that settles it is named below.**
+  - The chain. `advance_kline_watermark`
+    (`engine/signal-worker/src/live.rs:1231-1236`) publishes the LONG watermark
+    only when no kline repair job is outstanding, and
+    `long_watermark` (`:1777-1786`) advances
+    `last_long_cycle_completed_wall_ts_ms` only when the commit takes.
+    `commit_with_receipt` (`:2014-2018`) calls the commit taken when
+    `last_input_sequence` reaches the event's sequence. It does not:
+    `apply_many_and_commit` refuses the whole batch and returns no observations
+    when a projected spool class is at its cap
+    (`engine/signal-worker/src/worker.rs:2861-2879`), and `LongWatermark`
+    projects one `current` file whenever `long_feature_batch` is not already
+    pending (`:3056-3063`). `CURRENT_SPOOL_FILE_CAP` is 8 (`:81`). So the lane
+    is refused silently, every kline tick, and the only symptom is the clock.
+  - Why carry survives it. `CarryWatermark` projects a `current` file only when
+    `carry_feature_batch` or `readiness` is absent from
+    `pending_replaceable_paths` (`worker.rs:3096-3102`). With both pending the
+    projection is empty, no class is tested, and the commit is admitted onto
+    the existing replaceable path. That asymmetry is why one lane of one worker
+    stalls while the other reports on cadence — and why the page reads as a
+    LONG-only fault when the spool is realm-wide.
+  - The reading. [Diagnose run
+    `34322545689`](https://github.com/rob435/liquidity-migration/actions/runs/34322545689)
+    (07:10:53–07:11:08) has the mexc worker at 07:11:03.247 reading
+    `status=degraded`, `last_long_cycle_completed_wall_ts_ms` 07:04:53.362 (369
+    s), `last_carry_cycle_completed_wall_ts_ms` 07:10:53.448 (10 s),
+    `spool_backpressured=false`, `spool_backpressured_classes=["current"]`,
+    `bybit_ws_ticker_coverage_complete=true`, `bybit_ws_gap_open=false`,
+    `long_output_sequence=18`, `carry_output_sequence=179`. Demo and mainnet
+    both read `ready` with both lanes inside 30 s and no blocked class. The
+    mexc engine is active on `engine_commit=d835b62` at `uptime_s=12615`,
+    `market_events=1221332`, `may_open=true`, `strategy_errors=[]`,
+    `entry_blockers=0`, no positions; `market_events` counts venue frames, not
+    spool rows, so it is not evidence that the engine is retiring files. The
+    worker's own journal holds nothing but its hourly instrument-lane notice,
+    last at 06:40:55 — a stalled lane and a blocked spool class log nothing.
+  - Producer lines. The reason text is
+    `scripts/runtime/check_fleet_liveness.py:337-340`, the alert key
+    `worker-status:{unit}` is `:371-381`, and the realm watchdog's exit 1 on a
+    CRITICAL is `:1602`. The host watchdog reads the failed realm unit and
+    pages `watchdog:mexc`, which is the `new_critical_refs` of this fire.
+  - Fix. `_signal_worker_detail` reads `spool_backpressured_classes`, keeps only
+    non-empty strings, sorts them, and appends one clause — `signal spool
+    refuses new files in class 'current'`, or `classes 'catchup', 'current'` —
+    ahead of the cycle ages, because the spool is the cause and the ages are
+    its effect. A worker that publishes an empty list or no such field reads
+    exactly as before, so demo, mainnet and every heartbeat without the field
+    are unchanged. No alert key moves, so no reference table needs a new row.
+  - Proof. `test_a_blocked_spool_class_is_named_beside_the_stalled_lane` builds
+    the 07:11:03 mexc heartbeat and asserts the whole message, `… reports
+    'degraded': signal spool refuses new files in class 'current'; LONG cycle
+    is 370s old (limit 180s)`. At the parent commit it fails against the exact
+    production text: `- egraded': signal spool refuses new files in class
+    'current'; LONG cycle is 370s old (limit 180s)` against `+ egraded': LONG
+    cycle is 370s old (limit 180s)`. Two-class and empty-list cases hold, and
+    the absent-field case asserts the old message byte for byte. 98 liveness
+    tests pass; `tests/scripts`, `tests/ops`, `tests/repo` and `tests/policy`
+    go 693 passed against the parent's 692, with the same 11 failures and 10
+    collection errors this container has either way (missing rsync, ssh,
+    rclone, numpy, websocket-client). Ruff and mypy clean. No venv or Rust
+    toolchain here, so `scripts/dev.sh check` did not run locally; the change is
+    Python-only.
+  - Not established, and the one reading that settles it. Why the `current`
+    class holds at least 8 undrained files. The class clears only through
+    `refresh_spool_inventory_if_needed` (`worker.rs:3171-3199`), which re-reads
+    the inventory only once a replaceable path or a class's oldest path has
+    disappeared, so a persistent block means the mexc engine has retired no
+    `current` file since about 07:04:5x. The settling reading is a listing of
+    `/var/lib/liquidity-migration-signal-worker-mexc/spool` by kind — file
+    count, bytes, and the oldest file's name and age — beside the engine's
+    signal-intake state. `mode=diagnose` does not take it today; the digest
+    prints the blocked-class field and no spool inventory. Whether to extend
+    the read-only diagnostic to take it is the owner's call.
+  - Also untaken, and the owner's call. The first page, at 07:08:08, read
+    `ticker coverage incomplete (160/160 rows, 160/160 topics accepted)` — a
+    line that contradicts itself. The counts come from the whole ticker store
+    (`bybit_ws.rs:305-306`) while the verdict counts only rows whose mark is
+    fresh inside `mark_max_age_ms` (`:236-240`), so a full store with stale
+    marks prints as complete-but-incomplete. It cleared by 07:08:37 and is not
+    this stall.
+  - Concurrent work. The mexc `worker-status:` page also fired incident
+    `mexc-a361f5d18861421a`'s routine at 07:08:08 (that id hashes the realm's
+    alert keys, not a cause). That session dispatched [deploy run
+    `34322539866`](https://github.com/rob435/liquidity-migration/actions/runs/34322539866)
+    for `b058e99` at 07:10:38, which restarts the mexc worker. A fresh worker
+    re-reads the spool inventory from disk, so the restart clears the block
+    only if the spool has actually drained; if the engine is still retiring
+    nothing, the new process blocks again on its first eight `current` files
+    and the page returns. The restart is not the fix and is not counted as one.
+
 - **2026-09-09 — Incident id `host-51b05439c4f09794`, 06:46:12 UTC: the fleet's Telegram alert channel is refused with `HTTP 400` on every send, so the mainnet and host watchdogs exit 1 every 30 s and no watchdog page has reached the owner by Telegram since. The engines are untouched. Why the venue refuses is still not established, and that is the repository's fault: Telegram names the cause in the refusal's JSON `description`, and `transport_error` threw it away for every plain `HTTPError`, so the journal reads a bare `HTTP 400` an operator cannot act on. That is the same defect the 2026-09-07 entry fixed for the on-call fire path and never applied to the Telegram path. Fixed: the refusal reason is read back bounded, credential-redacted, and printed. Deploy receipt below. The chat-side cause is the owner's to clear once the next refusal names it.**
   - The chain. `liquidity-migration-mainnet-liveness` sends its due
     rolling-loss NOTICE at 06:46:12 and prints `CRITICAL telegram: cannot
