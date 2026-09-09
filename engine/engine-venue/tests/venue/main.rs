@@ -16,6 +16,8 @@ mod hyperliquid_requests;
 #[cfg(feature = "lighter")]
 mod lighter_requests;
 #[cfg(feature = "mexc")]
+mod mexc_audit;
+#[cfg(feature = "mexc")]
 mod mexc_exact_orders;
 #[cfg(feature = "mexc")]
 mod mexc_private_stream;

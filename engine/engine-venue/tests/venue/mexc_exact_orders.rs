@@ -10,7 +10,7 @@ use engine_venue::{MexcGateway, MexcInventoryProbe, MexcRealm, RealmCredentials}
 async fn exact_contracts_and_prices_reach_wire_and_fractional_contracts_are_refused() {
     let server = TestServer::start(|request, _| {
         if request.path == "/api/v1/contract/detail" {
-            (200, r#"{"success":true,"code":0,"data":[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.0000000000001,"minVol":1,"maxVol":100,"apiAllowed":true}]}"#.into())
+            (200, r#"{"success":true,"code":0,"data":[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.0000000000001,"minVol":1,"maxVol":100,"apiAllowed":true,"volUnit":1,"state":0,"positionOpenType":3,"stopOnlyFair":false,"futureType":1,"minLeverage":1}]}"#.into())
         } else { (200, r#"{"success":true,"code":0,"data":"7"}"#.into()) }
     }).await;
     let mut gw = MexcGateway::for_test(
@@ -103,7 +103,7 @@ async fn a_cancel_names_one_order_as_an_object_and_reads_the_orders_own_result()
     // a list body is refused with `600 Parameter error` and the order rests on.
     let server = TestServer::start(|request, _| {
         if request.path == "/api/v1/contract/detail" {
-            return (200, r#"{"success":true,"code":0,"data":[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":100,"apiAllowed":true}]}"#.into());
+            return (200, r#"{"success":true,"code":0,"data":[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":100,"apiAllowed":true,"volUnit":1,"state":0,"positionOpenType":3,"stopOnlyFair":false,"futureType":1,"minLeverage":1}]}"#.into());
         }
         if request.path == "/api/v1/private/order/cancel_with_external" {
             let body: serde_json::Value = serde_json::from_str(&request.body).unwrap_or_default();
@@ -144,7 +144,7 @@ async fn a_cancel_names_one_order_as_an_object_and_reads_the_orders_own_result()
 async fn independent_catalog_installs_contract_multipliers_before_a_mutation_without_another_read()
 {
     let server = TestServer::start(|request, _| if request.path == "/api/v1/contract/detail" {
-        (200, r#"{"success":true,"code":0,"data":[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":100,"apiAllowed":true}]}"#.into())
+        (200, r#"{"success":true,"code":0,"data":[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":100,"apiAllowed":true,"volUnit":1,"state":0,"positionOpenType":3,"stopOnlyFair":false,"futureType":1,"minLeverage":1}]}"#.into())
     } else { (200, r#"{"success":true,"code":0,"data":"7"}"#.into()) }).await;
     let mut gw = MexcGateway::for_test(
         &server.base_url(),
@@ -185,7 +185,7 @@ async fn independent_catalog_installs_contract_multipliers_before_a_mutation_wit
 #[tokio::test(start_paused = true)]
 async fn independent_account_recovery_retains_contract_units_and_requested_ids() {
     let server = TestServer::start(|request, _| match request.path.as_str() {
-        "/api/v1/contract/detail" => (200, r#"{"success":true,"code":0,"data":[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":100,"apiAllowed":true}]}"#.into()),
+        "/api/v1/contract/detail" => (200, r#"{"success":true,"code":0,"data":[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":100,"apiAllowed":true,"volUnit":1,"state":0,"positionOpenType":3,"stopOnlyFair":false,"futureType":1,"minLeverage":1}]}"#.into()),
         "/api/v1/private/account/assets" => (200, r#"{"success":true,"code":0,"data":[{"currency":"USDT","equity":1500.25,"availableBalance":1200.5}]}"#.into()),
         "/api/v1/private/position/open_positions" => (200, r#"{"success":true,"code":0,"data":[{"positionId":"7","symbol":"BTC_USDT","holdVol":5,"positionType":1,"holdAvgPrice":109777.5,"leverage":2,"state":1}]}"#.into()),
         "/api/v1/private/stoporder/open_orders" => (200, r#"{"success":true,"code":0,"data":[{"positionId":"7","orderId":"0","stopLossPrice":101000}] }"#.into()),
@@ -226,7 +226,7 @@ async fn independent_account_recovery_retains_contract_units_and_requested_ids()
 #[tokio::test(start_paused = true)]
 async fn recovery_catalog_install_refreshes_native_units_without_metadata_reads() {
     let server = TestServer::start(|request, prior| match request.path.as_str() {
-        "/api/v1/contract/detail" if prior == 0 => (200, r#"{"success":true,"code":0,"data":[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":100,"apiAllowed":true}]}"#.into()),
+        "/api/v1/contract/detail" if prior == 0 => (200, r#"{"success":true,"code":0,"data":[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":100,"apiAllowed":true,"volUnit":1,"state":0,"positionOpenType":3,"stopOnlyFair":false,"futureType":1,"minLeverage":1}]}"#.into()),
         "/api/v1/contract/detail" => (503, "metadata unavailable".into()),
         "/api/v1/private/account/assets" => (200, r#"{"success":true,"code":0,"data":[{"currency":"USDT","equity":1500.25,"availableBalance":1200.5}]}"#.into()),
         "/api/v1/private/position/open_positions" => (200, r#"{"success":true,"code":0,"data":[{"positionId":"7","symbol":"BTC_USDT","holdVol":5,"positionType":1,"holdAvgPrice":109777.5,"leverage":2,"state":1}]}"#.into()),
@@ -286,9 +286,9 @@ async fn recovery_catalog_install_refreshes_native_units_without_metadata_reads(
 
 const CONTRACT_DETAIL: &str = r#"{"success":true,"code":0,"data":[
     {"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT",
-     "contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":100,"apiAllowed":true},
+     "contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":100,"apiAllowed":true,"volUnit":1,"state":0,"positionOpenType":3,"stopOnlyFair":false,"futureType":1,"minLeverage":1},
     {"symbol":"ETH_USDT","baseCoin":"ETH","quoteCoin":"USDT","settleCoin":"USDT",
-     "contractSize":0.01,"priceUnit":0.01,"minVol":1,"maxVol":100,"apiAllowed":true}]}"#;
+     "contractSize":0.01,"priceUnit":0.01,"minVol":1,"maxVol":100,"apiAllowed":true,"volUnit":1,"state":0,"positionOpenType":3,"stopOnlyFair":false,"futureType":1,"minLeverage":1}]}"#;
 
 #[tokio::test(start_paused = true)]
 async fn the_public_ping_is_the_clock_a_history_window_is_bounded_by() {
@@ -321,7 +321,7 @@ async fn the_public_ping_is_the_clock_a_history_window_is_bounded_by() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn the_inventory_probe_names_the_account_by_its_key_and_never_signs_a_mutation() {
+async fn the_inventory_probe_uses_the_bound_physical_account_and_never_signs_a_mutation() {
     let server = TestServer::start(|request, _| match request.path.as_str() {
         "/api/v1/private/account/assets" => (
             200,
@@ -336,10 +336,9 @@ async fn the_inventory_probe_names_the_account_by_its_key_and_never_signs_a_muta
 
     assert_eq!(who.venue, "mexc");
     assert_eq!(who.realm, "mexc_mainnet");
-    // MEXC publishes no account number, so the key names the account. The
-    // probe and the gateway must derive the same one from the same key.
-    assert!(who.user_id.starts_with("key-"), "{}", who.user_id);
-    assert_eq!(who.user_id.len(), "key-".len() + 16);
+    // Local constructors bind credentials to the same explicit fixture UID.
+    // Production constructors require the root-controlled binding registry.
+    assert_eq!(who.user_id, "uid-42");
     let mut gateway = MexcGateway::for_test(
         &server.base_url(),
         MexcRealm::Mainnet,
@@ -356,7 +355,7 @@ async fn the_inventory_probe_names_the_account_by_its_key_and_never_signs_a_muta
         MexcRealm::Mainnet,
         MexcRealm::Mainnet.credentials_for_test("anotherKey", "secret"),
     );
-    assert_ne!(other.account_identity().await.unwrap().user_id, who.user_id);
+    assert_eq!(other.account_identity().await.unwrap().user_id, who.user_id);
 }
 
 #[tokio::test(start_paused = true)]

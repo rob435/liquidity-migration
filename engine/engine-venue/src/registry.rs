@@ -1014,7 +1014,7 @@ mod tests {
     fn production_readiness_is_explicit_for_every_registered_realm() {
         for venue in VenueName::ALL.into_iter().filter(|name| name.compiled()) {
             match venue {
-                VenueName::BybitDemo | VenueName::BybitMainnet | VenueName::MexcMainnet => {
+                VenueName::BybitDemo | VenueName::BybitMainnet => {
                     assert_eq!(venue.readiness(), VenueReadiness::LiveProven);
                     venue.require_engine_run_ready().unwrap();
                 }
@@ -1022,7 +1022,7 @@ mod tests {
                     assert_eq!(venue.readiness(), VenueReadiness::TestnetCanary);
                     venue.require_engine_run_ready().unwrap();
                 }
-                VenueName::HyperliquidMainnet => {
+                VenueName::HyperliquidMainnet | VenueName::MexcMainnet => {
                     assert_eq!(venue.readiness(), VenueReadiness::LiveCanary);
                     let error = venue.require_engine_run_ready().unwrap_err().to_string();
                     assert!(error.contains("live-canary"), "{error}");

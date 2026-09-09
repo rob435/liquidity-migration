@@ -30,8 +30,8 @@ use engine_types::orders::{
 use engine_types::risk::AccountView;
 use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
+use super::account_binding::AccountBinding;
 use super::contracts::{Ceiling, Contracts};
 use super::parse::{
     id_text, parse_assets, parse_inventory_assets, parse_inventory_positions,
@@ -39,7 +39,7 @@ use super::parse::{
     parse_positions, venue_result, SETTLE_CURRENCY,
 };
 use super::realm::MexcRealm;
-use super::rest::RestClient;
+use super::rest::{OperationClass, RestClient};
 use super::VENUE_NAME;
 use crate::creds::Credentials;
 use crate::fmt::venue_num;
@@ -80,8 +80,7 @@ const VOL_TYPE_POSITION: i64 = 2;
 /// one it guarded — a new position, carrying no stop of its own.
 const REVERSE_NO: i64 = 2;
 
-/// Trigger on the last traded price.
-const TREND_LAST_PRICE: i64 = 1;
+const CATALOG_KIND_V2: &str = "mexc-execution-v2";
 
 /// The engine's own pages of a venue list. Enough to cover any account this
 /// engine runs; a cursor that never empties is a venue fault, not a reason to
@@ -103,11 +102,13 @@ fn execution_page_complete(symbol: &str, page: u32, raw_count: usize) -> Result<
 
 pub struct MexcGateway {
     realm: MexcRealm,
+    account_binding: AccountBinding,
     rest: RestClient,
     symbols: engine_public::symbols::SymbolCatalog,
     /// The venue's contract table, read once and kept. Every size that crosses
     /// this boundary needs it, so an adapter without it can convert nothing.
     contracts: Contracts,
+    lookup_catalog: std::sync::Arc<std::sync::RwLock<Contracts>>,
 }
 
 impl MexcGateway {
@@ -118,13 +119,13 @@ impl MexcGateway {
         exact: Option<&engine_types::order_terms::ExactStopTerms>,
     ) -> Result<(), VenueError> {
         let name = self.name_of(symbol)?.clone();
-        // Proves the symbol is one this venue will take API orders on before
-        // anything is sent about it.
-        self.contracts().await?.tradable(&name)?;
+        let loss_trend = self.contracts().await?.existing(&name)?.stop_trend()?;
         let position_id = if let Some(terms) = exact {
-            let venue_symbol = self.contracts.tradable(&name)?.venue_symbol.clone();
-            let raw: Box<serde_json::value::RawValue> =
-                self.rest.get_signed_as(PATH_POSITIONS, &[]).await?;
+            let venue_symbol = self.contracts.existing(&name)?.venue_symbol.clone();
+            let raw: Box<serde_json::value::RawValue> = self
+                .rest
+                .get_signed_as_for(PATH_POSITIONS, &[], OperationClass::Protection)
+                .await?;
             let (id, side) = crate::stop_state::mexc(raw.get(), &venue_symbol)?;
             if side != terms.position_side {
                 return Err(VenueError::BadRequest(
@@ -133,7 +134,7 @@ impl MexcGateway {
             }
             id
         } else {
-            self.position_ids()
+            self.position_ids(OperationClass::Protection)
                 .await?
                 .get(&name)
                 .cloned()
@@ -168,7 +169,7 @@ impl MexcGateway {
                 let body = json!({
                     "stopPlanOrderId": record_id,
                     "stopLossPrice": price,
-                    "lossTrend": TREND_LAST_PRICE,
+                    "lossTrend": loss_trend,
                 });
                 self.rest.post_signed(PATH_STOP_CHANGE, &body).await?
             }
@@ -176,7 +177,7 @@ impl MexcGateway {
                 let body = json!({
                     "positionId": position_id,
                     "stopLossPrice": price,
-                    "lossTrend": TREND_LAST_PRICE,
+                    "lossTrend": loss_trend,
                     // Stated, never defaulted. MEXC documents no default for
                     // either, and the wrong one on `stopLossReverse` turns a
                     // stop-out into an opposite position that carries no stop.
@@ -199,7 +200,8 @@ impl MexcGateway {
     /// before any socket is opened.
     pub fn new(realm: MexcRealm, symbols: Vec<Symbol>) -> Result<Self, VenueError> {
         let creds = realm.credentials()?;
-        let built = Self::build(realm, realm.rest_base(), creds, symbols);
+        let binding = AccountBinding::load(creds.key())?;
+        let built = Self::build_bound(realm, realm.rest_base(), creds, symbols, binding);
         if built.rest.base() != realm.rest_base() {
             return Err(VenueError::BadRequest(format!(
                 "realm {realm} resolved to {}, but only {} is permitted for that realm",
@@ -315,11 +317,24 @@ impl MexcGateway {
     }
 
     fn build(realm: MexcRealm, base_url: &str, creds: Credentials, symbols: Vec<Symbol>) -> Self {
+        let binding = AccountBinding::fixture(creds.key());
+        Self::build_bound(realm, base_url, creds, symbols, binding)
+    }
+
+    fn build_bound(
+        realm: MexcRealm,
+        base_url: &str,
+        creds: Credentials,
+        symbols: Vec<Symbol>,
+        account_binding: AccountBinding,
+    ) -> Self {
         Self {
             realm,
+            account_binding,
             rest: RestClient::new(base_url, creds),
             symbols: engine_public::symbols::SymbolCatalog::from_names(symbols),
             contracts: Contracts::default(),
+            lookup_catalog: Default::default(),
         }
     }
 
@@ -337,15 +352,28 @@ impl MexcGateway {
         if self.contracts.is_empty() {
             let body: Box<serde_json::value::RawValue> =
                 self.rest.get_public_as(PATH_CONTRACT_DETAIL, "").await?;
-            self.contracts = Contracts::parse_raw(body.get())?;
+            self.remember_contracts(Contracts::parse_raw(body.get())?)?;
         }
         Ok(&self.contracts)
     }
 
+    fn remember_contracts(&mut self, contracts: Contracts) -> Result<(), VenueError> {
+        *self
+            .lookup_catalog
+            .write()
+            .map_err(|_| VenueError::BadReply("MEXC lookup catalog lock poisoned".into()))? =
+            contracts.clone();
+        self.contracts = contracts;
+        Ok(())
+    }
+
     /// Every position the venue is holding, and its id, so a stop can be
     /// addressed. Keyed by the engine's symbol.
-    async fn position_ids(&mut self) -> Result<HashMap<Symbol, String>, VenueError> {
-        let body = self.rest.get_signed(PATH_POSITIONS, &[]).await?;
+    async fn position_ids(
+        &mut self,
+        class: OperationClass,
+    ) -> Result<HashMap<Symbol, String>, VenueError> {
+        let body = self.rest.get_signed_for(PATH_POSITIONS, &[], class).await?;
         let data = venue_result(&body)?;
         let rows = data
             .as_array()
@@ -372,7 +400,10 @@ impl MexcGateway {
     /// object carries no stop field, so this is the only honest answer to
     /// "does this position have a stop".
     async fn stop_records(&self) -> Result<Value, VenueError> {
-        let body = self.rest.get_signed(PATH_STOP_OPEN, &[]).await?;
+        let body = self
+            .rest
+            .get_signed_for(PATH_STOP_OPEN, &[], OperationClass::Protection)
+            .await?;
         Ok(venue_result(&body)?.clone())
     }
 
@@ -429,17 +460,15 @@ impl VenueGateway for MexcGateway {
     }
 
     async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError> {
-        // MEXC publishes no account number: no endpoint returns one, and
-        // neither positions nor orders carry a uid. What names the account is
-        // the key that opens it — but the key itself is not written to a lock
-        // file on disk, so this is a digest of it. Two engines holding the
-        // same key reach the same name, which is the whole job.
+        let user_id = self
+            .account_binding
+            .identity_for(self.rest.api_key())?
+            .to_owned();
         let body = self.rest.get_signed(PATH_ASSETS, &[]).await?;
         venue_result(&body)?;
-        let digest = Sha256::digest(self.rest.api_key().as_bytes());
         Ok(AccountIdentity {
             venue: VENUE_NAME.to_string(),
-            user_id: format!("key-{}", hex::encode(&digest[..8])),
+            user_id,
             realm: self.realm.as_str().to_string(),
         })
     }
@@ -455,8 +484,14 @@ impl VenueGateway for MexcGateway {
             OrderKind::Market => Ceiling::Market,
             OrderKind::Limit { .. } => Ceiling::Limit,
         };
-        let (venue_symbol, vol) = {
-            let contract = self.contracts().await?.tradable(&name)?;
+        let (venue_symbol, vol, loss_trend) = {
+            let contracts = self.contracts().await?;
+            let contract = if req.reduce_only {
+                contracts.existing(&name)?
+            } else {
+                contracts.tradable(&name)?
+            };
+            let volume_unit = contract.require_order_capability()?;
             (
                 contract.venue_symbol.clone(),
                 match terms {
@@ -481,14 +516,21 @@ impl VenueGateway for MexcGateway {
                                 "exact quantity exceeds contract order ceiling",
                             ));
                         }
-                        terms
+                        let vol = terms
                             .quantity
                             .checked_div(&contract.exact_contract_size.value)
                             .and_then(|vol| vol.to_u64_exact())
-                            .map_err(crate::order_wire::error)?
+                            .map_err(crate::order_wire::error)?;
+                        if vol % volume_unit != 0 {
+                            return Err(crate::order_wire::error(
+                                "exact native volume is off the volUnit grid",
+                            ));
+                        }
+                        vol
                     }
                     None => contract.vol_for(req.qty, ceiling)?,
                 },
+                req.stop.map(|_| contract.stop_trend()).transpose()?,
             )
         };
 
@@ -516,7 +558,9 @@ impl VenueGateway for MexcGateway {
         // on, and its size is what tracks a position that later changes.
         if let Some(stop) = req.stop {
             body["stopLossPrice"] = json!(crate::order_wire::stop(req, stop.trigger_px)?);
-            body["lossTrend"] = json!(TREND_LAST_PRICE);
+            body["lossTrend"] = json!(loss_trend.ok_or_else(|| {
+                VenueError::BadRequest("stop trigger capability is unavailable".into())
+            })?);
         }
 
         let reply = self.rest.post_signed(PATH_ORDER_CREATE, &body).await?;
@@ -538,7 +582,7 @@ impl VenueGateway for MexcGateway {
         let venue_symbol = self
             .contracts()
             .await?
-            .tradable(&name)?
+            .existing(&name)?
             .venue_symbol
             .clone();
         // One order, as an object. The list form belongs to the batch
@@ -552,7 +596,20 @@ impl VenueGateway for MexcGateway {
         let data = venue_result(&reply)?;
         // The envelope says the request parsed; the order's own result is
         // inside it, and a non-zero code there is the refusal.
-        let error_code = data.get("errorCode").and_then(Value::as_i64).unwrap_or(0);
+        let error_code = data
+            .get("errorCode")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| {
+                VenueError::BadReply("MEXC cancellation has no integer errorCode".into())
+            })?;
+        if data
+            .get("externalOid")
+            .is_some_and(|id| id.as_str() != Some(client_order_id))
+        {
+            return Err(VenueError::BadReply(
+                "MEXC cancellation reply names another order or has an invalid externalOid".into(),
+            ));
+        }
         if error_code != 0 {
             return Err(VenueError::Rejected {
                 code: error_code,
@@ -591,8 +648,9 @@ impl VenueGateway for MexcGateway {
         symbol: SymbolId,
         terms: &engine_types::order_terms::ExactStopTerms,
     ) -> Result<(), VenueError> {
+        let name = self.name_of(symbol)?.clone();
         terms
-            .validate_wire_grid(&self.contracts.tradable(self.name_of(symbol)?)?.exact_spec)
+            .validate_wire_grid(&self.contracts().await?.existing(&name)?.exact_spec)
             .map_err(crate::order_wire::error)?;
         self.set_stop_terms(
             symbol,
@@ -606,23 +664,51 @@ impl VenueGateway for MexcGateway {
     }
 
     async fn set_leverage(&mut self, symbol: SymbolId, leverage: f64) -> Result<(), VenueError> {
+        // Reject before any network I/O; the core must never cache a value
+        // different from the integer sent to the venue.
+        if !leverage.is_finite()
+            || leverage < 1.0
+            || leverage.fract() != 0.0
+            || leverage >= i64::MAX as f64
+        {
+            return Err(VenueError::BadRequest(format!(
+                "MEXC leverage must be a positive, representable integer; received {leverage}"
+            )));
+        }
         let name = self.name_of(symbol)?.clone();
-        let (venue_symbol, max_leverage) = {
+        let (venue_symbol, min_leverage, max_leverage) = {
             let contract = self.contracts().await?.tradable(&name)?;
-            (contract.venue_symbol.clone(), contract.max_leverage)
+            let bounds = contract
+                .execution
+                .min_leverage
+                .zip(contract.execution.max_leverage)
+                .filter(|(min, max)| {
+                    min.is_finite()
+                        && max.is_finite()
+                        && *min >= 1.0
+                        && *max >= *min
+                        && min.fract() == 0.0
+                        && max.fract() == 0.0
+                })
+                .ok_or_else(|| {
+                    VenueError::BadRequest(format!(
+                        "{} has no valid leverage bounds",
+                        contract.venue_symbol
+                    ))
+                })?;
+            (contract.venue_symbol.clone(), bounds.0, bounds.1)
         };
-        if !leverage.is_finite() || leverage < 1.0 {
+        if leverage < min_leverage || leverage > max_leverage {
             return Err(VenueError::BadRequest(format!(
-                "{leverage} is not a leverage MEXC will take"
+                "{venue_symbol} permits leverage {min_leverage}..={max_leverage}, and this asks for {leverage}"
             )));
         }
-        if leverage > max_leverage {
-            return Err(VenueError::BadRequest(format!(
-                "{venue_symbol} caps leverage at {max_leverage}, and this asks for {leverage}"
-            )));
-        }
-        let want = leverage.round() as i64;
-        let held = self.position_ids().await?.get(&name).cloned();
+        let want = leverage as i64;
+        let held = self
+            .position_ids(OperationClass::Administration)
+            .await?
+            .get(&name)
+            .cloned();
         match held {
             // With a position open the call names it, and one call is the
             // whole job.
@@ -654,6 +740,10 @@ impl VenueGateway for MexcGateway {
         self.symbols.intern(symbol)
     }
 
+    fn take_rate_wait_ns(&mut self) -> Option<u64> {
+        Some(self.rest.take_mutation_wait_ns())
+    }
+
     async fn account_view(&mut self) -> Result<AccountView, VenueError> {
         self.contracts().await?;
         engine_types::orders::AccountRecoveryClient::account_view(
@@ -667,8 +757,10 @@ impl VenueGateway for MexcGateway {
         &self,
         checkpoint: &engine_types::orders::InstrumentCatalogCheckpoint,
     ) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
-        let pages = crate::catalog_checkpoint::decode(checkpoint, "mexc", self.rest.base())?;
-        let catalog = catalog_from_pages(self.rest.base(), pages)?;
+        let version = checkpoint_version(checkpoint)?;
+        let pages =
+            crate::catalog_checkpoint::decode(checkpoint, catalog_kind(version), self.rest.base())?;
+        let catalog = catalog_from_pages_version(self.rest.base(), pages, version)?;
         crate::catalog_checkpoint::check(checkpoint, catalog)
     }
     fn install_instrument_catalog(
@@ -685,8 +777,7 @@ impl VenueGateway for MexcGateway {
                 "catalog belongs to another venue endpoint".into(),
             ));
         }
-        self.contracts = snapshot.data.clone();
-        Ok(())
+        self.remember_contracts(snapshot.data.clone())
     }
 
     fn account_recovery_client(
@@ -700,12 +791,14 @@ impl VenueGateway for MexcGateway {
     ) -> Option<Box<dyn engine_types::orders::InstrumentCatalogClient>> {
         Some(Box::new(LookupClient {
             rest: self.rest.clone(),
+            catalog: self.lookup_catalog.clone(),
         }))
     }
 
     fn order_lookup_client(&self) -> Option<Box<dyn engine_types::orders::OrderLookupClient>> {
         Some(Box::new(LookupClient {
             rest: self.rest.clone(),
+            catalog: self.lookup_catalog.clone(),
         }))
     }
 
@@ -737,7 +830,7 @@ impl VenueGateway for MexcGateway {
     ) -> Result<Vec<(Symbol, engine_types::numeric::ExactInstrumentSpec)>, VenueError> {
         let body: Box<serde_json::value::RawValue> =
             self.rest.get_public_as(PATH_CONTRACT_DETAIL, "").await?;
-        self.contracts = Contracts::parse_raw(body.get())?;
+        self.remember_contracts(Contracts::parse_raw(body.get())?)?;
         Ok(self.contracts.instrument_specs())
     }
 
@@ -747,7 +840,7 @@ impl VenueGateway for MexcGateway {
         // tick can change under it.
         let body: Box<serde_json::value::RawValue> =
             self.rest.get_public_as(PATH_CONTRACT_DETAIL, "").await?;
-        self.contracts = Contracts::parse_raw(body.get())?;
+        self.remember_contracts(Contracts::parse_raw(body.get())?)?;
         Ok(self.contracts.rules())
     }
 
@@ -815,8 +908,15 @@ impl MexcInventoryProbe {
             key_var,
             secret_var,
         )?;
+        let binding = AccountBinding::load(credentials.key())?;
         Ok(Self {
-            gateway: MexcGateway::build(realm, realm.rest_base(), credentials, Vec::new()),
+            gateway: MexcGateway::build_bound(
+                realm,
+                realm.rest_base(),
+                credentials,
+                Vec::new(),
+                binding,
+            ),
         })
     }
 
@@ -842,6 +942,7 @@ struct CatalogSnapshot {
     base: String,
     pages: Vec<String>,
     data: Contracts,
+    metadata_version: u8,
 }
 
 impl engine_types::orders::InstrumentCatalogCache for CatalogSnapshot {
@@ -851,19 +952,25 @@ impl engine_types::orders::InstrumentCatalogCache for CatalogSnapshot {
     fn checkpoint(
         &self,
     ) -> Result<engine_types::orders::InstrumentCatalogCacheSnapshot, VenueError> {
-        crate::catalog_checkpoint::encode("mexc", &self.base, &self.pages)
+        crate::catalog_checkpoint::encode(
+            catalog_kind(self.metadata_version),
+            &self.base,
+            &self.pages,
+        )
     }
     fn retain_previous(
         &self,
         checkpoint: &engine_types::orders::InstrumentCatalogCheckpoint,
     ) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
-        let previous = crate::catalog_checkpoint::decode(checkpoint, "mexc", &self.base)?;
+        let version = checkpoint_version(checkpoint)?;
+        let previous =
+            crate::catalog_checkpoint::decode(checkpoint, catalog_kind(version), &self.base)?;
         crate::catalog_checkpoint::check(
             checkpoint,
-            catalog_from_pages(&self.base, previous.clone())?,
+            catalog_from_pages_version(&self.base, previous.clone(), version)?,
         )?;
         let pages = crate::catalog_checkpoint::merge_pages("mexc", previous, self.pages.clone())?;
-        let catalog = catalog_from_pages(&self.base, pages)?;
+        let catalog = catalog_from_pages_version(&self.base, pages, self.metadata_version)?;
         catalog.checkpoint()?.validate_bounds()?;
         Ok(catalog)
     }
@@ -880,6 +987,7 @@ impl engine_types::orders::InstrumentCatalogClient for LookupClient {
 
 struct LookupClient {
     rest: RestClient,
+    catalog: std::sync::Arc<std::sync::RwLock<Contracts>>,
 }
 #[engine_types::async_trait]
 impl engine_types::orders::OrderLookupClient for LookupClient {
@@ -888,19 +996,34 @@ impl engine_types::orders::OrderLookupClient for LookupClient {
         name: &str,
         client_order_id: &str,
     ) -> Result<engine_types::orders::OrderLookup, VenueError> {
-        let raw: Box<serde_json::value::RawValue> =
-            self.rest.get_public_as(PATH_CONTRACT_DETAIL, "").await?;
-        let contracts = Contracts::parse_raw(raw.get())?;
-        let contract = contracts.any(name).ok_or_else(|| {
-            VenueError::BadRequest("order lookup symbol has no contract metadata".into())
-        })?;
+        let retained = self
+            .catalog
+            .read()
+            .map_err(|_| VenueError::BadReply("MEXC lookup catalog lock poisoned".into()))?
+            .any(name)
+            .cloned();
+        let contract = match retained {
+            Some(contract) => contract,
+            None => {
+                let raw: Box<serde_json::value::RawValue> =
+                    self.rest.get_public_as(PATH_CONTRACT_DETAIL, "").await?;
+                Contracts::parse_raw(raw.get())?
+                    .any(name)
+                    .cloned()
+                    .ok_or_else(|| {
+                        VenueError::BadRequest(
+                            "order lookup symbol has no retained contract metadata".into(),
+                        )
+                    })?
+            }
+        };
         let path = format!(
             "/api/v1/private/order/external/{}/{}",
             crate::http::percent_encode(&contract.venue_symbol),
             crate::http::percent_encode(client_order_id)
         );
         let raw: Box<serde_json::value::RawValue> = self.rest.get_signed_as(&path, &[]).await?;
-        super::lookup::parse(raw.get(), name, client_order_id, contract)
+        super::lookup::parse(raw.get(), name, client_order_id, &contract)
     }
 }
 
@@ -908,13 +1031,45 @@ fn catalog_from_pages(
     base: &str,
     pages: Vec<String>,
 ) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+    catalog_from_pages_version(base, pages, 2)
+}
+
+fn catalog_kind(version: u8) -> &'static str {
+    if version == 1 {
+        "mexc"
+    } else {
+        CATALOG_KIND_V2
+    }
+}
+
+fn checkpoint_version(
+    checkpoint: &engine_types::orders::InstrumentCatalogCheckpoint,
+) -> Result<u8, VenueError> {
+    match checkpoint.cache.kind.as_str() {
+        "mexc" => Ok(1),
+        CATALOG_KIND_V2 => Ok(2),
+        _ => Err(VenueError::BadReply(
+            "unsupported MEXC catalog checkpoint kind".into(),
+        )),
+    }
+}
+
+fn catalog_from_pages_version(
+    base: &str,
+    pages: Vec<String>,
+    version: u8,
+) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
     if pages.len() != 1 {
         return Err(VenueError::BadReply(
             "catalog requires one metadata page".into(),
         ));
     }
     let raw = pages[0].as_str();
-    let catalog = Contracts::parse_raw(raw)?;
+    let catalog = if version == 1 {
+        Contracts::parse_checkpoint_v1(raw)?
+    } else {
+        Contracts::parse_raw(raw)?
+    };
     Ok(engine_types::orders::InstrumentCatalog {
         rules: catalog.rules(),
         specs: catalog.instrument_specs(),
@@ -922,6 +1077,7 @@ fn catalog_from_pages(
             pages,
             base: base.to_owned(),
             data: catalog,
+            metadata_version: version,
         })),
     })
 }

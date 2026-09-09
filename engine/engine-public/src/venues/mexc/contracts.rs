@@ -17,8 +17,7 @@
 //! own `baseCoin` and `quoteCoin` rather than guessed by cutting the string,
 //! because there is no rule that survives `1000PEPE_USDT` and friends.
 //!
-//! `apiAllowed` is per contract and the venue does set it false — an order on
-//! one of those is refused here, by name, rather than at the venue.
+//! Opening eligibility is distinct from retained identity for cleanup.
 
 use std::collections::HashMap;
 
@@ -41,8 +40,7 @@ pub struct Contract {
     pub exact_spec: engine_types::numeric::ExactInstrumentSpec,
     /// Price tick.
     pub price_unit: f64,
-    /// Smallest order, in contracts. The venue publishes 1 for every contract
-    /// it lists, and a step of one contract with it.
+    /// Smallest order, in contracts.
     pub min_vol: f64,
     /// Largest order, in contracts. The venue publishes two ceilings and they
     /// are not the same: `maxVol` applies to a market order and `limitMaxVol`
@@ -54,6 +52,22 @@ pub struct Contract {
     pub max_leverage: f64,
     /// Whether the venue permits API trading on this contract at all.
     pub api_allowed: bool,
+    pub execution: ExecutionCapabilities,
+}
+
+/// Native metadata, not inferred from API permission or a symbol's spelling.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecutionCapabilities {
+    pub volume_unit: Option<engine_types::numeric::ExactNumber>,
+    pub lifecycle_state: Option<i64>,
+    pub position_open_type: Option<i64>,
+    pub stop_only_fair: Option<bool>,
+    pub future_type: Option<i64>,
+    pub min_leverage: Option<f64>,
+    pub max_leverage: Option<f64>,
+    pub retained: bool,
+    /// Version 1 preserves historical grids; it never authorizes a new entry.
+    pub metadata_version: u8,
 }
 
 /// Which of the venue's two size ceilings applies.
@@ -66,14 +80,17 @@ pub enum Ceiling {
 impl Contract {
     /// The instrument rule the engine quantizes against.
     ///
-    /// The quantity step is the contract size, so a quantity the engine has
-    /// already quantized is a whole number of contracts by construction —
-    /// which is what makes [`Contract::vol_for`] able to refuse a fraction
-    /// rather than round one away.
+    /// Missing execution metadata retains a read-only legacy projection.
+    /// `require_order_capability` must succeed before using it for an order.
     pub fn rule(&self) -> InstrumentRule {
         InstrumentRule {
             tick_size: self.price_unit,
-            qty_step: self.contract_size,
+            qty_step: self
+                .exact_spec
+                .qty_step
+                .as_ref()
+                .and_then(|step| step.to_f64().ok())
+                .unwrap_or(self.contract_size),
             min_qty: self.min_vol * self.contract_size,
             // MEXC publishes no per-symbol minimum notional; the minimum is
             // expressed in contracts and is already carried by `min_qty`.
@@ -87,6 +104,7 @@ impl Contract {
     /// `0.3 / 0.1` is 2.9999999999999996, and truncating that would send one
     /// contract fewer than the risk kernel approved.
     pub fn vol_for(&self, base_qty: f64, ceiling: Ceiling) -> Result<u64, VenueError> {
+        let volume_unit = self.require_order_capability()?;
         let max_vol = match ceiling {
             Ceiling::Limit => self.limit_max_vol,
             Ceiling::Market => self.max_vol,
@@ -106,6 +124,18 @@ impl Contract {
             )));
         }
         let whole = contracts.round();
+        if !whole.is_finite() || whole >= u64::MAX as f64 {
+            return Err(VenueError::BadRequest(format!(
+                "{} quantity cannot be represented as native contracts",
+                self.venue_symbol
+            )));
+        }
+        if !(whole as u64).is_multiple_of(volume_unit) {
+            return Err(VenueError::BadRequest(format!(
+                "{whole} contracts of {} are off the volUnit={volume_unit} grid",
+                self.venue_symbol
+            )));
+        }
         if whole < self.min_vol {
             return Err(VenueError::BadRequest(format!(
                 "{base_qty} of {} is {whole} contracts, under the venue minimum of {}",
@@ -120,6 +150,43 @@ impl Contract {
             )));
         }
         Ok(whole as u64)
+    }
+
+    pub fn require_order_capability(&self) -> Result<u64, VenueError> {
+        use engine_types::numeric::Exact;
+        if !matches!(self.execution.position_open_type, Some(2 | 3)) {
+            return Err(VenueError::BadRequest(format!(
+                "{} has unsupported or unknown positionOpenType {:?}; cross margin is required",
+                self.venue_symbol, self.execution.position_open_type
+            )));
+        }
+        let unit = self.execution.volume_unit.as_ref().ok_or_else(|| {
+            VenueError::BadRequest(format!("{} has no qualified volUnit", self.venue_symbol))
+        })?;
+        if !unit.value.is_positive()
+            || !unit.value.is_multiple_of(&Exact::one()).unwrap_or(false)
+            || unit.value.to_u64_exact().is_err()
+        {
+            return Err(VenueError::BadRequest(format!(
+                "{} has an unsupported native volume step",
+                self.venue_symbol
+            )));
+        }
+        unit.value
+            .to_u64_exact()
+            .map_err(|e| VenueError::BadRequest(e.to_string()))
+    }
+
+    /// MEXC lossTrend: 1 last price, 2 fair price. Unknown is not last price.
+    pub fn stop_trend(&self) -> Result<i64, VenueError> {
+        match self.execution.stop_only_fair {
+            Some(false) => Ok(1),
+            Some(true) => Ok(2),
+            None => Err(VenueError::BadRequest(format!(
+                "{} has no qualified stopOnlyFair metadata",
+                self.venue_symbol
+            ))),
+        }
     }
 
     /// Contracts back to base coin, for a position, a fill, or a book level
@@ -146,16 +213,40 @@ impl Contracts {
     }
 
     pub fn parse_raw(raw: &str) -> Result<Self, VenueError> {
+        Self::parse_version(raw, 2)
+    }
+
+    /// Rebuild the historical checkpoint's original grid without making it
+    /// eligible for a new opening. Fresh metadata is required for promotion.
+    pub fn parse_checkpoint_v1(raw: &str) -> Result<Self, VenueError> {
+        Self::parse_version(raw, 1)
+    }
+
+    fn parse_version(raw: &str, version: u8) -> Result<Self, VenueError> {
         #[derive(Deserialize)]
         struct Reply {
-            data: Vec<Box<serde_json::value::RawValue>>,
+            data: Box<serde_json::value::RawValue>,
         }
         let body: Reply = crate::numeric_wire::decode_object(raw)
             .map_err(|e| VenueError::BadReply(format!("contract detail: {e}")))?;
-        let mut by_symbol = HashMap::with_capacity(body.data.len());
-        for raw in body.data {
-            if let Some((symbol, contract)) = read_row(raw.get()) {
-                by_symbol.insert(symbol, contract);
+        let rows: Vec<Box<serde_json::value::RawValue>> = match body.data.get().as_bytes().first() {
+            Some(b'[') => serde_json::from_str(body.data.get())
+                .map_err(|e| VenueError::BadReply(format!("contract rows: {e}")))?,
+            Some(b'{') => vec![body.data],
+            _ => {
+                return Err(VenueError::BadReply(
+                    "contract data must be an object or array".into(),
+                ))
+            }
+        };
+        let mut by_symbol = HashMap::with_capacity(rows.len());
+        for raw in rows {
+            if let Some((symbol, contract)) = read_row(raw.get(), version) {
+                if by_symbol.insert(symbol.clone(), contract).is_some() {
+                    return Err(VenueError::BadReply(format!(
+                        "duplicate MEXC contract identity {symbol}"
+                    )));
+                }
             }
         }
         if by_symbol.is_empty() {
@@ -169,16 +260,44 @@ impl Contracts {
     /// The contract for one of the engine's symbols, refusing a symbol the
     /// venue does not list and one it will not accept API orders on.
     pub fn tradable(&self, symbol: &str) -> Result<&Contract, VenueError> {
-        let contract = self.by_symbol.get(symbol).ok_or_else(|| {
-            VenueError::BadRequest(format!("MEXC lists no contract for {symbol}"))
-        })?;
+        let contract = self.existing(symbol)?;
         if !contract.api_allowed {
             return Err(VenueError::BadRequest(format!(
                 "MEXC does not permit API trading on {} (apiAllowed is false)",
                 contract.venue_symbol
             )));
         }
+        if contract.execution.metadata_version != 2 || contract.execution.retained {
+            return Err(VenueError::BadRequest(format!(
+                "{} is retained historical metadata, not permission to open",
+                contract.venue_symbol
+            )));
+        }
+        if contract.execution.lifecycle_state != Some(0) {
+            return Err(VenueError::BadRequest(format!(
+                "{} is not enabled (state={:?})",
+                contract.venue_symbol, contract.execution.lifecycle_state
+            )));
+        }
+        if contract.execution.future_type != Some(1) {
+            return Err(VenueError::BadRequest(format!(
+                "{} is not a qualified perpetual contract (futureType={:?})",
+                contract.venue_symbol, contract.execution.future_type
+            )));
+        }
+        contract.require_order_capability()?;
+        contract.stop_trend()?;
         Ok(contract)
+    }
+
+    /// Identity and conversion metadata for existing exposure, independently
+    /// of permission to open. Unknown metadata never licenses guessed sizing.
+    pub fn existing(&self, symbol: &str) -> Result<&Contract, VenueError> {
+        self.by_symbol.get(symbol).ok_or_else(|| {
+            VenueError::BadRequest(format!(
+                "MEXC has no retained contract metadata for {symbol}"
+            ))
+        })
     }
 
     /// The contract, whether or not it may be traded. For reading a position
@@ -252,6 +371,21 @@ struct ContractRow {
     contract_size: DecimalField,
     price_unit: DecimalField,
     #[serde(default)]
+    vol_unit: DecimalField,
+    #[serde(default)]
+    state: Value,
+    #[serde(default)]
+    position_open_type: Value,
+    #[serde(default)]
+    stop_only_fair: Value,
+    #[serde(default)]
+    future_type: Value,
+    #[serde(default)]
+    min_leverage: DecimalField,
+    /// Local checkpoint provenance, never a venue capability.
+    #[serde(default, rename = "__lm_retained")]
+    retained: bool,
+    #[serde(default)]
     min_vol: DecimalField,
     #[serde(default)]
     max_vol: DecimalField,
@@ -263,7 +397,7 @@ struct ContractRow {
     api_allowed: Option<bool>,
 }
 
-fn read_row(raw: &str) -> Option<(Symbol, Contract)> {
+fn read_row(raw: &str, metadata_version: u8) -> Option<(Symbol, Contract)> {
     let row: ContractRow = crate::numeric_wire::decode_object(raw).ok()?;
     if row.settle_coin != row.quote_coin {
         return None;
@@ -293,6 +427,15 @@ fn read_row(raw: &str) -> Option<(Symbol, Contract)> {
     let max_vol = row.max_vol.legacy("maxVol").unwrap_or(f64::MAX);
     use engine_types::numeric::{AssetId, ExactInstrumentSpec, PricePrecision};
     let multiplier = row.contract_size.required("contractSize").ok()?.value;
+    let volume_unit = row.vol_unit.optional("volUnit").ok().flatten();
+    let qty_step = if metadata_version == 1 {
+        Some(multiplier.clone())
+    } else {
+        volume_unit
+            .as_ref()
+            .filter(|unit| unit.value.is_positive())
+            .map(|unit| &unit.value * &multiplier)
+    };
     let base_qty = |field: &DecimalField, name: &str| {
         field
             .optional(name)
@@ -309,8 +452,8 @@ fn read_row(raw: &str) -> Option<(Symbol, Contract)> {
         min_price: None,
         max_price: None,
         price_precision: PricePrecision::Tick,
-        qty_step: Some(multiplier.clone()),
-        market_qty_step: Some(multiplier.clone()),
+        qty_step: qty_step.clone(),
+        market_qty_step: qty_step,
         min_qty: base_qty(&row.min_vol, "minVol"),
         market_min_qty: base_qty(&row.min_vol, "minVol"),
         max_qty: base_qty(&row.limit_max_vol, "limitMaxVol"),
@@ -334,6 +477,17 @@ fn read_row(raw: &str) -> Option<(Symbol, Contract)> {
             limit_max_vol: row.limit_max_vol.legacy("limitMaxVol").unwrap_or(max_vol),
             max_leverage: row.max_leverage.legacy("maxLeverage").unwrap_or(1.0),
             api_allowed: row.api_allowed.unwrap_or(false),
+            execution: ExecutionCapabilities {
+                volume_unit,
+                lifecycle_state: row.state.as_i64(),
+                position_open_type: row.position_open_type.as_i64(),
+                stop_only_fair: row.stop_only_fair.as_bool(),
+                future_type: row.future_type.as_i64(),
+                min_leverage: row.min_leverage.legacy("minLeverage").ok(),
+                max_leverage: row.max_leverage.legacy("maxLeverage").ok(),
+                retained: row.retained,
+                metadata_version,
+            },
         },
     ))
 }
@@ -364,7 +518,15 @@ mod tests {
        "maxLeverage":20,"apiAllowed":false,"state":0,"amountScale":4,"priceScale":6}]}"#;
 
     fn table() -> Contracts {
-        Contracts::parse(&serde_json::from_str(DETAIL).unwrap()).unwrap()
+        // Synthetic capability overlay; DETAIL remains the original recording.
+        let mut page: Value = serde_json::from_str(DETAIL).unwrap();
+        for row in page["data"].as_array_mut().unwrap() {
+            row["volUnit"] = serde_json::json!(1);
+            row["positionOpenType"] = serde_json::json!(3);
+            row["stopOnlyFair"] = serde_json::json!(false);
+            row["futureType"] = serde_json::json!(1);
+        }
+        Contracts::parse(&page).unwrap()
     }
 
     /// A page the size of the live one, in shape: enough rows that two maps

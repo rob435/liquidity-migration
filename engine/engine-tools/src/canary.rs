@@ -1506,17 +1506,20 @@ mod tests {
 
     #[test]
     fn only_the_practice_realm_and_a_live_canary_realm_can_reach_the_command() {
-        assert!(VenueName::BybitDemo.require_canary_ready().is_ok());
+        assert_eq!(
+            VenueName::BybitDemo.require_canary_ready().is_ok(),
+            cfg!(feature = "bybit")
+        );
         assert!(VenueName::BybitMainnet.require_canary_ready().is_err());
         assert!(VenueName::HyperliquidTestnet
             .require_canary_ready()
             .is_err());
         #[cfg(feature = "mexc")]
         {
-            // Promoted to live-proven on its 2026-09-08 canary: `engine run`
-            // takes the realm now, and the canary no longer does.
-            assert!(VenueName::MexcMainnet.require_canary_ready().is_err());
-            VenueName::MexcMainnet.require_engine_run_ready().unwrap();
+            // Submit/cancel qualification is not evidence of general protected
+            // trading. The bounded harness remains separate from engine run.
+            VenueName::MexcMainnet.require_canary_ready().unwrap();
+            assert!(VenueName::MexcMainnet.require_engine_run_ready().is_err());
         }
         #[cfg(feature = "hyperliquid")]
         {

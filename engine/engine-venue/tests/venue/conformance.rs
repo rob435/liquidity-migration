@@ -128,7 +128,7 @@ fn bybit(body: Value) -> (u16, String) {
 /// One contract, at the size that makes a contract count and a coin count
 /// different numbers: 100 contracts is the 0.01 BTC this file orders.
 fn mexc_contract_detail() -> Value {
-    json!({"success":true,"code":0,"data":[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":1000,"apiAllowed":true}]})
+    json!({"success":true,"code":0,"data":[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.1,"minVol":1,"maxVol":1000,"apiAllowed":true,"volUnit":1,"state":0,"positionOpenType":3,"stopOnlyFair":false,"futureType":1,"minLeverage":1,"maxLeverage":100}]})
 }
 fn mutation(name: VenueName, r: &Recorded) -> bool {
     match name.venue() {
@@ -225,6 +225,7 @@ fn answer(
         "mexc" => (200, match r.path.as_str() {
             path if path.starts_with("/api/v1/private/order/external/") => json!({"success":true,"code":0,"data":{"symbol":"BTC_USDT","externalOid":CLIENT,"orderId":"41","state":if filled {3} else if terminal {4} else {2},"dealVol":if filled {100} else if partial {40} else {0}}}),
             "/api/v1/contract/detail" => mexc_contract_detail(),
+            "/api/v1/private/order/cancel_with_external" => json!({"success":true,"code":0,"data":{"externalOid":CLIENT,"errorCode":0,"errorMsg":"success"}}),
             _ => json!({"success":true,"code":0,"data":"41"}),
         }.to_string()),
         "variational" => (200, json!({"listings":[]}).to_string()),

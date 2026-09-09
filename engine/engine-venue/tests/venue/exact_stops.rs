@@ -65,6 +65,7 @@ async fn install(gw: &mut impl VenueGateway) {
     assert!(gw.restore_instrument_catalog(&bad).is_err());
     gw.install_instrument_catalog(&cold).unwrap();
 }
+#[cfg(feature = "bybit")]
 fn ok(result: &str) -> (u16, String) {
     (
         200,
@@ -134,7 +135,7 @@ async fn binance_exact_native_stop_preserves_price_without_cancel_before_replace
 async fn mexc_exact_native_stop_preserves_position_id_and_decimal_price() {
     let server=TestServer::start(|request,_|{
         let data=match request.path.as_str(){
-            "/api/v1/contract/detail"=>r#"[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.0000000000001,"minVol":1,"maxVol":100,"apiAllowed":true}]"#,
+            "/api/v1/contract/detail"=>r#"[{"symbol":"BTC_USDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","contractSize":0.0001,"priceUnit":0.0000000000001,"minVol":1,"maxVol":100,"apiAllowed":true,"volUnit":1,"state":0,"positionOpenType":3,"stopOnlyFair":false,"futureType":1,"minLeverage":1}]"#,
             "/api/v1/private/position/open_positions"=>r#"[{"symbol":"BTC_USDT","positionId":"7","positionType":1,"holdVol":1}]"#,
             "/api/v1/private/stoporder/open_orders"=>"[]",
             "/api/v1/private/stoporder/place"=>"true",

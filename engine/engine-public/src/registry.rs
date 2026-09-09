@@ -72,10 +72,12 @@ pub enum VenueName {
 /// Evidence state attached to every selectable venue realm.
 ///
 /// A compiled adapter is not production evidence. Moving a realm to
-/// `LiveProven` is a reviewed source change made only after the smallest
-/// permitted order and cancel/fill lifecycle has been observed on that exact
-/// venue. `LiveCanary` is the state between: a funded realm that still owes
-/// that lifecycle. A practice sibling's evidence is another chain and another
+/// `LiveProven` requires reviewed evidence for the workload being enabled:
+/// submit/cancel alone does not prove fills, fees, reduction, protection
+/// triggering or reconnect/history recovery. Execution-semantic changes require
+/// requalification of affected capabilities. `LiveCanary` keeps general trading
+/// blocked while a bounded harness gathers missing evidence. A practice
+/// sibling's evidence is another chain and another
 /// account and does not carry, so `engine canary-order` is permitted here with
 /// `REAL_MONEY` armed while the execution engine stays refused.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
@@ -263,17 +265,17 @@ impl VenueName {
     /// a newly added venue cannot silently inherit somebody else's status.
     pub fn readiness(self) -> VenueReadiness {
         match self {
-            // `mexc_mainnet`: one canary lifecycle observed on the funded
-            // account on 2026-09-08 20:16 UTC, venue order 852400800159322624
-            // (create, `New`, cancel, `Cancelled`, two clean scans).
-            VenueName::BybitDemo | VenueName::BybitMainnet | VenueName::MexcMainnet => {
-                VenueReadiness::LiveProven
-            }
+            VenueName::BybitDemo | VenueName::BybitMainnet => VenueReadiness::LiveProven,
+            // Historical MEXC submit/New/cancel/Cancelled evidence is not fill,
+            // fee, reduction or protective-trigger evidence. The execution-v2
+            // catalogue/encoding changes also invalidate automatic carry-forward.
+            // See audit/2026-09-09/capabilities.md; no receipt is manufactured here.
+            VenueName::MexcMainnet => VenueReadiness::LiveCanary,
             VenueName::HyperliquidTestnet | VenueName::LighterTestnet => {
                 VenueReadiness::TestnetCanary
             }
-            // `hyperliquid_mainnet`: the missing evidence is one reviewed
-            // `engine canary-order` lifecycle on the funded account. The
+            // `hyperliquid_mainnet`: the bounded canary may gather connectivity
+            // evidence, but is not general protected-position qualification. The
             // testnet realm's evidence is a different chain and a different
             // account, so it does not carry.
             VenueName::HyperliquidMainnet => VenueReadiness::LiveCanary,
@@ -296,7 +298,7 @@ impl VenueName {
         }
         Err(VenueError::BadRequest(match readiness {
             VenueReadiness::LiveCanary => format!(
-                "{} readiness is {}; the missing evidence is one reviewed `engine canary-order` lifecycle on this exact realm, and the execution engine stays refused until that review moves it to live-proven",
+                "{} readiness is {}; `engine canary-order` is a bounded qualification harness, not permission for general trading; reviewed fill, fee, reduction, protection-trigger and recovery evidence for this adapter's current execution semantics is required",
                 self.as_str(),
                 readiness.as_str()
             ),
@@ -329,5 +331,18 @@ impl VenueName {
 impl std::fmt::Display for VenueName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+#[cfg(all(test, feature = "mexc"))]
+mod audit_readiness_tests {
+    use super::*;
+
+    #[test]
+    fn a_submit_cancel_canary_does_not_qualify_general_protected_position_trading() {
+        let venue = VenueName::MexcMainnet;
+        assert!(!venue.readiness().permits_engine_run());
+        assert!(venue.require_engine_run_ready().is_err());
+        assert!(venue.require_canary_ready().is_ok());
     }
 }

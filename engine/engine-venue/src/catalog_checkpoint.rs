@@ -191,6 +191,20 @@ pub(crate) fn merge_pages(
             }
             merged.insert(key, row);
         }
+        if kind == "mexc" {
+            for (key, row) in &mut merged {
+                if !seen.contains(key) {
+                    // Local provenance, not a rewritten venue API permission.
+                    let mut fields = object(row.get())?;
+                    fields.insert(
+                        "__lm_retained".into(),
+                        RawValue::from_string("true".into()).map_err(bad)?,
+                    );
+                    *row = RawValue::from_string(serde_json::to_string(&fields).map_err(bad)?)
+                        .map_err(bad)?;
+                }
+            }
+        }
         if kind == "lighter" {
             let mut indices = std::collections::BTreeSet::new();
             for row in merged.values() {

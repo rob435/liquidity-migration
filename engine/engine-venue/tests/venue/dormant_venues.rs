@@ -27,7 +27,7 @@ fn conformance_feature_matrix_matches_every_registered_realm() {
         }
         assert_eq!(
             name.readiness() == VenueReadiness::LiveProven,
-            matches!(name.venue(), "bybit" | "mexc")
+            name.venue() == "bybit"
         );
     }
 }
@@ -36,7 +36,7 @@ fn conformance_feature_matrix_matches_every_registered_realm() {
 fn conformance_local_fixtures_do_not_promote_dormant_realms() {
     for name in VenueName::ALL.into_iter().filter(|name| name.compiled()) {
         match name.readiness() {
-            VenueReadiness::LiveProven => assert!(matches!(name.venue(), "bybit" | "mexc")),
+            VenueReadiness::LiveProven => assert_eq!(name.venue(), "bybit"),
             VenueReadiness::TestnetCanary => {
                 assert!(matches!(
                     name,
@@ -45,7 +45,10 @@ fn conformance_local_fixtures_do_not_promote_dormant_realms() {
                 name.require_engine_run_ready().unwrap();
             }
             VenueReadiness::LiveCanary => {
-                assert!(matches!(name, VenueName::HyperliquidMainnet));
+                assert!(matches!(
+                    name,
+                    VenueName::HyperliquidMainnet | VenueName::MexcMainnet
+                ));
                 // Funded capital, and the operator canary is the only thing
                 // this state opens.
                 assert!(name.is_real_money());

@@ -9,6 +9,7 @@
 //! [`contracts`]: orders are quoted in *contracts* rather than coins, and the
 //! venue spells a symbol `BTC_USDT` where the engine says `BTCUSDT`.
 
+mod account_binding;
 pub mod gateway;
 pub use engine_public::venues::mexc::{contracts, public, realm};
 
