@@ -1475,9 +1475,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     ///
     /// Deliberately NOT restated, because boot does not rebuild them either:
     /// covers and working-order supervision (boot starts them empty and
-    /// trusts the venue comparison instead), the run's own latency ledger
-    /// and cost score, and markout horizons still owed (a restart already
-    /// ends those; the marks written so far are in the archived segments).
+    /// trusts the venue comparison instead), and the run's own latency ledger
+    /// and cost score.
     pub(crate) fn rotation_base(&self, wall_ts_ms: i64) -> WalRecord {
         WalRecord::SegmentBase {
             order_id_epoch_ms: Some(self.order_id_epoch_ms),
@@ -1578,6 +1577,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .map(|order| order.snapshot(wall_ts_ms))
                 .collect(),
             rolling_loss_rows: self.risk.rolling_loss_rows(),
+            owed_markouts: self.fills.owed_markouts(),
         }
     }
 }

@@ -113,7 +113,8 @@ impl RecoveryOutcome {
             attribution: crate::legacy_quantity::Replay::new(records, pending)
                 .and_then(|replay| replay.finish())
                 .map_err(EngineError::Boot)?,
-            fills: Fills::recovery_lots(records, pending).map_err(EngineError::Boot)?,
+            fills: Fills::recovery_lots(records, pending, clock::now_ns(), clock::wall_ms())
+                .map_err(EngineError::Boot)?,
             portfolio_controls: crate::portfolio_control::PortfolioControls::replay(records)
                 .map_err(EngineError::Boot)?,
             physical,
@@ -674,7 +675,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             // Its cost rows are a running score for the run in front of you,
             // and the whole history is one `engine fills` away; its open
             // positions were rebuilt above, because a close priced without
-            // its entry is a number about nothing.
+            // its entry is a number about nothing, and so were the markout
+            // horizons the last process was still owed.
             fills,
             heartbeat: None,
             trades: None,

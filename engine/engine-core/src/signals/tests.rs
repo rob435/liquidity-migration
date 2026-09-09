@@ -251,6 +251,7 @@ fn consumed_universe_changes_keep_earlier_subscriptions_through_rotation() {
         runtime_control_consumed: vec![],
         open_orders: vec![],
         rolling_loss_rows: vec![],
+        owed_markouts: Vec::new(),
     };
     assert_eq!(active_subscriptions(&[rotated]), expected);
 }

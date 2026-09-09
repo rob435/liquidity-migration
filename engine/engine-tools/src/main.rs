@@ -76,6 +76,14 @@ engine — the execution loop
       back to stay inside the request limit, and its own work are separate
       numbers rather than one span.
 
+  engine cohort --wal PATH [--json]
+      Every opportunity in the log and where it stopped, not only the orders
+      that filled: source rows admitted, rejected, expired or still held, and
+      order decisions admitted to the wire, refused, never sent or unresolved.
+      Then the ages between the stamps the log has — source to consume and
+      decision to wire — with the one interval it cannot measure named as
+      unmeasurable rather than reported as zero.
+
   engine venue-key --config engine.toml
       What this host signs as at the config's venue, so it can be registered
       there: an API wallet's address on Hyperliquid, a public key on Lighter.

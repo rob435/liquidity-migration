@@ -84,6 +84,88 @@ python scripts/research/reconcile_venue_wal.py \
 
 The existing reconciliation report includes `observed_window`. Its `complete_production_reproduction` remains false and its missing requirements remain explicit. Missing cash fields, discontinuities, funding mismatches and unmatched executions are reported individually; missing values never become zero. `accounting_only=True` streams/CRC-checks every frame while retaining only accounting records and original sequence numbers.
 
+#### Full-day economic reconciliation
+
+`liquidity_migration/research/day_reconciliation.py` reconciles one realm's whole UTC day between two equity-recorder boundary samples and the venue's own transaction log. It is read-only, runs off the host on copies, and emits `gate: pass|fail` with its reasons.
+
+| Input | What it is | Off-host copy |
+| --- | --- | --- |
+| `--wal` | the copied engine WAL segments; a copied day never starts at segment 1, so what is required is coverage of both boundary readings | `/var/lib/liquidity-migration-engine[-<realm>]/engine.wal*`, the segments whose records span both readings |
+| `--capture` | authenticated executions, closed P&L, USDT transaction log and both transfer directions, from the day's midnight through the end boundary sample's venue reading, so capture a few minutes past the next midnight | written by `scripts/research/capture_bybit_account_history.py` |
+| `--equity-samples` | directory holding `engine-<realm>-<YYYY-MM>.jsonl` | `/var/lib/liquidity-migration/equity` |
+| `--tolerance-usdt` | declared residual tolerance, default `0.01` | — |
+| `--max-boundary-distance-s` | declared maximum distance between a boundary sample and midnight, default `120` | — |
+| `--out` | new mode-0600 JSON report; the plain text table is written beside it with a `.txt` suffix | — |
+
+Funding settles at 00:00 UTC and the sample lands seconds later, so the rows between midnight and each boundary sample's venue reading sit on one side of the day's sum and the other side of the equity reading. They are listed with their ids, types and amounts, the gate reads the residual net of them, and both the raw and the net residual stay in the report.
+
+| Boundary sample field | Use |
+| --- | --- |
+| `ts_ms`, `account_age_ms` | selection and both distances: the sample's own clock, and the venue reading inside it at `ts_ms - account_age_ms`, which is also the straddle interval's far edge |
+| `state` | only a `live` sample with a numeric `equity_usdt` is selected; earlier non-live rows are counted, never averaged over |
+| `equity_usdt` | the boundary money reading; drives the equity residual |
+| `wallet_cash_usdt`, `unrealised_pnl_usdt` | the cash-versus-mark split; present, they gate the recorded wallet-cash move against the venue's rows and make an open boundary position reconcilable |
+| `positions` | per-symbol signed quantity, gated against the WAL's attributed exposure; a row with a null `strategy` is the owner's hand exposure and is reported, not gated |
+| `positions_truncated` | the recorder dropped the list to stay inside its line cap, so per-symbol equality is unestablished at that boundary |
+| `position_count`, `sleeve_positions` | the physical and per-sleeve position comparison against the WAL's attributed exposure |
+| `position_entry_notional_usdt` | reported against the WAL-derived entry notional; never gated |
+| `account_user_id`, `venue`, `mode`, `engine_commit` | identity, bound to the capture manifest's `user_id` |
+
+| Gate check | Passes when | Fails with |
+| --- | --- | --- |
+| Boundary selection | a `live` sample exists at or after each midnight, and both its own and its venue reading's distance are inside `--max-boundary-distance-s` | a named missing requirement per boundary, never a zero |
+| WAL coverage | the first copied segment's first record is stamped at or before the begin boundary reading and the last segment's last record at or after the end one | the segment index and the stamp it carries instead; a family that does not start at segment 1 is a note, not a failure |
+| Capture coverage | the manifest is complete under schema 1, covers `[day, day+1)`, and names the requested realm and one account | the manifest's own issue text |
+| Account transfers | the manifest proves complete `transfer_in` and `transfer_out` pagination | one requirement naming the unfetched sources with the chain's unexplained jumps and the cash residual a transfer would leave; the per-jump and residual reasons fold into it, because there is one cause |
+| Transaction types | every row's `type` is one of `TRADE`, `SETTLEMENT`, `TRANSFER_IN`, `TRANSFER_OUT`, `DEPOSIT`, `WITHDRAW` | the unrecognised type, its row count and its summed `change`; the rows still count toward the total |
+| Wallet-cash chain | each row's `cashBalance - change` equals the previous row's `cashBalance`, and `(end - begin) - Σ change` is inside tolerance. Rows sharing one `transactionTime` are ordered by the chain, never by `id`, which is not an order | the jump, its amount, and the transaction it precedes |
+| Boundary straddle | the capture covers `[midnight, the boundary sample's venue reading)` at both boundaries | a named missing requirement per boundary, because a cash row in that interval would be unobserved |
+| Equity residual | `(end equity - begin equity) - Σ change`, net of the cash rows straddling the two boundary readings, is inside tolerance **and** either boundary wallet cash is recorded or both boundaries read flat | both the raw and the net residual, or the missing unrealised-P&L requirement when a boundary is neither flat nor decomposable |
+| Boundary wallet cash | with `wallet_cash_usdt` at both boundaries, its move equals `Σ change` plus the straddle inside tolerance, and each sample keeps `equity = wallet cash + unrealised P&L` | the recorded move against what the rows account for, or the sample that breaks the identity |
+| Fills | WAL day fills and captured `Trade` executions are the same set, and the WAL, execution and `TRADE`-row fee sums are equal | each unmatched execution id and each differing fee sum |
+| Positions | per boundary, `position_count` equals the WAL's nonzero symbols plus the sample's `unattributed` count, every sleeve's count matches, and — with a sample `positions` list — every symbol's signed quantity matches | one difference row per boundary naming the sleeve, symbol and quantities |
+| Attribution | every WAL fill in the day has a sleeve | the count of fills with none |
+
+| Not established by a pass | Why |
+| --- | --- |
+| an independent wallet-cash snapshot | the chain is the transaction log's own `cashBalance` column, inferred cash; the sample's `wallet_cash_usdt` is `equity - unrealised P&L` off one venue reading, not a second source |
+| anything a sample predating the recorder fields cannot say | without `wallet_cash_usdt` and `unrealised_pnl_usdt` a day with an open boundary position cannot split its equity change into cash and mark, and fails; without `positions` symbol equality stays unestablished and the count comparison is what gates. The report names each absent field |
+| entry prices for exposure older than the copied WAL | the rotation restatement carries signed quantities, not entry prices, so those positions are listed `unpriced` and the entry-notional comparison covers only the rest |
+| short-side closed round trips | round trips are grouped long-first; a short sleeve keeps its fills and its signed exposure |
+| profitability or authorization | the report grants no trading or real-money authority |
+
+```bash
+DAY=2026-09-08 NEXT=2026-09-09
+
+# 1. On the host, copy the day's evidence out; never move the originals. Copy both
+#    month sample files when the day is the last of its month.
+sudo sh -c "cd /var/lib/liquidity-migration-engine-mainnet && tar -czf /tmp/wal-$DAY.tgz engine.wal*"
+sudo cp /var/lib/liquidity-migration/equity/engine-mainnet-2026-09.jsonl /tmp/
+sudo chown "$USER" /tmp/wal-$DAY.tgz /tmp/engine-mainnet-2026-09.jsonl
+# then scp both to the research box.
+
+# 2. On the research box, unpack the segments and keep the sample file's exact name.
+#    --wal below names the family prefix, which is the path even when only
+#    rotation segments (engine.wal.NNNNNN) were copied.
+mkdir -p /tmp/day-$DAY/wal /tmp/day-$DAY/equity
+tar -C /tmp/day-$DAY/wal -xzf wal-$DAY.tgz
+cp engine-mainnet-2026-09.jsonl /tmp/day-$DAY/equity/
+
+# 3. Capture the venue's own account history: the day, plus the minutes past the
+#    next midnight that reach the end boundary sample's venue reading.
+python scripts/research/capture_bybit_account_history.py \
+  --realm mainnet --start "$DAY" --end "${NEXT}T00:05:00+00:00" --out /tmp/day-$DAY/history.jsonl
+
+# 4. Reconcile. Exit 0 is the gate passing; the table prints and is written beside the JSON.
+python -m liquidity_migration.research.day_reconciliation \
+  --realm mainnet --day "$DAY" \
+  --wal /tmp/day-$DAY/wal/engine.wal \
+  --capture /tmp/day-$DAY/history.jsonl \
+  --equity-samples /tmp/day-$DAY/equity \
+  --tolerance-usdt 0.01 \
+  --out /tmp/day-$DAY/report.json
+```
+
 ### Realm table
 
 Every realm the fleet runs is declared in [`deploy/realms.tsv`](../deploy/realms.tsv), and every unit file, env template and manifest row for it is rendered from that one row.

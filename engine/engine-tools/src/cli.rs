@@ -25,6 +25,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
         "replay" => replay(args),
         "fills" => fills(args),
         "latency" => latency(args),
+        "cohort" => cohort(args),
         "reconcile-clear" => reconcile_clear(args),
         "initialize-native-strategy-state" => initialize_native_strategy_state(args),
         "verify-native-strategy-state" => verify_native_strategy_state(args),
@@ -289,6 +290,31 @@ fn latency(args: &[String]) -> Result<(), Box<dyn Error>> {
     let segments = engine_wal::segments(Path::new(&path))?.len();
     let records: Vec<_> = replayed.into_iter().map(|(_, r)| r).collect();
     print!("{}", engine_tools::timing::of_log(&records));
+    println!(
+        "\n  {} record(s), from {} log segment(s) under {path}.",
+        records.len(),
+        segments
+    );
+    if torn {
+        println!(
+            "\n  the log ends part-way through a record; anything after that point is \
+             not in these numbers."
+        );
+    }
+    Ok(())
+}
+
+fn cohort(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let path = value(args, "--wal").ok_or("cohort needs --wal PATH")?;
+    let (replayed, torn) = engine_wal::replay_chain(Path::new(&path))?;
+    let segments = engine_wal::segments(Path::new(&path))?.len();
+    let records: Vec<_> = replayed.into_iter().map(|(_, r)| r).collect();
+    let report = engine_tools::cohort::of_log(&records);
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    print!("{}", report.table());
     println!(
         "\n  {} record(s), from {} log segment(s) under {path}.",
         records.len(),
@@ -599,6 +625,7 @@ mod tests {
             ("replay", "replay needs --wal PATH"),
             ("fills", "fills needs --wal PATH"),
             ("latency", "latency needs --wal PATH"),
+            ("cohort", "cohort needs --wal PATH"),
             ("canary-order", "canary-order needs --symbol SYMBOL"),
             (
                 "flatten-strategy",

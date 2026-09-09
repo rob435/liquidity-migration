@@ -10,6 +10,7 @@ import pytest
 
 from liquidity_migration.core.venue_realm import VenueRealm
 from scripts.research.capture_bybit_account_history import (
+    MAX_WINDOW_MS,
     RECV_WINDOW_MS,
     BybitReadClient,
     CaptureError,
@@ -149,7 +150,7 @@ def test_missing_cursor_is_rejected() -> None:
         )
 
 
-def test_capture_receipts_bind_all_three_complete_sources_and_the_account(monkeypatch) -> None:
+def test_capture_receipts_bind_every_complete_source_and_the_account(monkeypatch) -> None:
     monkeypatch.setenv("BYBIT_DEMO_API_KEY", "demo-key")
     monkeypatch.setenv("BYBIT_DEMO_API_SECRET", "demo-secret")
 
@@ -167,12 +168,24 @@ def test_capture_receipts_bind_all_three_complete_sources_and_the_account(monkey
     assert manifest["realm"] == "demo"
     assert manifest["user_id"] == "12345"
     assert manifest["api_key_sha256"] == hashlib.sha256(b"demo-key").hexdigest()
-    assert set(manifest["sources"]) == {"execution", "closed_pnl", "transaction"}
+    assert set(manifest["sources"]) == {
+        "execution",
+        "closed_pnl",
+        "transaction",
+        "transfer_in",
+        "transfer_out",
+    }
     assert all(receipt["complete"] for receipt in manifest["sources"].values())
     assert manifest["sources"]["execution"]["params"] == {
         "category": "linear",
         "settleCoin": "USDT",
         "limit": "100",
+    }
+    assert manifest["sources"]["transfer_in"]["params"] == {
+        "accountType": "UNIFIED",
+        "currency": "USDT",
+        "type": "TRANSFER_IN",
+        "limit": "50",
     }
     assert manifest["venue_query_start_time_ms"] == 3_000
     assert manifest["venue_query_end_time_ms"] == 3_000
@@ -180,6 +193,42 @@ def test_capture_receipts_bind_all_three_complete_sources_and_the_account(monkey
     serialized = json.dumps(manifest)
     assert "demo-secret" not in serialized
     assert "demo-key\"" not in serialized
+
+
+def test_the_transfer_sources_slice_and_page_without_a_category_filter() -> None:
+    source = next(entry for entry in SOURCES if entry.name == "transfer_out")
+    calls: list[dict[str, str]] = []
+
+    class PagedClient:
+        def get(self, path: str, params: dict[str, str]) -> dict:
+            calls.append({"path": path, **params})
+            return {
+                "retCode": 0,
+                "time": 1,
+                "result": {
+                    "list": [{"id": f"t-{len(calls)}", "transactionTime": params["startTime"]}],
+                    "nextPageCursor": "" if params.get("cursor") else "page-2",
+                },
+            }
+
+    rows, receipt = fetch_source(
+        PagedClient(),  # type: ignore[arg-type]
+        source,
+        0,
+        MAX_WINDOW_MS + 1,
+    )
+
+    assert receipt["endpoint"] == "/v5/account/transaction-log"
+    assert receipt["params"] == {
+        "accountType": "UNIFIED",
+        "currency": "USDT",
+        "type": "TRANSFER_OUT",
+        "limit": "50",
+    }
+    assert (receipt["slices"], receipt["pages"], receipt["rows"]) == (2, 4, 4)
+    assert all("category" not in call for call in calls)
+    assert [call["startTime"] for call in calls] == ["0", "0", str(MAX_WINDOW_MS), str(MAX_WINDOW_MS)]
+    assert {row["_kind"] for row in rows} == {"transfer_out"}
 
 
 def test_capture_file_is_new_and_owner_readable_only(tmp_path: Path) -> None:

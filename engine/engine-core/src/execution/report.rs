@@ -447,8 +447,11 @@ fn footer(total: &Costs, fills: &Fills) -> String {
         let _ = writeln!(
             out,
             "  {} markout(s) were read too long after their horizon to be that horizon,\n  \
-             and were thrown away rather than averaged in.",
-            total.marks_late
+             and were thrown away rather than averaged in: {} owed across a restart,\n  \
+             {} this engine looking late.",
+            total.marks_late,
+            total.marks_late_across_restart,
+            total.marks_late - total.marks_late_across_restart
         );
     }
     // Deliberately not reported off a log: a replay owes nothing a future
@@ -501,9 +504,10 @@ fn footer(total: &Costs, fills: &Fills) -> String {
         out.push_str(
             "  the later horizons cover less of the trading than the earlier ones, because\n  \
              a fill is owed its five-minute mark five minutes later. The run is younger\n  \
-             than that, or it restarted -- a restart ends every horizon a fill was still\n  \
-             owed, and restarts cluster on deploys -- or this is one segment of a log\n  \
-             whose next segment holds the marks that are missing.\n",
+             than that, or it restarted -- a restart carries the horizons over but the\n  \
+             ones already past their lateness bound come back late rather than measured\n  \
+             -- or this is one segment of a log whose next segment holds the marks that\n  \
+             are missing.\n",
         );
     }
     out
@@ -601,6 +605,44 @@ mod tests {
     fn a_horizon_that_was_never_marked_is_a_dash_and_not_a_zero() {
         let text = of_log(&log());
         assert!(text.contains(NOTHING), "an unmarked horizon: {text}");
+    }
+
+    #[test]
+    fn the_footer_says_which_late_marks_were_a_restart_and_which_were_a_stall() {
+        // Both numbers, because they have different answers: one is a deploy
+        // window, the other is this engine falling behind.
+        fn late(horizon_ms: u64) -> WalRecord {
+            WalRecord::Markout {
+                client_order_id: "eng-1".into(),
+                strategy: StrategyId(0),
+                symbol: SymbolId(0),
+                fill_ts_ms: 1,
+                horizon_ms,
+                mid: Some(102.0),
+                signed_markout_bps: Some(99.0),
+                actual_horizon_ms: 600_000,
+                notional_usdt: 101.0,
+            }
+        }
+        let mut records = log();
+        records.push(late(1_000));
+        records.push(WalRecord::Boot {
+            version: "engine".into(),
+            config_sha256: "abc".into(),
+            wall_ts_ms: 2,
+            commit: String::new(),
+        });
+        records.push(late(15_000));
+
+        let text = of_log(&records);
+        assert!(
+            text.contains("1 owed across a restart"),
+            "the mark after the boot: {text}"
+        );
+        assert!(
+            text.contains("1 this engine looking late"),
+            "the mark before it: {text}"
+        );
     }
 
     #[test]

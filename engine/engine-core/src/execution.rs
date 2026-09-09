@@ -271,6 +271,10 @@ pub struct Costs {
     /// different things about the run: one is a market that went quiet, the
     /// other is this process falling behind.
     pub marks_late: u64,
+    /// The share of `marks_late` owed by a process that stopped before the
+    /// horizon came round. A deploy, not a stall, and the two have different
+    /// answers.
+    pub marks_late_across_restart: u64,
 }
 
 impl Default for Costs {
@@ -287,6 +291,7 @@ impl Default for Costs {
             markout: [Weighted::default(); HORIZONS_MS.len()],
             marks_unmeasurable: 0,
             marks_late: 0,
+            marks_late_across_restart: 0,
         }
     }
 }
@@ -335,6 +340,7 @@ impl Costs {
         }
         self.marks_unmeasurable += other.marks_unmeasurable;
         self.marks_late += other.marks_late;
+        self.marks_late_across_restart += other.marks_late_across_restart;
     }
 }
 
@@ -387,16 +393,111 @@ struct Owed {
     px: f64,
     notional_usdt: f64,
     fill_ts_ms: i64,
-    filled_ns: u64,
+    /// When the fill happened, on this process's monotonic clock. **Signed**,
+    /// because that clock starts with the process and a fill taken over from
+    /// the process before it happened earlier than the origin.
+    filled_ns: i64,
     /// One bit per entry in [`HORIZONS_MS`], set while that horizon is still
     /// owed.
     owed: u8,
+    /// The fill was made by a process that has since stopped. Only a late
+    /// mark reads this, and only to say which kind of late it is.
+    restored: bool,
 }
 
 impl Owed {
     fn done(&self) -> bool {
         self.owed == 0
     }
+
+    /// The same obligation, ready for the next process to take over.
+    fn to_record(&self) -> engine_types::OwedMarkout {
+        engine_types::OwedMarkout {
+            client_order_id: self.client_order_id.clone(),
+            strategy: self.strategy,
+            symbol: self.symbol,
+            side: self.side,
+            px: self.px,
+            notional_usdt: self.notional_usdt,
+            fill_ts_ms: self.fill_ts_ms,
+            owed: self.owed,
+        }
+    }
+
+    /// The obligation a restatement carries, as a reader takes it: no
+    /// deadline, because only a running engine has a clock to put in one.
+    fn from_record(record: &engine_types::OwedMarkout) -> Option<Self> {
+        if record.owed == 0 || !usable(record.px) || !usable(record.notional_usdt) {
+            return None;
+        }
+        Some(Owed {
+            client_order_id: record.client_order_id.clone(),
+            strategy: record.strategy,
+            symbol: record.symbol,
+            side: record.side,
+            px: record.px,
+            notional_usdt: record.notional_usdt,
+            fill_ts_ms: record.fill_ts_ms,
+            filled_ns: 0,
+            owed: record.owed,
+            restored: false,
+        })
+    }
+
+    /// The same, dated against this process's clock so [`Fills::due`] can
+    /// work on it.
+    ///
+    /// `filled_ns` has to be a stamp on **this** process's monotonic clock,
+    /// and the venue's wall stamp is what says how old the fill is. The two
+    /// clocks are assumed to run at the same rate over the minutes this
+    /// spans; a venue stamp ahead of our wall clock reads as an age of zero
+    /// rather than a fill from the future.
+    fn restored(record: &engine_types::OwedMarkout, now_ns: u64, now_wall_ms: i64) -> Option<Self> {
+        let age_ms = u64::try_from(now_wall_ms.saturating_sub(record.fill_ts_ms)).unwrap_or(0);
+        let mut owed = Self::from_record(record)?;
+        owed.filled_ns = mono(now_ns).saturating_sub(ms_as_ns(age_ms));
+        owed.restored = true;
+        Some(owed)
+    }
+
+    /// How old the fill is now, in milliseconds. Never negative: a venue
+    /// stamp ahead of our own clock is a clock difference, not a fill that
+    /// has not happened yet.
+    fn age_ms(&self, now_ns: u64) -> u64 {
+        u64::try_from((mono(now_ns).saturating_sub(self.filled_ns)).max(0) / 1_000_000).unwrap_or(0)
+    }
+
+    /// When one horizon of this fill comes round, in this process's clock.
+    /// Clamped at zero, which is what a horizon that fell before this process
+    /// started means to [`mid_after`]: every book it can read is after it.
+    fn horizon_ns(&self, horizon_ms: u64) -> u64 {
+        u64::try_from(self.filled_ns.saturating_add(ms_as_ns(horizon_ms))).unwrap_or(0)
+    }
+
+    /// Whether any horizon this fill is owed can still be read. Past the last
+    /// horizon's lateness bound the measurement is gone whatever anybody
+    /// does, and a boot that restated it would only write four absences.
+    fn worth_restoring(&self, now_ns: u64) -> bool {
+        self.age_ms(now_ns) < HORIZONS_MS[HORIZONS_MS.len() - 1].saturating_add(LATENESS_BOUND_MS)
+    }
+}
+
+/// A monotonic stamp as [`Owed`] holds one.
+fn mono(now_ns: u64) -> i64 {
+    i64::try_from(now_ns).unwrap_or(i64::MAX)
+}
+
+/// Milliseconds as signed nanoseconds.
+fn ms_as_ns(ms: u64) -> i64 {
+    i64::try_from(ms.saturating_mul(1_000_000)).unwrap_or(i64::MAX)
+}
+
+/// Which process a mark's fill was made by. Read only when the mark is late,
+/// to tell a stalled engine apart from a restarted one.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Owing {
+    ThisRun,
+    AcrossRestart,
 }
 
 /// The engine's running answer to "what is our trading costing".
@@ -545,10 +646,38 @@ impl Fills {
             px: fill.px,
             notional_usdt: notional,
             fill_ts_ms: fill.venue_ts_ms,
-            filled_ns,
+            filled_ns: mono(filled_ns),
             owed: (1u8 << HORIZONS_MS.len()) - 1,
+            restored: false,
         });
         Ok(())
+    }
+
+    /// The horizons still owed, for a rotation to restate. Every entry is a
+    /// fill inside the longest horizon, so this is bounded by five minutes of
+    /// trading however long the run has been going.
+    pub fn owed_markouts(&self) -> Vec<engine_types::OwedMarkout> {
+        self.pending
+            .iter()
+            .filter(|owed| !owed.done())
+            .map(Owed::to_record)
+            .collect()
+    }
+
+    /// A `Markout` record answers one horizon of one fill. Clearing its bit is
+    /// what stops a boot from asking for it twice.
+    fn mark_answered(&mut self, client_order_id: &str, fill_ts_ms: i64, horizon_ms: u64) {
+        let Some(index) = HORIZONS_MS.iter().position(|h| *h == horizon_ms) else {
+            return;
+        };
+        if let Some(owed) = self.pending.iter_mut().find(|owed| {
+            owed.client_order_id == client_order_id
+                && owed.fill_ts_ms == fill_ts_ms
+                && owed.owed & (1u8 << index) != 0
+        }) {
+            owed.owed &= !(1u8 << index);
+        }
+        self.pending.retain(|owed| !owed.done());
     }
 
     /// What one fill cost, folded into its row. Returns the notional, which is
@@ -610,7 +739,7 @@ impl Fills {
     pub fn due(&mut self, now_ns: u64, market: &MarketState) -> Vec<Mark> {
         let mut marks = Vec::new();
         for owed in self.pending.iter_mut() {
-            let age_ms = (now_ns.saturating_sub(owed.filled_ns)) / 1_000_000;
+            let age_ms = owed.age_ms(now_ns);
             for (index, horizon_ms) in HORIZONS_MS.iter().enumerate() {
                 let bit = 1u8 << index;
                 if owed.owed & bit == 0 || age_ms < *horizon_ms {
@@ -620,10 +749,7 @@ impl Fills {
                 // the horizon, not the fill. A book that spoke once just
                 // after the fill and then went quiet would otherwise hand
                 // that early mid to the 1m/5m columns.
-                let horizon_ns = owed
-                    .filled_ns
-                    .saturating_add((*horizon_ms).saturating_mul(1_000_000));
-                let mid = mid_after(market, owed.symbol, horizon_ns);
+                let mid = mid_after(market, owed.symbol, owed.horizon_ns(*horizon_ms));
                 let gave_up = age_ms >= horizon_ms.saturating_add(LATENESS_BOUND_MS);
                 if mid.is_none() && !gave_up {
                     // "The first healthy midpoint at or after h" — so wait for
@@ -631,30 +757,37 @@ impl Fills {
                     continue;
                 }
                 owed.owed &= !bit;
-                marks.push(Mark {
-                    client_order_id: owed.client_order_id.clone(),
-                    strategy: owed.strategy,
-                    symbol: owed.symbol,
-                    fill_ts_ms: owed.fill_ts_ms,
-                    horizon_ms: *horizon_ms,
-                    mid,
-                    signed_markout_bps: mid
-                        .and_then(|mid| signed_markout_bps(owed.side, owed.px, mid)),
-                    actual_horizon_ms: age_ms,
-                    notional_usdt: owed.notional_usdt,
-                });
+                marks.push((
+                    Mark {
+                        client_order_id: owed.client_order_id.clone(),
+                        strategy: owed.strategy,
+                        symbol: owed.symbol,
+                        fill_ts_ms: owed.fill_ts_ms,
+                        horizon_ms: *horizon_ms,
+                        mid,
+                        signed_markout_bps: mid
+                            .and_then(|mid| signed_markout_bps(owed.side, owed.px, mid)),
+                        actual_horizon_ms: age_ms,
+                        notional_usdt: owed.notional_usdt,
+                    },
+                    if owed.restored {
+                        Owing::AcrossRestart
+                    } else {
+                        Owing::ThisRun
+                    },
+                ));
             }
         }
         self.pending.retain(|owed| !owed.done());
-        for mark in &marks {
-            self.fold_mark(mark);
+        for (mark, owing) in &marks {
+            self.fold_mark(mark, *owing);
         }
-        marks
+        marks.into_iter().map(|(mark, _)| mark).collect()
     }
 
     /// Fold a mark into the running totals. Public because the report read off
     /// a finished log takes the same path: one arithmetic, two callers.
-    pub fn fold_mark(&mut self, mark: &Mark) {
+    pub fn fold_mark(&mut self, mark: &Mark, owing: Owing) {
         // A mark read long after its horizon is not that horizon. The engine
         // looks on a 250 ms tick, so every mark is a little late and that is
         // priced in; one that arrives twenty seconds late -- a stall, a paused
@@ -663,7 +796,11 @@ impl Fills {
         // one-second fact.
         if mark.actual_horizon_ms > mark.horizon_ms.saturating_add(LATENESS_BOUND_MS) {
             let key = self.key(mark.strategy, mark.symbol);
-            self.by_key.entry(key).or_default().marks_late += 1;
+            let costs = self.by_key.entry(key).or_default();
+            costs.marks_late += 1;
+            if owing == Owing::AcrossRestart {
+                costs.marks_late_across_restart += 1;
+            }
             return;
         }
         let Some(index) = HORIZONS_MS.iter().position(|h| *h == mark.horizon_ms) else {
@@ -829,14 +966,30 @@ impl Fills {
         Ok(())
     }
 
+    /// What boot takes over from the log: the open positions, and the markout
+    /// horizons the last process was still owed.
+    ///
+    /// The obligations are the log's own arithmetic — every fill it can price,
+    /// less every `Markout` already written for one — so a boot never asks the
+    /// market for a horizon the log already answered, and two boots off the
+    /// same log ask for the same set.
     pub(crate) fn recovery_lots(
         records: &[WalRecord],
         pending: Option<&WalRecord>,
+        now_ns: u64,
+        now_wall_ms: i64,
     ) -> Result<Self, String> {
-        let rebuilt = Self::try_from_records_with_adoption(records, pending)?;
+        let rebuilt = Self::replayed(records, pending)?;
+        let owed = rebuilt
+            .owed_markouts()
+            .iter()
+            .filter_map(|record| Owed::restored(record, now_ns, now_wall_ms))
+            .filter(|owed| owed.worth_restoring(now_ns))
+            .collect();
         Ok(Self {
             lots: rebuilt.lots,
             names: rebuilt.names,
+            pending: owed,
             ..Self::default()
         })
     }
@@ -873,6 +1026,19 @@ impl Fills {
         records: &[WalRecord],
         pending: Option<&WalRecord>,
     ) -> Result<Self, String> {
+        let mut me = Self::replayed(records, pending)?;
+        // Replaying a log is not trading: nothing is owed a future mark,
+        // because every mark this log will ever hold is already in it. The
+        // drop count goes with the queue -- it counts this replay popping its
+        // own transient queue, which is not something that happened to the
+        // run, and reporting it as one would send a reader looking for an
+        // incident that never was.
+        me.pending.clear();
+        me.dropped = 0;
+        Ok(me)
+    }
+
+    fn replayed(records: &[WalRecord], pending: Option<&WalRecord>) -> Result<Self, String> {
         let mut sent: HashMap<String, (engine_types::OrderRequest, f64)> = HashMap::new();
         let mut me = Fills::default();
         let mut replay = crate::legacy_quantity::Replay::new(records, pending)?;
@@ -1050,17 +1216,41 @@ impl Fills {
                     signed_markout_bps,
                     actual_horizon_ms,
                     notional_usdt,
-                } => me.fold_mark(&Mark {
-                    client_order_id: client_order_id.clone(),
-                    strategy: *strategy,
-                    symbol: *symbol,
-                    fill_ts_ms: *fill_ts_ms,
-                    horizon_ms: *horizon_ms,
-                    mid: *mid,
-                    signed_markout_bps: *signed_markout_bps,
-                    actual_horizon_ms: *actual_horizon_ms,
-                    notional_usdt: *notional_usdt,
-                }),
+                } => {
+                    let owing = me
+                        .pending
+                        .iter()
+                        .find(|owed| {
+                            owed.client_order_id == *client_order_id
+                                && owed.fill_ts_ms == *fill_ts_ms
+                        })
+                        .filter(|owed| owed.restored)
+                        .map_or(Owing::ThisRun, |_| Owing::AcrossRestart);
+                    me.fold_mark(
+                        &Mark {
+                            client_order_id: client_order_id.clone(),
+                            strategy: *strategy,
+                            symbol: *symbol,
+                            fill_ts_ms: *fill_ts_ms,
+                            horizon_ms: *horizon_ms,
+                            mid: *mid,
+                            signed_markout_bps: *signed_markout_bps,
+                            actual_horizon_ms: *actual_horizon_ms,
+                            notional_usdt: *notional_usdt,
+                        },
+                        owing,
+                    );
+                    me.mark_answered(client_order_id, *fill_ts_ms, *horizon_ms);
+                }
+                // Every fill waiting for a horizon when this record was
+                // written was waiting on a process that stopped. Its marks
+                // are late for that reason and not because this engine was
+                // slow, and the two are answered differently.
+                WalRecord::Boot { .. } => {
+                    for owed in me.pending.iter_mut() {
+                        owed.restored = true;
+                    }
+                }
                 WalRecord::OrderUpdate {
                     update: OrderUpdate::StreamReset { .. },
                     ..
@@ -1140,6 +1330,7 @@ impl Fills {
                     open_orders,
                     attribution,
                     portfolio,
+                    owed_markouts,
                     ..
                 } => {
                     for open in open_orders {
@@ -1148,6 +1339,11 @@ impl Fills {
                             (open.request.clone(), open.arrival_mid),
                         );
                     }
+                    // A restatement is "set", not "add": at this point in the
+                    // stream these are exactly the fills the records before it
+                    // left owed, so a chain read and a single-segment read
+                    // agree on the queue.
+                    me.pending = owed_markouts.iter().filter_map(Owed::from_record).collect();
                     // What each sleeve was HOLDING, which the cost totals
                     // above have no use for and a position cannot do
                     // without: the fills that opened it are in the segment
@@ -1237,14 +1433,6 @@ impl Fills {
                 _ => {}
             }
         }
-        // Replaying a log is not trading: nothing is owed a future mark,
-        // because every mark this log will ever hold is already in it. The
-        // drop count goes with the queue -- it counts this replay popping its
-        // own transient queue, which is not something that happened to the
-        // run, and reporting it as one would send a reader looking for an
-        // incident that never was.
-        me.pending.clear();
-        me.dropped = 0;
         Ok(me)
     }
 }

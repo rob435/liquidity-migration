@@ -138,6 +138,35 @@ fn sleeve(value: &Value) -> &str {
         .filter(|s| !s.is_empty())
         .unwrap_or("unattributed")
 }
+/// One exact engine amount: `{"value":{"n":"..","d":".."},"provenance":..}`.
+fn exact(value: &Value) -> Option<f64> {
+    let numerator: f64 = value["value"]["n"].as_str()?.parse().ok()?;
+    let denominator: f64 = value["value"]["d"].as_str()?.parse().ok()?;
+    let quotient = numerator / denominator;
+    quotient.is_finite().then_some(quotient)
+}
+/// The venue's own mark for one holding, or None unless exactly one venue row is that holding.
+fn venue_mark(rows: &[Value], side: &str, qty: Option<f64>, entry_px: Option<f64>) -> Option<f64> {
+    let venue_side = match side {
+        "long" => "Buy",
+        "short" => "Sell",
+        _ => return None,
+    };
+    let mut found = None;
+    for row in rows.iter().filter(|v| v.is_object()) {
+        if row["side"].as_str() != Some(venue_side)
+            || number(&row["qty"]) != qty
+            || number(&row["entry_px"]) != entry_px
+        {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(exact(&row["exact_amounts"]["mark_price"]));
+    }
+    found.flatten()
+}
 
 fn read_sample(source: &Source, clock: &mut impl FnMut() -> i64) -> Value {
     let raw = fs::read_to_string(&source.path);
@@ -270,6 +299,33 @@ fn engine_fields(out: &mut Value, beat: &Value, now: i64) {
         rounded_age(number(&beat["account_observed_wall_ts_ms"]).map(|v| now as f64 - v));
     out["equity_usdt"] = json!(number(&beat["account_equity_usdt"]));
     out["available_usdt"] = json!(number(&beat["account_available_usdt"]));
+    // The venue's own per-position mark and entry, which is the only thing here
+    // that can split an equity reading into cash and mark. Absent when the
+    // engine has not read the account: null, never a confident zero.
+    let venue_rows = beat["account_metrics"]
+        .is_object()
+        .then(|| array(&beat["account_metrics"]["positions"]));
+    let unrealised = venue_rows
+        .and_then(|rows| {
+            rows.iter().try_fold(0.0, |sum, row| {
+                let amounts = &row["exact_amounts"];
+                let sign = match row["side"].as_str()? {
+                    "Buy" => 1.0,
+                    "Sell" => -1.0,
+                    _ => return None,
+                };
+                let pnl = (exact(&amounts["mark_price"])? - exact(&amounts["entry_price"])?)
+                    * exact(&amounts["quantity"])?;
+                Some(sum + sign * pnl)
+            })
+        })
+        .filter(|v| v.is_finite());
+    out["unrealised_pnl_usdt"] = json!(unrealised.map(|v| rounded(v, 8)));
+    out["wallet_cash_usdt"] = json!(number(&beat["account_equity_usdt"])
+        .zip(unrealised)
+        .map(|(equity, pnl)| equity - pnl)
+        .filter(|v| v.is_finite())
+        .map(|v| rounded(v, 8)));
     out["position_count"] = json!(positions.len());
     out["position_entry_notional_usdt"] = json!(rounded(notional, 8));
     out["sleeve_positions"] = json!(sleeves);
@@ -283,6 +339,25 @@ fn engine_fields(out: &mut Value, beat: &Value, now: i64) {
     ] {
         out[key] = json!(count(&beat[key]));
     }
+    let listed: Vec<Value> = positions
+        .iter()
+        .filter(|v| v.is_object())
+        .map(|row| {
+            let side = row["side"].as_str().unwrap_or_default();
+            json!({
+                "symbol": row["symbol"].clone(),
+                "side": side,
+                "qty": row["qty"].clone(),
+                "entry_px": row["entry_px"].clone(),
+                "mark_px": venue_rows.and_then(|rows| {
+                    venue_mark(rows, side, number(&row["qty"]), number(&row["entry_px"]))
+                }),
+                "strategy": row["strategy"].clone(),
+            })
+        })
+        .collect();
+    out["positions"] = json!(listed);
+    out["positions_truncated"] = json!(false);
     for key in [
         "may_open",
         // Recorded beside the latch because `may_open` alone no longer says
@@ -311,6 +386,12 @@ fn engine_fields(out: &mut Value, beat: &Value, now: i64) {
     .chain(ORDER_PATH_FIELDS)
     {
         out[*key] = json!(number(&beat[*key]));
+    }
+    // `append` refuses a line over the cap, and a refusal loses the whole
+    // minute for every realm. The position list is what gives way.
+    if json_text(out).len() + 1 > MAX_LINE_BYTES {
+        out["positions"] = Value::Null;
+        out["positions_truncated"] = json!(true);
     }
 }
 

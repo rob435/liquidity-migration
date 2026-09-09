@@ -33,7 +33,20 @@ CAPTURE_SOURCE_CONTRACT = {
         "/v5/account/transaction-log",
         {"accountType": "UNIFIED", "category": "linear", "currency": "USDT", "limit": "50"},
     ),
+    # `category=linear` above excludes account transfers, so each transfer
+    # direction is its own unfiltered `type` query on the same endpoint.
+    "transfer_in": (
+        "/v5/account/transaction-log",
+        {"accountType": "UNIFIED", "currency": "USDT", "type": "TRANSFER_IN", "limit": "50"},
+    ),
+    "transfer_out": (
+        "/v5/account/transaction-log",
+        {"accountType": "UNIFIED", "currency": "USDT", "type": "TRANSFER_OUT", "limit": "50"},
+    ),
 }
+CAPTURE_TRANSFER_SOURCES = ("transfer_in", "transfer_out")
+# Captures written before the transfer sources existed name only these three.
+CAPTURE_REQUIRED_SOURCES = ("execution", "closed_pnl", "transaction")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -57,6 +70,10 @@ class WalSegmentIdentity:
     sha256: str
     records: int
     torn_tail: bool
+    # The first and last `wall_ts_ms` in the segment, over every record kind,
+    # including the kinds `accounting_only` drops. Many kinds carry none.
+    first_ts_ms: int | None = None
+    last_ts_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -149,6 +166,14 @@ class VenueCapture:
     sha256: str
     path: str
     issues: tuple[str, ...]
+    transfers_in: tuple[Mapping[str, Any], ...] = ()
+    transfers_out: tuple[Mapping[str, Any], ...] = ()
+
+    def cash_rows(self) -> tuple[Mapping[str, Any], ...]:
+        """Every wallet-cash row the capture holds: the linear transaction log plus both
+        transfer directions, which that log's `category=linear` filter excludes."""
+
+        return self.transactions + self.transfers_in + self.transfers_out
 
 
 @dataclass(frozen=True)
@@ -279,12 +304,27 @@ ACCOUNTING_KINDS = {"boot", "names", "identity_state", "order_lineage_restored",
                     "recovered_fill", "recovered_fill_v2", "recovered_fill_v3", *SEGMENT_KINDS}
 
 
+SEGMENT_BASE_ACCOUNTING_FIELDS = {
+    "kind",
+    "wall_ts_ms",
+    "strategies",
+    "symbols",
+    "open_orders",
+    # The rotation's restatement of exposure: per-sleeve claims, and the
+    # physical signed quantity the log knows. Both are small.
+    "attribution",
+    "logged_exposure",
+}
+
+
 def _read_segment(path: Path, index: int, *, accounting_only: bool) -> tuple[list[tuple[int, dict[str, Any]]], WalSegmentIdentity, bool]:
     records: list[tuple[int, dict[str, Any]]] = []
     digest = hashlib.sha256()
     count = 0
     torn = False
     trusted = index == 1
+    first_ts: int | None = None
+    last_ts: int | None = None
     with path.open("rb") as handle:
         size = os.fstat(handle.fileno()).st_size
         def read(n: int) -> bytes:
@@ -315,16 +355,22 @@ def _read_segment(path: Path, index: int, *, accounting_only: bool) -> tuple[lis
             kind = record.get("kind")
             if count == 1 and kind in SEGMENT_KINDS:
                 trusted = True
+            stamp = _integer(record.get("wall_ts_ms"))
+            if stamp is not None:
+                first_ts = first_ts if first_ts is not None else stamp
+                last_ts = stamp
             if accounting_only and kind not in ACCOUNTING_KINDS:
                 continue
             if accounting_only and kind in SEGMENT_KINDS:
                 record = {key: value for key, value in record.items()
-                          if key in {"kind", "wall_ts_ms", "strategies", "symbols", "open_orders"}}
+                          if key in SEGMENT_BASE_ACCOUNTING_FIELDS}
             records.append((count, record))
         # Hash even a rejected incomplete suffix; identities cover original bytes.
         while handle.tell() < size:
             read(min(1 << 20, size - handle.tell()))
-    identity = WalSegmentIdentity(index, str(path), size, digest.hexdigest(), count, torn)
+    identity = WalSegmentIdentity(
+        index, str(path), size, digest.hexdigest(), count, torn, first_ts, last_ts
+    )
     return records, identity, trusted
 
 
@@ -658,6 +704,8 @@ def read_venue_capture(path: Path) -> VenueCapture:
     executions: list[Mapping[str, Any]] = []
     closed_pnl: list[Mapping[str, Any]] = []
     transactions: list[Mapping[str, Any]] = []
+    transfers_in: list[Mapping[str, Any]] = []
+    transfers_out: list[Mapping[str, Any]] = []
     issues: list[str] = []
     for line_number, line in enumerate(raw.splitlines(), start=1):
         if not line.strip():
@@ -673,6 +721,10 @@ def read_venue_capture(path: Path) -> VenueCapture:
             closed_pnl.append(row)
         elif kind in {"transaction", "txn"}:
             transactions.append(row)
+        elif kind == "transfer_in":
+            transfers_in.append(row)
+        elif kind == "transfer_out":
+            transfers_out.append(row)
         else:
             issues.append(f"venue file line {line_number} has unknown _kind {kind!r}")
     if manifest is None:
@@ -687,7 +739,22 @@ def read_venue_capture(path: Path) -> VenueCapture:
         sha256=hashlib.sha256(raw).hexdigest(),
         path=str(resolved),
         issues=tuple(issues),
+        transfers_in=tuple(transfers_in),
+        transfers_out=tuple(transfers_out),
     )
+
+
+def unfetched_transfer_sources(capture: VenueCapture) -> tuple[str, ...]:
+    """The transfer sources this capture does not prove it paginated to completion."""
+
+    sources = capture.manifest.get("sources") if capture.manifest else None
+    sources = sources if isinstance(sources, Mapping) else {}
+    unfetched = []
+    for source in CAPTURE_TRANSFER_SOURCES:
+        receipt = sources.get(source)
+        if not isinstance(receipt, Mapping) or receipt.get("complete") is not True:
+            unfetched.append(source)
+    return tuple(unfetched)
 
 
 def _dedupe(
@@ -734,11 +801,17 @@ def _manifest_covers(capture: VenueCapture, opened_ms: int | None, closed_ms: in
             "execution": len(capture.executions),
             "closed_pnl": len(capture.closed_pnl),
             "transaction": len(capture.transactions),
+            "transfer_in": len(capture.transfers_in),
+            "transfer_out": len(capture.transfers_out),
         }
-        if set(sources) != set(CAPTURE_SOURCE_CONTRACT):
+        if set(sources) - set(CAPTURE_SOURCE_CONTRACT) or set(CAPTURE_REQUIRED_SOURCES) - set(sources):
             issues.append("venue capture source receipts do not name exactly the required sources")
         for source, (endpoint, params) in CAPTURE_SOURCE_CONTRACT.items():
             receipt = sources.get(source)
+            if receipt is None and source in CAPTURE_TRANSFER_SOURCES:
+                # A capture predating the transfer sources; the reader that
+                # needs transfers names them unfetched rather than zero.
+                continue
             if not isinstance(receipt, Mapping) or receipt.get("complete") is not True:
                 issues.append(f"venue capture does not prove complete {source} pagination")
                 continue

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture Bybit executions, closed PnL, and account transactions with GET requests only.
+"""Capture Bybit executions, closed PnL, account transactions and transfers with GET requests only.
 
 Credentials are read only from the repository's realm-specific environment
 variables. This command has no POST path and does not consult ``REAL_MONEY``;
@@ -36,6 +36,7 @@ from liquidity_migration.core.venue_realm import (  # noqa: E402
 )
 from liquidity_migration.research.venue_wal_accounting import (  # noqa: E402
     CAPTURE_MAX_WINDOW_MS,
+    CAPTURE_SOURCE_CONTRACT,
 )
 
 RECV_WINDOW_MS = 5_000
@@ -67,28 +68,17 @@ class Source:
     row_kind: str
 
 
-SOURCES = (
+SOURCES = tuple(
     Source(
-        name="execution",
-        path="/v5/execution/list",
-        params={"category": "linear", "settleCoin": "USDT", "limit": "100"},
-        time_field="execTime",
-        row_kind="execution",
-    ),
-    Source(
-        name="closed_pnl",
-        path="/v5/position/closed-pnl",
-        params={"category": "linear", "limit": "100"},
-        time_field="updatedTime",
-        row_kind="closed_pnl",
-    ),
-    Source(
-        name="transaction",
-        path="/v5/account/transaction-log",
-        params={"accountType": "UNIFIED", "category": "linear", "currency": "USDT", "limit": "50"},
-        time_field="transactionTime",
-        row_kind="transaction",
-    ),
+        name=name,
+        path=endpoint,
+        params=params,
+        time_field={"execution": "execTime", "closed_pnl": "updatedTime"}.get(
+            name, "transactionTime"
+        ),
+        row_kind=name,
+    )
+    for name, (endpoint, params) in CAPTURE_SOURCE_CONTRACT.items()
 )
 
 
@@ -380,7 +370,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     sources = manifest["sources"]
     print(
         f"captured {sources['execution']['rows']} executions, {sources['closed_pnl']['rows']} closed-PnL rows, "
-        f"and {sources['transaction']['rows']} transactions to {args.out.expanduser().resolve()}"
+        f"{sources['transaction']['rows']} transactions and "
+        f"{sources['transfer_in']['rows'] + sources['transfer_out']['rows']} transfers "
+        f"to {args.out.expanduser().resolve()}"
     )
     return 0
 

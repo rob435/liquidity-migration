@@ -33,9 +33,10 @@ declares and appends one line per artifact per run.
 | `worker-<realm>-<YYYY-MM>.jsonl` | always, one line per realm per minute |
 | `recorder-<venue>-<YYYY-MM>.jsonl` | always, one line per tape recorder per minute |
 
-Ten lines a minute, about 11 KB: **16 MB a day, 5.8 GB a year**, in monthly
-files. Nothing rotates or prunes them — next to 1.7 TB a month of tape this is
-noise, and the history is the point.
+Ten lines a minute, about 12 KB with the position lists and never over 40 KB
+because each line is capped at 4,096 bytes: **17 MB a day, 6.3 GB a year**, in
+monthly files. Nothing rotates or prunes them — next to 1.7 TB a month of tape
+this is noise, and the history is the point.
 
 | Field | Meaning |
 | :--- | :--- |
@@ -46,7 +47,10 @@ noise, and the history is the point.
 | Metrics transport | Direct configured HTTP(S) endpoint, Basic authentication, ten-second timeout; proxy environment and redirects are unsupported. Failed pushes warn after all local appends and do not fail the sampler |
 | `equity_usdt`, `available_usdt` | The venue's own reading, from the heartbeat |
 | `heartbeat_age_ms`, `account_age_ms` | Age of the heartbeat, and of the venue reading inside it |
+| `unrealised_pnl_usdt`, `wallet_cash_usdt` | Σ `(mark − entry) × quantity` signed by side over the venue's own per-position marks in the heartbeat, and `equity_usdt` less that. Both `null` — never zero — when the engine has read no account, or when any position's mark, entry or quantity is unreadable |
 | `position_count`, `position_entry_notional_usdt`, `sleeve_positions` | Holdings, and how many each **configured** sleeve owns, zero included; `unattributed` is the owner's hand exposure |
+| `positions` | One compact row per holding: `symbol`, `side`, `qty`, `entry_px`, `mark_px`, `strategy`. A null `strategy` is the owner's hand exposure; `mark_px` is null unless exactly one venue row matches the holding's side, quantity and entry price. Not pushed as a metric |
+| `positions_truncated` | The list was dropped to keep the line inside the 4,096-byte cap that makes one append one atomic write; the two scalars above stay |
 | `sleeve_entries_enabled`, `sleeve_blockers` | Per configured sleeve: the effective entry gate (1/0) and how many symbols it is blocked on |
 | `may_open`, `entry_blockers`, `strategy_errors`, `working_entries`, `pending_flatten_requests` | Whether new risk is admitted and why not; orders resting at the venue; flattens not yet acknowledged. `may_open` is the operator latch alone |
 | `private_stream_ready`, `private_stream_unready_ms` | Whether the private account channel is usable, and how long it has not been (`null` while usable). Entries are refused while it is unready, so both are needed with `may_open` to say whether the engine was admitting at the sample |

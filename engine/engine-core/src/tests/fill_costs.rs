@@ -4,6 +4,8 @@
 //! [`super`].
 
 use super::*;
+use crate::execution::HORIZONS_MS;
+use engine_types::PositionView;
 
 #[tokio::test(start_paused = true)]
 async fn the_order_record_carries_the_midpoint_it_will_be_judged_against() {
@@ -195,4 +197,300 @@ async fn a_sleeve_with_no_name_of_its_own_keeps_the_plugs() {
         .find_map(crate::replay::LogNames::strategy_table)
         .expect("the log says what its ids mean");
     assert_eq!(said, vec!["buyer".to_string()], "the plug's own name");
+}
+
+// ------------------------------------------ horizons owed across a restart
+
+/// The order the fixtures below are all one fill of.
+const OWED_ID: &str = "eng-1700000000000-4";
+
+/// A fill this old is past the one-second, fifteen-second and one-minute
+/// horizons and their lateness bounds, and inside the five-minute one. Four
+/// seconds of slack, so a slow boot cannot push the last one over.
+fn stale_fill_ms() -> i64 {
+    clock::wall_ms() - 301_000
+}
+
+fn owed_order() -> OrderRequest {
+    OrderRequest {
+        client_order_id: OWED_ID.into(),
+        strategy: StrategyId(0),
+        symbol: SymbolId(0),
+        side: Side::Buy,
+        qty: 0.01,
+        kind: OrderKind::Market,
+        stop: None,
+        reduce_only: false,
+        exact_terms: None,
+        sleeve_effect: None,
+        close_position: false,
+    }
+}
+
+fn owed_fill(venue_ts_ms: i64) -> OrderUpdate {
+    OrderUpdate::Fill {
+        allocation: None,
+        amounts: None,
+        exec_id: String::new(),
+        client_order_id: OWED_ID.into(),
+        symbol: SymbolId(0),
+        side: Side::Buy,
+        qty: 0.01,
+        px: 30_000.0,
+        fee: Some(0.0),
+        is_maker: true,
+        forced_close: None,
+        venue_ts_ms,
+        recv_ns: 4,
+    }
+}
+
+/// A previous run: one order, its fill, and then nothing. Every horizon that
+/// fill was owed died with that process before this change.
+fn owed_replay(venue_ts_ms: i64) -> Vec<WalRecord> {
+    vec![
+        WalRecord::Boot {
+            version: "old".into(),
+            config_sha256: "abc".into(),
+            wall_ts_ms: recent_replay_ms(),
+            commit: String::new(),
+        },
+        WalRecord::OrderSent {
+            dispatch: None,
+            request: owed_order(),
+            wire_ns: 1,
+            arrival_mid: 30_000.0,
+        },
+        WalRecord::OrderUpdate {
+            callbacks: None,
+            update: owed_fill(venue_ts_ms),
+        },
+    ]
+}
+
+/// What the venue holds because of that fill.
+fn owed_position() -> Vec<PositionView> {
+    vec![PositionView {
+        exact_amounts: None,
+        exact_stop_px: None,
+        symbol: SymbolId(0),
+        side: Side::Buy,
+        qty: 0.01,
+        entry_px: 30_000.0,
+        stop_attached: false,
+        stop_px: 0.0,
+        leverage: None,
+    }]
+}
+
+/// Every markout in a log, keyed the way the record itself keys a horizon.
+fn marks_in(records: &[WalRecord]) -> Vec<(String, i64, u64)> {
+    records
+        .iter()
+        .filter_map(|record| match record {
+            WalRecord::Markout {
+                client_order_id,
+                fill_ts_ms,
+                horizon_ms,
+                ..
+            } => Some((client_order_id.clone(), *fill_ts_ms, *horizon_ms)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_writes_the_marks_the_last_process_still_owed() {
+    // The obligation lives in the log, not in memory. A restart used to end
+    // every horizon a fill was still owed, so the 1m and 5m columns lost
+    // whatever traded near a deploy.
+    let filled_ms = stale_fill_ms();
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
+    let (mut engine, h) = build_with_venue_state(
+        allow_all(),
+        vec![Box::new(buyer)],
+        &["BTCUSDT"],
+        &owed_replay(filled_ms),
+        Vec::new(),
+        owed_position(),
+    )
+    .await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, false),
+            &mut ScriptOrderFeed::empty(),
+            tokio::time::sleep(Duration::from_millis(400)),
+        )
+        .await
+        .unwrap();
+
+    let written = marks_in(&h.records.lock().unwrap());
+    assert_eq!(
+        written,
+        HORIZONS_MS
+            .iter()
+            .map(|horizon| (OWED_ID.to_string(), filled_ms, *horizon))
+            .collect::<Vec<_>>(),
+        "one mark per horizon, and no horizon twice"
+    );
+    let total = engine.fills().total();
+    assert_eq!(
+        total.marks_late, 3,
+        "the first three horizons were past their lateness bound at boot"
+    );
+    assert_eq!(
+        total.marks_late_across_restart, 3,
+        "and they were late because the process stopped, not because it stalled"
+    );
+    assert!(
+        total.markout[HORIZONS_MS.len() - 1].mean().is_some(),
+        "the five-minute horizon came round while this engine was up"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rotation_between_the_fill_and_the_restart_keeps_the_obligation() {
+    // Boot replays one segment. A rotation that did not restate the owed
+    // horizons would lose them at the segment boundary even without a crash.
+    let filled_ms = stale_fill_ms();
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
+    let (mut engine, _h) = build(
+        allow_all(),
+        vec![Box::new(buyer)],
+        &["BTCUSDT"],
+        &[
+            WalRecord::Boot {
+                version: "old".into(),
+                config_sha256: "abc".into(),
+                wall_ts_ms: recent_replay_ms(),
+                commit: String::new(),
+            },
+            WalRecord::OrderSent {
+                dispatch: None,
+                request: owed_order(),
+                wire_ns: 1,
+                arrival_mid: 30_000.0,
+            },
+        ],
+    )
+    .await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    // Delivered now, stamped by the venue 301 seconds ago: this engine dates
+    // it from its own clock and owes it every horizon, and the restatement
+    // carries the venue's stamp, which is the only clock the next process
+    // shares.
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, false),
+            &mut ScriptOrderFeed {
+                learned: Rc::new(RefCell::new(Vec::new())),
+                updates: VecDeque::from(vec![owed_fill(filled_ms)]),
+            },
+            tokio::time::sleep(Duration::from_millis(40)),
+        )
+        .await
+        .unwrap();
+
+    let base = engine.rotation_base(clock::wall_ms());
+    let WalRecord::SegmentBase {
+        ref owed_markouts, ..
+    } = base
+    else {
+        panic!("a rotation writes a segment base");
+    };
+    assert_eq!(owed_markouts.len(), 1, "the rotation restates it");
+    assert_eq!(owed_markouts[0].client_order_id, OWED_ID);
+    assert_eq!(owed_markouts[0].fill_ts_ms, filled_ms);
+    assert_eq!(owed_markouts[0].owed, 0b1111, "every horizon still owed");
+
+    let (mut restarted, h) = build_with_venue_state(
+        allow_all(),
+        vec![Box::new(Buyer::new("BTCUSDT", 100, 0.01).0)],
+        &["BTCUSDT"],
+        std::slice::from_ref(&base),
+        Vec::new(),
+        owed_position(),
+    )
+    .await;
+    let symbol = restarted.market().table.get("BTCUSDT").unwrap();
+    restarted
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, false),
+            &mut ScriptOrderFeed::empty(),
+            tokio::time::sleep(Duration::from_millis(400)),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        marks_in(&h.records.lock().unwrap()),
+        HORIZONS_MS
+            .iter()
+            .map(|horizon| (OWED_ID.to_string(), filled_ms, *horizon))
+            .collect::<Vec<_>>(),
+        "the obligation survived the segment boundary and was answered"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn replaying_one_log_twice_writes_no_mark_twice() {
+    // The second boot reads the marks the first one wrote and asks for
+    // nothing more. Without that, every restart would add another copy of
+    // every horizon and the columns would count one fill many times.
+    let filled_ms = stale_fill_ms();
+    let replayed = owed_replay(filled_ms);
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 100, 0.01);
+    let (mut engine, first) = build_with_venue_state(
+        allow_all(),
+        vec![Box::new(buyer)],
+        &["BTCUSDT"],
+        &replayed,
+        Vec::new(),
+        owed_position(),
+    )
+    .await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, false),
+            &mut ScriptOrderFeed::empty(),
+            tokio::time::sleep(Duration::from_millis(400)),
+        )
+        .await
+        .unwrap();
+
+    let mut once = replayed.clone();
+    once.extend(first.records.lock().unwrap().iter().cloned());
+    assert_eq!(marks_in(&once).len(), HORIZONS_MS.len());
+
+    let (mut again, second) = build_with_venue_state(
+        allow_all(),
+        vec![Box::new(Buyer::new("BTCUSDT", 100, 0.01).0)],
+        &["BTCUSDT"],
+        &once,
+        Vec::new(),
+        owed_position(),
+    )
+    .await;
+    let symbol = again.market().table.get("BTCUSDT").unwrap();
+    again
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, false),
+            &mut ScriptOrderFeed::empty(),
+            tokio::time::sleep(Duration::from_millis(400)),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        marks_in(&second.records.lock().unwrap()).is_empty(),
+        "every horizon was already answered in the log this booted from"
+    );
+    // And the report read off that one log counts each horizon once, with
+    // the restart named as the reason the first three were late.
+    let read_back = crate::execution::Fills::from_records(&once).total();
+    assert_eq!(read_back.marks_late, 3);
+    assert_eq!(read_back.marks_late_across_restart, 3);
+    assert!(read_back.markout[HORIZONS_MS.len() - 1].mean().is_some());
 }

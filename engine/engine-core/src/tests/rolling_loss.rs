@@ -189,6 +189,7 @@ fn segment_base(
         runtime_control_consumed: Vec::new(),
         open_orders: Vec::new(),
         rolling_loss_rows,
+        owed_markouts: Vec::new(),
     }
 }
 

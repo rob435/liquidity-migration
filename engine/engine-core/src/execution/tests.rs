@@ -413,7 +413,7 @@ fn a_mark_that_arrives_long_after_its_horizon_is_not_that_horizon() {
         actual_horizon_ms: 1_000 + LATENESS_BOUND_MS + 1,
         notional_usdt: 1_000.0,
     };
-    fills.fold_mark(&late);
+    fills.fold_mark(&late, Owing::ThisRun);
     let total = fills.total();
     assert_eq!(total.markout[0].mean(), None, "not folded in");
     assert_eq!(total.marks_late, 1, "counted, not hidden");
@@ -423,10 +423,13 @@ fn a_mark_that_arrives_long_after_its_horizon_is_not_that_horizon() {
     );
 
     // A mark inside the bound is the horizon it says it is.
-    fills.fold_mark(&Mark {
-        actual_horizon_ms: 1_250,
-        ..late
-    });
+    fills.fold_mark(
+        &Mark {
+            actual_horizon_ms: 1_250,
+            ..late
+        },
+        Owing::ThisRun,
+    );
     assert_eq!(fills.total().markout[0].mean(), Some(100.0));
 }
 
@@ -552,17 +555,20 @@ fn a_fill_with_no_usable_price_is_never_owed_a_mark() {
 #[test]
 fn a_mark_at_a_horizon_this_build_does_not_measure_is_not_miscounted() {
     let mut fills = Fills::default();
-    fills.fold_mark(&Mark {
-        client_order_id: "eng-1".into(),
-        strategy: CARRY,
-        symbol: BTC,
-        fill_ts_ms: 0,
-        horizon_ms: 7_777,
-        mid: Some(101.0),
-        signed_markout_bps: Some(100.0),
-        actual_horizon_ms: 7_777,
-        notional_usdt: 1_000.0,
-    });
+    fills.fold_mark(
+        &Mark {
+            client_order_id: "eng-1".into(),
+            strategy: CARRY,
+            symbol: BTC,
+            fill_ts_ms: 0,
+            horizon_ms: 7_777,
+            mid: Some(101.0),
+            signed_markout_bps: Some(100.0),
+            actual_horizon_ms: 7_777,
+            notional_usdt: 1_000.0,
+        },
+        Owing::ThisRun,
+    );
     let total = fills.total();
     assert!(total.markout.iter().all(|m| m.mean().is_none()));
 }
@@ -725,36 +731,379 @@ fn a_mark_survives_the_round_trip_through_a_record() {
         notional_usdt: 1_000.0,
     };
     let mut folded = Fills::default();
-    folded.fold_mark(&mark);
+    folded.fold_mark(&mark, Owing::ThisRun);
     let mut off_the_record = Fills::default();
-    off_the_record.fold_mark(&Mark {
-        // Everything a reader would rebuild it from.
-        ..match mark.to_record() {
-            WalRecord::Markout {
-                client_order_id,
-                strategy,
-                symbol,
-                fill_ts_ms,
-                horizon_ms,
-                mid,
-                signed_markout_bps,
-                actual_horizon_ms,
-                notional_usdt,
-            } => Mark {
-                client_order_id,
-                strategy,
-                symbol,
-                fill_ts_ms,
-                horizon_ms,
-                mid,
-                signed_markout_bps,
-                actual_horizon_ms,
-                notional_usdt,
-            },
-            other => panic!("expected a markout record, got {other:?}"),
-        }
-    });
+    off_the_record.fold_mark(
+        &Mark {
+            // Everything a reader would rebuild it from.
+            ..match mark.to_record() {
+                WalRecord::Markout {
+                    client_order_id,
+                    strategy,
+                    symbol,
+                    fill_ts_ms,
+                    horizon_ms,
+                    mid,
+                    signed_markout_bps,
+                    actual_horizon_ms,
+                    notional_usdt,
+                } => Mark {
+                    client_order_id,
+                    strategy,
+                    symbol,
+                    fill_ts_ms,
+                    horizon_ms,
+                    mid,
+                    signed_markout_bps,
+                    actual_horizon_ms,
+                    notional_usdt,
+                },
+                other => panic!("expected a markout record, got {other:?}"),
+            }
+        },
+        Owing::ThisRun,
+    );
     assert_eq!(folded.total(), off_the_record.total());
+}
+
+// --------------------------------------------- horizons across a restart
+
+/// The venue stamp every `filled` fixture carries.
+const FILL_MS: i64 = 1_700_000_000_000;
+
+/// What the engine's monotonic clock reads when boot finishes. It starts with
+/// the process, so it is milliseconds however old the log it just read is.
+const BOOT_NS: u64 = 50 * MS;
+
+/// What boot takes over: the fills the log priced, less the marks it already
+/// holds, dated against this process's clock.
+fn boot(log: &[WalRecord], now_ns: u64, now_wall_ms: i64) -> Fills {
+    Fills::recovery_lots(log, None, now_ns, now_wall_ms).expect("boot reads its own log")
+}
+
+/// A rotation of an engine that is still owed `owed`.
+fn rotation(owed: Vec<engine_types::OwedMarkout>) -> WalRecord {
+    WalRecord::SegmentBase {
+        order_id_epoch_ms: None,
+        open_trade_lots: None,
+        legacy_signal_source_retirements: Vec::new(),
+        portfolio_control: Default::default(),
+        pending_order_dispatches: Vec::new(),
+        signal_producers: Vec::new(),
+        identities: None,
+        instrument_catalog: None,
+        signal_suspensions: Vec::new(),
+        portfolio: None,
+        strategy_processes: Vec::new(),
+        strategy_callback_queues: Vec::new(),
+        strategy_callback_sources: Vec::new(),
+        signal_callback_deliveries: Vec::new(),
+        strategy_callbacks: Vec::new(),
+        wall_ts_ms: FILL_MS,
+        strategies: vec!["carry".into(), "long".into()],
+        symbols: vec!["BTCUSDT".into(), "ETHUSDT".into()],
+        may_open: true,
+        control_anchors: vec![],
+        attribution: vec![],
+        logged_exposure: vec![],
+        intended_stops: vec![],
+        recent_execution_ids: vec![],
+        execution_history_through_ms: Some(FILL_MS),
+        target_book_latches: vec![],
+        strategy_checkpoints: vec![],
+        strategy_global_checkpoints: vec![],
+        strategy_events: vec![],
+        signal_observations: vec![],
+        signal_cursors: vec![],
+        signal_subscriptions: vec![],
+        signal_gaps: Vec::new(),
+        strategy_effects: Default::default(),
+        runtime_control_requests: vec![],
+        runtime_control_consumed: vec![],
+        open_orders: vec![],
+        rolling_loss_rows: vec![],
+        owed_markouts: owed,
+    }
+}
+
+/// A book that arrived at `recv_ns`, so every horizon before it has a
+/// midpoint to be measured against.
+fn book_at(recv_ns: u64) -> MarketState {
+    let mut market = market(100.9, 101.1);
+    market.quotes[BTC.0 as usize].recv_ns = recv_ns;
+    market
+}
+
+#[test]
+fn a_restart_takes_over_the_horizons_a_fill_is_still_owed() {
+    // The queue is memory; the fill and its marks are the log. So the log is
+    // what boot reads the obligation back off, and a horizon whose time has
+    // not come yet is still measured against the real book when it does.
+    let log = vec![
+        names(),
+        sent("eng-1", CARRY, 100.0),
+        filled("eng-1", 100.0, false),
+    ];
+    let mut fills = boot(&log, BOOT_NS, FILL_MS + 2_000);
+    assert_eq!(fills.pending(), 1, "the fill is still owed its horizons");
+
+    let now = BOOT_NS + 100 * MS;
+    let marks = fills.due(now, &book_at(now));
+    assert_eq!(marks.len(), 1, "only the 1s horizon has come round");
+    assert_eq!(marks[0].horizon_ms, 1_000);
+    assert_eq!(marks[0].mid, Some(101.0));
+    assert_eq!(
+        marks[0].actual_horizon_ms, 2_100,
+        "dated from the venue's own stamp, not from the boot"
+    );
+    let total = fills.total();
+    assert_eq!(
+        total.markout[0].mean(),
+        Some(100.0),
+        "inside the lateness bound, so it is a measurement"
+    );
+    assert_eq!(total.marks_late, 0);
+    assert_eq!(fills.pending(), 1, "15s, 1m and 5m are still owed");
+}
+
+#[test]
+fn a_horizon_the_restart_ran_past_comes_back_late_and_says_which_kind_of_late() {
+    // The three later horizons were already past their lateness bound when
+    // the engine came up. They are answered rather than dropped, with the
+    // age they really have -- and counted as a restart rather than as this
+    // engine looking late, because those have different answers.
+    let log = vec![
+        names(),
+        sent("eng-1", CARRY, 100.0),
+        filled("eng-1", 100.0, false),
+    ];
+    let mut fills = boot(&log, BOOT_NS, FILL_MS + 2_000);
+
+    let now = BOOT_NS + 320_000 * MS;
+    let marks = fills.due(now, &book_at(now));
+    assert_eq!(
+        marks.len(),
+        HORIZONS_MS.len(),
+        "every horizon is answered, once"
+    );
+    assert!(marks.iter().all(|mark| mark.actual_horizon_ms == 322_000));
+    let total = fills.total();
+    assert_eq!(total.marks_late as usize, HORIZONS_MS.len());
+    assert_eq!(
+        total.marks_late_across_restart as usize,
+        HORIZONS_MS.len(),
+        "a deploy, not a stall"
+    );
+    assert_eq!(fills.pending(), 0);
+}
+
+#[test]
+fn a_horizon_taken_over_is_dated_before_this_process_started() {
+    // The monotonic clock starts with the process, so a fill from before the
+    // restart happened *earlier than the origin* and its stamp is negative.
+    // Clamped at the origin instead, a two-minute-old fill would look brand
+    // new and its 1s column would end up holding a book read two minutes
+    // after the trade.
+    let log = vec![
+        names(),
+        sent("eng-1", CARRY, 100.0),
+        filled("eng-1", 100.0, false),
+    ];
+    let mut fills = boot(&log, BOOT_NS, FILL_MS + 120_000);
+    let now = BOOT_NS + MS;
+    let marks = fills.due(now, &book_at(now));
+
+    assert_eq!(
+        marks.iter().map(|mark| mark.horizon_ms).collect::<Vec<_>>(),
+        vec![1_000, 15_000, 60_000],
+        "three horizons were already behind us when the engine came up"
+    );
+    assert!(
+        marks.iter().all(|mark| mark.actual_horizon_ms == 120_001),
+        "the true age, from the venue's stamp: {:?}",
+        marks
+            .iter()
+            .map(|mark| mark.actual_horizon_ms)
+            .collect::<Vec<_>>()
+    );
+    let total = fills.total();
+    assert_eq!(total.marks_late, 3);
+    assert!(
+        total.markout.iter().all(|column| column.mean().is_none()),
+        "a book read two minutes on is not a one-second markout"
+    );
+    assert_eq!(fills.pending(), 1, "the five-minute horizon is still ahead");
+}
+
+#[test]
+fn a_mark_the_log_already_holds_is_not_asked_for_again() {
+    // Idempotence, and the whole reason the obligation is rebuilt from the
+    // records rather than from a count: replaying a log twice must not write
+    // one horizon of one fill twice.
+    let mut log = vec![
+        names(),
+        sent("eng-1", CARRY, 100.0),
+        filled("eng-1", 100.0, false),
+    ];
+    let now = BOOT_NS + 320_000 * MS;
+    let mut first = boot(&log, BOOT_NS, FILL_MS + 2_000);
+    log.extend(first.due(now, &book_at(now)).iter().map(Mark::to_record));
+
+    let mut second = boot(&log, BOOT_NS, FILL_MS + 2_000);
+    assert_eq!(second.pending(), 0, "the log answered every horizon");
+    assert!(second.due(now, &book_at(now)).is_empty(), "no second mark");
+
+    // And a log answered only part way owes exactly the rest.
+    let partly = vec![
+        names(),
+        sent("eng-2", CARRY, 100.0),
+        WalRecord::OrderUpdate {
+            callbacks: None,
+            update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
+                exec_id: String::new(),
+                client_order_id: "eng-2".into(),
+                symbol: BTC,
+                side: Side::Buy,
+                qty: 10.0,
+                px: 100.0,
+                fee: Some(0.0),
+                is_maker: false,
+                forced_close: None,
+                venue_ts_ms: FILL_MS,
+                recv_ns: 1,
+            },
+        },
+        WalRecord::Markout {
+            client_order_id: "eng-2".into(),
+            strategy: CARRY,
+            symbol: BTC,
+            fill_ts_ms: FILL_MS,
+            horizon_ms: 1_000,
+            mid: Some(101.0),
+            signed_markout_bps: Some(100.0),
+            actual_horizon_ms: 1_250,
+            notional_usdt: 1_000.0,
+        },
+    ];
+    let mut rest = boot(&partly, BOOT_NS, FILL_MS + 2_000);
+    let marks = rest.due(now, &book_at(now));
+    assert_eq!(
+        marks.iter().map(|mark| mark.horizon_ms).collect::<Vec<_>>(),
+        vec![15_000, 60_000, 300_000],
+        "the 1s horizon was already written down"
+    );
+}
+
+#[test]
+fn a_rotation_carries_the_horizons_still_owed_across_the_boundary() {
+    // Boot replays one segment. A fill in the segment before it is gone
+    // unless the restatement carries what it is still owed.
+    let mut live = Fills::default();
+    live.learn(&names());
+    live.on_fill(&fill(Side::Buy, 100.0, 10.0, 100.0), 0);
+    let owed = live.owed_markouts();
+    assert_eq!(owed.len(), 1);
+    assert_eq!(owed[0].owed, 0b1111, "every horizon");
+    assert_eq!(owed[0].fill_ts_ms, FILL_MS);
+
+    let mut fresh = boot(&[names(), rotation(owed)], BOOT_NS, FILL_MS + 2_000);
+    assert_eq!(fresh.pending(), 1);
+    let now = BOOT_NS + 100 * MS;
+    let marks = fresh.due(now, &book_at(now));
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].horizon_ms, 1_000);
+    assert_eq!(marks[0].signed_markout_bps, Some(100.0));
+}
+
+#[test]
+fn a_restatement_sets_the_queue_rather_than_adding_to_it() {
+    // Every other field of a base is "set state to this", and this one is
+    // too: a chain read that applied it as an addition would owe the same
+    // fill twice.
+    let owed = vec![engine_types::OwedMarkout {
+        client_order_id: "eng-1".into(),
+        strategy: CARRY,
+        symbol: BTC,
+        side: Side::Buy,
+        px: 100.0,
+        notional_usdt: 1_000.0,
+        fill_ts_ms: FILL_MS,
+        owed: 0b1111,
+    }];
+    let log = vec![
+        names(),
+        sent("eng-1", CARRY, 100.0),
+        filled("eng-1", 100.0, false),
+        rotation(owed),
+    ];
+    assert_eq!(boot(&log, BOOT_NS, FILL_MS + 2_000).pending(), 1);
+}
+
+#[test]
+fn a_fill_whose_last_horizon_expired_before_the_boot_is_not_taken_over() {
+    // Past the five-minute horizon and its lateness bound there is nothing
+    // left to read, and writing four absences would say this engine looked
+    // when it never existed.
+    let log = vec![
+        names(),
+        sent("eng-1", CARRY, 100.0),
+        filled("eng-1", 100.0, false),
+    ];
+    let mut fills = boot(&log, BOOT_NS, FILL_MS + 400_000);
+    assert_eq!(fills.pending(), 0);
+    assert!(fills.due(BOOT_NS, &book_at(BOOT_NS)).is_empty());
+}
+
+#[test]
+fn a_late_mark_off_a_log_is_a_restart_only_where_a_boot_lies_between() {
+    // The same split the live engine makes, read off a finished log: the
+    // `Boot` record between a fill and its mark is what says the horizon was
+    // owed by a process that stopped.
+    fn late_mark() -> WalRecord {
+        WalRecord::Markout {
+            client_order_id: "eng-1".into(),
+            strategy: CARRY,
+            symbol: BTC,
+            fill_ts_ms: FILL_MS,
+            horizon_ms: 1_000,
+            mid: Some(101.0),
+            signed_markout_bps: Some(100.0),
+            actual_horizon_ms: 60_000,
+            notional_usdt: 1_000.0,
+        }
+    }
+    let booted = WalRecord::Boot {
+        version: "engine".into(),
+        config_sha256: "abc".into(),
+        wall_ts_ms: FILL_MS + 1_000,
+        commit: String::new(),
+    };
+
+    let stalled = Fills::from_records(&[
+        names(),
+        sent("eng-1", CARRY, 100.0),
+        filled("eng-1", 100.0, false),
+        late_mark(),
+    ])
+    .total();
+    assert_eq!(stalled.marks_late, 1);
+    assert_eq!(
+        stalled.marks_late_across_restart, 0,
+        "one process throughout, so it was this engine looking late"
+    );
+
+    let restarted = Fills::from_records(&[
+        names(),
+        sent("eng-1", CARRY, 100.0),
+        filled("eng-1", 100.0, false),
+        booted,
+        late_mark(),
+    ])
+    .total();
+    assert_eq!(restarted.marks_late, 1);
+    assert_eq!(restarted.marks_late_across_restart, 1);
 }
 
 // ------------------------------------------------- ids are not names
@@ -1163,6 +1512,7 @@ fn a_segment_that_starts_mid_position_reports_no_money_for_the_close() {
         runtime_control_consumed: vec![],
         open_orders: vec![],
         rolling_loss_rows: vec![],
+        owed_markouts: Vec::new(),
     };
     fn order(id: &str) -> WalRecord {
         WalRecord::OrderSent {

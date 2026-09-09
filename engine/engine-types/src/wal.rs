@@ -600,6 +600,11 @@ pub enum WalRecord {
         /// starting it empty. Older bases read back empty.
         #[serde(default)]
         rolling_loss_rows: Vec<ClosedTradeRow>,
+        /// Fills still owed a markout horizon. Bounded by the longest horizon
+        /// plus its lateness bound, because a live engine marks and forgets
+        /// everything older on every flush tick. Older bases read back empty.
+        #[serde(default)]
+        owed_markouts: Vec<OwedMarkout>,
     },
     #[serde(untagged)]
     Retained(RetainedWalRecord),
@@ -832,6 +837,26 @@ pub struct IntendedStop {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub side: Option<Side>,
     pub trigger_px: f64,
+}
+
+/// One fill still owed markout horizons, inside [`WalRecord::SegmentBase`].
+///
+/// Wall-clock only. A monotonic deadline belongs to the process that took it
+/// and means nothing to the next one; `fill_ts_ms` is the venue's own stamp,
+/// which both processes share.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OwedMarkout {
+    pub client_order_id: String,
+    pub strategy: StrategyId,
+    pub symbol: SymbolId,
+    pub side: Side,
+    /// `P`, the fill price every horizon is measured against.
+    pub px: f64,
+    /// What the marks this fill is owed will weigh.
+    pub notional_usdt: f64,
+    pub fill_ts_ms: i64,
+    /// One bit per markout horizon, set while that horizon is still owed.
+    pub owed: u8,
 }
 
 /// One execution-id dedup entry inside [`WalRecord::SegmentBase`].
@@ -1282,6 +1307,7 @@ mod tests {
                 closed_ms: 1,
                 net_usdt: -4.0,
             }],
+            owed_markouts: Vec::new(),
         };
         let mut encoded = serde_json::to_value(&base).expect("serialize segment base");
         assert_eq!(encoded["kind"], "segment_base_v7");
@@ -1310,6 +1336,7 @@ mod tests {
             "runtime_control_requests",
             "runtime_control_consumed",
             "rolling_loss_rows",
+            "owed_markouts",
         ] {
             encoded
                 .as_object_mut()
@@ -1322,9 +1349,84 @@ mod tests {
                 execution_history_through_ms: None,
                 strategy_checkpoints,
                 rolling_loss_rows,
+                owed_markouts,
                 ..
-            } if strategy_checkpoints.is_empty() && rolling_loss_rows.is_empty()
+            } if strategy_checkpoints.is_empty()
+                && rolling_loss_rows.is_empty()
+                && owed_markouts.is_empty()
         ));
+    }
+
+    /// The incumbent binary keeps reading a base that carries owed markouts.
+    /// It has no field for them, and a `WalRecord` with no
+    /// `deny_unknown_fields` ignores what it does not know — so a rotation
+    /// written by the new engine still replays under the old one, which is
+    /// what makes a handover in either direction safe.
+    #[test]
+    fn a_base_carrying_owed_markouts_still_reads_where_the_field_does_not_exist() {
+        /// The incumbent's shape: `segment_base_v7` without `owed_markouts`.
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "kind")]
+        enum Incumbent {
+            #[serde(rename = "segment_base_v7", alias = "segment_base")]
+            SegmentBase {
+                wall_ts_ms: i64,
+                may_open: bool,
+                #[serde(default)]
+                rolling_loss_rows: Vec<ClosedTradeRow>,
+            },
+        }
+
+        let json = serde_json::json!({
+            "kind": "segment_base_v7",
+            "wall_ts_ms": 9,
+            "strategies": ["carry"],
+            "symbols": ["BTCUSDT"],
+            "may_open": true,
+            "control_anchors": [],
+            "attribution": [],
+            "logged_exposure": [],
+            "intended_stops": [],
+            "open_orders": [],
+            "owed_markouts": [{
+                "client_order_id": "eng-1",
+                "strategy": 0,
+                "symbol": 0,
+                "side": "Buy",
+                "px": 100.0,
+                "notional_usdt": 1000.0,
+                "fill_ts_ms": 1_700_000_000_000i64,
+                "owed": 15
+            }],
+        });
+
+        let mine: WalRecord = serde_json::from_value(json.clone()).expect("the new reader");
+        let WalRecord::SegmentBase { owed_markouts, .. } = &mine else {
+            panic!("expected a segment base");
+        };
+        assert_eq!(
+            owed_markouts,
+            &vec![OwedMarkout {
+                client_order_id: "eng-1".into(),
+                strategy: StrategyId(0),
+                symbol: SymbolId(0),
+                side: Side::Buy,
+                px: 100.0,
+                notional_usdt: 1_000.0,
+                fill_ts_ms: 1_700_000_000_000,
+                owed: 0b1111,
+            }]
+        );
+
+        let theirs: Incumbent = serde_json::from_value(json).expect("the deployed reader");
+        let Incumbent::SegmentBase {
+            wall_ts_ms,
+            may_open,
+            rolling_loss_rows,
+        } = theirs;
+        assert_eq!(wall_ts_ms, 9);
+        assert!(may_open);
+        assert!(rolling_loss_rows.is_empty());
     }
 }
 

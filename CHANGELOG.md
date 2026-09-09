@@ -10,6 +10,101 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-09 — The audit's deferred items are built or closed with a receipt, 21:00 UTC onward, on the owner's full authority: owed markouts survive a restart (F20), every source opportunity in a log is accounted for by `engine cohort` (F16), one production day is reconciled against the venue's own ledger with the residual named (F17), and the research standards for the maker, execution comparisons and cross-venue signals are written down (F18, F19, F21). F13/F14 stay deferred by the audit's own sequence; the MEXC identity waits on the account UID only the owner can read.**
+  - F20, owed markouts. `Fills.pending` (`engine-core/src/execution.rs`) is
+    restated at rotation as `SegmentBase.owed_markouts` (`engine-types/src/wal.rs`,
+    `#[serde(default)]`; `WalRecord` carries no `deny_unknown_fields`, so
+    `42dd7446` reads the new base and ignores the field and the new binary
+    reads old bases with nothing owed) and rebuilt at boot from that
+    restatement plus the replayed fills, less every `Markout` the segment
+    already holds. `filled_ns` is a signed stamp reconstructed from the venue's
+    `fill_ts_ms` against the wall clock, because the monotonic clock starts
+    with the process and an unsigned saturating stamp would date every restored
+    fill at boot. Boot restores only fills younger than 305 s (the longest
+    horizon plus its lateness bound). A horizon whose bound passed in the gap
+    goes through the ordinary `due()` path and is written late or unmeasurable
+    with its true age; `fold_mark` takes an `Owing` and the `fills` report
+    splits late marks into restart-gap and stall, off the log by whether a
+    `Boot` lies between the fill and the mark. No record kind is added and
+    `Markout` is unchanged. Tests that fail without the fix, with the assertion
+    they fail on: `a_restart_takes_over_the_horizons_a_fill_is_still_owed`,
+    `a_horizon_the_restart_ran_past_comes_back_late_and_says_which_kind_of_late`,
+    `a_horizon_taken_over_is_dated_before_this_process_started`,
+    `a_mark_the_log_already_holds_is_not_asked_for_again`,
+    `a_rotation_carries_the_horizons_still_owed_across_the_boundary`,
+    `a_restatement_sets_the_queue_rather_than_adding_to_it`,
+    `a_late_mark_off_a_log_is_a_restart_only_where_a_boot_lies_between`
+    (`execution/tests.rs`), `a_restart_writes_the_marks_the_last_process_still_owed`,
+    `a_rotation_between_the_fill_and_the_restart_keeps_the_obligation`,
+    `replaying_one_log_twice_writes_no_mark_twice` (`tests/fill_costs.rs`);
+    `a_base_carrying_owed_markouts_still_reads_where_the_field_does_not_exist`
+    pins the deployed reader's shape. `engine sim --twice` on seeds 7, 26, 31,
+    42 and 166, and seeds 7 and 42 with `--crashes 2 --faults heavy`, replay
+    identical on the final tree.
+  - F16, opportunity cohort. `engine-tools cohort --wal PATH [--json]`
+    (`engine-tools/src/cohort.rs`) counts every record once and proves the
+    totals: source rows keyed by `(destination, source, sequence,
+    observation_id)` and settled by `signal_observation_consumed`/`_rejected`;
+    order decisions keyed by `intent` and settled by its `verdict`, an
+    `order_sent_v2`, a `never sent:` reject or a refusal `Note`; each lane
+    split into admitted, rejected by reason, expired and unresolved. The log
+    holds no join between a source row and an intent, so the two lanes print
+    side by side and consume-to-decision is reported as unmeasurable, not
+    zero. Ages at p50/p90/p99/p99.9, the source-to-consume age also per
+    observation kind. Coalesced and unlisted-name drops live in the worker's
+    heartbeat and the footer says so. Eleven tests. Mainnet 2026-09-08
+    (segments `000064`–`000074`): 52 order-bearing source rows all consumed
+    (46 `llm_gate_candidates` at p50 45.6 s and p90 37 min, which is the gate
+    schedule, none past validity; 4 `carry_feature_batch` in 269 ms to 3.4 s;
+    2 `long_feature_batch` in 175 and 224 ms), 11 intents, 9 to the wire and
+    2 refused `StaleQuote`, decision-to-wire p50 0.755 ms and max 24.7 ms,
+    census balanced over 114,809 records.
+  - F17, one production day. `python -m liquidity_migration.research.day_reconciliation`
+    takes the recorder sample nearest each midnight as the boundary, the
+    venue's transaction log with `TRANSFER_IN`/`TRANSFER_OUT` as their own
+    capture sources (the `category=linear` query never returned them and the
+    capture's `SOURCES` now come from the contract), and the copied WAL
+    segments, whose first `segment_base` seeds the exposure fold so a copy
+    that starts at a rotation is judged on coverage of both boundary readings,
+    not on beginning at segment 1. Same-millisecond venue rows are chained by
+    `cashBalance − change`, not sorted. Mainnet 2026-09-08 (capture 22:13
+    UTC): 16 WAL fills against 16 venue executions and 0.36354034 USDT of fee
+    on both sides; trade cash −11.40062134, funding +0.19214857 and a
+    `TRANSFER_OUT` of −52.8207 USDT at 14:57:38.660 (the owner's withdrawal;
+    the on-chain record shows 52.6207 plus fee) against a wallet-cash chain
+    from 138.24226146 to 74.21308869: residual 0 with no gaps. Seven
+    positions at the start and four at the end, the same symbols in the WAL
+    fold and the sample. Equity 133.11522018 to 71.13784514; the 2.05179773
+    USDT equity residual is the mark change, and the gate fails on that one
+    named requirement because these samples carry no unrealised P&L or wallet
+    cash. The recorder (`engine-tools/src/equity_recorder.rs`) now writes
+    `unrealised_pnl_usdt`, `wallet_cash_usdt`, a per-symbol `positions` list
+    from the heartbeat's venue marks and `positions_truncated` under the
+    4,096-byte append cap, so days after this deploy carry the boundary the
+    gate needs. 24 Python tests, 3 recorder tests. Recipe in
+    [operations.md](docs/operations.md) §Observed production-day
+    reconstruction.
+  - F18, F19, F21. [governance.md](docs/research/governance.md) gains the
+    experiment registry (the maker `lane2_toxic_flow_quoter_v1` at absolute net
+    −0.171 bp per markable quote against −0.248 for its fee-corrected control,
+    both on the two selection dates, forward data none graded, quoting
+    disabled), the execution-comparison standard (fixed opportunity cohort,
+    decision-time benchmark, intention-to-trade, unfilled quantity valued at
+    the common horizon; the current LONG standing written as not met) and the
+    cross-venue signal standard (what is recorded today against what a
+    promotion requires; the basis at decision and fill is not recorded and is
+    a later engine change). `backtesting_errors_we_never_repeat.md` adds #36
+    improvement over a losing baseline and #37 the selected-fill fallacy;
+    `research_findings.md` and `trading_logic.md` carry the maker's absolute
+    net. The audit's F21 premise is corrected: the mexc and hyperliquid
+    workers read their own venue's public data (`sources.public_venue`); what
+    is Bybit-derived is the rule's grade, the Binance top-trader ratio and the
+    shared LLM gate.
+  - Not built, and why. F13/F14 (coordinator, fleet capital) wait on two
+    qualified endpoints per the audit's Milestone E; neither alt realm is past
+    `live-canary`. The MEXC registry `/etc/liquidity-migration/mexc-account-bindings.json`
+    and the `uid-` identity in `engine-mexc.env` need the account UID from
+    MEXC's own interface, which nothing on the host discovers.
 - **2026-09-09 — `floor_usdt` is removed: the capital reference has no fixed anchor. The owner's call, 19:40 UTC, after the audit batch's F11 change had turned the 100 USDT floor into an entry halt for the 36.8 USDT Bybit mainnet account. The reference and every cap scaled from it now follow verified equity all the way down; the only USDT figure left in the profile is the scale the ratios are written at.**
   - Removed. `EnvelopeConfig::floor_usdt`, `Envelope::viable_for_new_exposure()`
     and the kernel's `require_viable_reference()` with its deny `verified
@@ -34,7 +129,12 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     with a 5% expansion dead band and immediate contraction. Against the
     16:30 UTC mainnet reading of 36.8 USDT that is a 184 USDT gross cap, an
     18.4 USDT symbol cap, a 25.8 USDT margin cap and a 3.68 USDT rolling-loss
-    budget, and entries are admitted inside them. Order size has its own
+    budget, and entries are admitted inside them once the rolling-loss window
+    is clear: at the 21:02 UTC reading (equity 35.90 USDT) the risk net is
+    −8.24 USDT (closed −4.88 over the two trips of the last 24 h plus −3.36
+    open) against a 3.59 USDT budget, so the restriction trips at the next
+    handover and clears when the LINKUSDT trip rolls off at 2026-09-10
+    09:53:39 UTC with the open loss above the budget. Order size has its own
     floors (venue minimums, the sleeves' `entry_floor_usdt` 6 USDT); the
     profile has none.
   - Kept. `DenyReason::LossGuardTripped { equity_usdt, floor_usdt }` stays in

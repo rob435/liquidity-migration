@@ -144,6 +144,7 @@ fn initial_state_record(
         runtime_control_consumed: Vec::new(),
         open_orders: Vec::new(),
         rolling_loss_rows: Vec::new(),
+        owed_markouts: Vec::new(),
     })
 }
 

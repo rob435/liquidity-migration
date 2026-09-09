@@ -1,6 +1,6 @@
 # Research Failure-Mode Reference
 
-Catalog of 35 backtesting, execution, and statistical traps identified across quantitative research and platform operations.
+Catalog of 37 backtesting, execution, and statistical traps identified across quantitative research and platform operations.
 
 ---
 
@@ -35,6 +35,7 @@ Catalog of 35 backtesting, execution, and statistical traps identified across qu
 | **11** | **Trading Bans / Limits** | Missing venue circuit breakers, maintenance halts, or reduce-only. | Incorporate historical venue halt status and contract leverage limits. |
 | **22** | **Venue Mechanics Fantasy** | Omitting minimum notional, tick sizes, or lot quantizations. | Pass orders through venue instrument filters before evaluation. |
 | **35** | **100% Turnover Cost Assumption** | Assuming 100% rebalancing on slow, sticky signals. | Measure realized turnover; slow strategies do not pay 100% round trips every bar. |
+| **37** | **Selected-Fill (Filled-Subset) Fallacy** | Scoring an execution policy on the orders it happened to fill. Patience drops the hard fills, so average slippage improves while the intention loses. | Fix the eligible-opportunity cohort before scoring; benchmark at a decision-time price; value unfilled and expired quantity at the common horizon and divide by requested, not filled, notional. |
 
 ---
 
@@ -50,6 +51,7 @@ Catalog of 35 backtesting, execution, and statistical traps identified across qu
 | **28** | **Administrative Truth** | Trusting prior document labels ("promoted", "approved") over code. | Always verify claims against primary code, WAL, and venue receipts. |
 | **29** | **Pseudoreplication** | Treating sub-events of a single decision as independent $N$. | Aggregate observations to the unique decision / wave cluster. |
 | **34** | **Log Returns as P&L Target** | Using log returns induces negative variance drag ($-35\text{ bp/d}$). | **Always score strategy P&L on arithmetic returns**, not log returns. |
+| **36** | **Improvement Over A Losing Baseline** | Reporting a large, significant paired gain against a control that itself loses money; the winning arm is still negative after fees. | Report the absolute net with its uncertainty first; a paired improvement is secondary and promotes nothing while every arm loses. |
 
 ---
 

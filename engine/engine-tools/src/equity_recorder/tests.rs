@@ -554,3 +554,139 @@ fn reconnect_totals_extend_through_u64_without_overflowing() {
     );
     assert!(sample["reconnects"].is_null());
 }
+
+fn venue_amount(numerator: &str, denominator: &str) -> Value {
+    json!({"value":{"n":numerator,"d":denominator},"provenance":"VenueDecimal"})
+}
+fn venue_position(side: &str, qty: f64, entry: &str, mark: Option<Value>) -> Value {
+    let mut row = json!({
+        "symbol": 7,
+        "side": side,
+        "qty": qty,
+        "entry_px": entry.parse::<f64>().unwrap(),
+        "stop_attached": false,
+        "leverage": 3.0,
+        "exact_amounts": {
+            "quantity": venue_amount(&format!("{}", (qty * 1000.0).round()), "1000"),
+            "entry_price": venue_amount(entry, "1"),
+        },
+    });
+    if let Some(mark) = mark {
+        row["exact_amounts"]["mark_price"] = mark;
+    }
+    row
+}
+fn engine_beat(venue_positions: Value) -> Value {
+    json!({
+        "wall_ts_ms": 1000,
+        "account_observed_wall_ts_ms": 1000,
+        "account_equity_usdt": 130.28,
+        "positions": [
+            {"symbol":"NEARUSDT","side":"long","qty":20.7,"entry_px":2.0,"strategy":"long"},
+            {"symbol":"AAVEUSDT","side":"short","qty":1.0,"entry_px":100.0,"strategy":null},
+        ],
+        "account_metrics": {
+            "equity_usdt": 130.28,
+            "available_usdt": 118.29,
+            "observed_ns": 1,
+            "positions": venue_positions,
+        },
+    })
+}
+
+#[test]
+fn the_venue_marks_split_equity_into_wallet_cash_and_unrealised_pnl() {
+    let mut sample = json!({});
+    engine_fields(
+        &mut sample,
+        &engine_beat(json!([
+            venue_position("Buy", 20.7, "2", Some(venue_amount("5", "2"))),
+            venue_position("Sell", 1.0, "100", Some(venue_amount("90", "1"))),
+        ])),
+        1000,
+    );
+
+    // (2.5 - 2) * 20.7 long, plus (100 - 90) * 1 short.
+    assert_eq!(sample["unrealised_pnl_usdt"], json!(20.35));
+    assert_eq!(sample["wallet_cash_usdt"], json!(109.93));
+    assert_eq!(
+        sample["positions"],
+        json!([
+            {"symbol":"NEARUSDT","side":"long","qty":20.7,"entry_px":2.0,"mark_px":2.5,"strategy":"long"},
+            {"symbol":"AAVEUSDT","side":"short","qty":1.0,"entry_px":100.0,"mark_px":90.0,"strategy":null},
+        ])
+    );
+    assert_eq!(sample["positions_truncated"], json!(false));
+    assert_eq!(sample["position_count"], json!(2));
+}
+
+#[test]
+fn an_unreadable_mark_leaves_the_sum_null_and_an_ambiguous_join_leaves_the_mark_null() {
+    let mut unpriced = json!({});
+    engine_fields(
+        &mut unpriced,
+        &engine_beat(json!([
+            venue_position("Buy", 20.7, "2", Some(venue_amount("5", "2"))),
+            venue_position("Sell", 1.0, "100", None),
+        ])),
+        1000,
+    );
+    // One unreadable row leaves the account's unrealised P&L unknown, not 10.35.
+    assert!(unpriced["unrealised_pnl_usdt"].is_null());
+    assert!(unpriced["wallet_cash_usdt"].is_null());
+    assert_eq!(unpriced["positions"][0]["mark_px"], json!(2.5));
+    assert!(unpriced["positions"][1]["mark_px"].is_null());
+
+    let mut ambiguous = json!({});
+    engine_fields(
+        &mut ambiguous,
+        &engine_beat(json!([
+            venue_position("Buy", 20.7, "2", Some(venue_amount("5", "2"))),
+            venue_position("Buy", 20.7, "2", Some(venue_amount("7", "2"))),
+            venue_position("Sell", 1.0, "100", Some(venue_amount("90", "1"))),
+        ])),
+        1000,
+    );
+    assert!(ambiguous["positions"][0]["mark_px"].is_null());
+    assert_eq!(ambiguous["positions"][1]["mark_px"], json!(90.0));
+    // Both Buy rows still count: only the name-to-mark join is ambiguous.
+    assert_eq!(ambiguous["unrealised_pnl_usdt"], json!(51.4));
+
+    let mut absent = json!({});
+    engine_fields(
+        &mut absent,
+        &json!({"wall_ts_ms":1000,"positions":[]}),
+        1000,
+    );
+    assert!(absent["unrealised_pnl_usdt"].is_null());
+    assert!(absent["wallet_cash_usdt"].is_null());
+    assert_eq!(absent["positions"], json!([]));
+}
+
+#[test]
+fn a_position_list_over_the_append_cap_is_dropped_and_says_so() {
+    let holdings: Vec<Value> = (0..60)
+        .map(|i| json!({"symbol":format!("SYMBOL{i:03}USDT"),"side":"long","qty":20.7,"entry_px":2.0,"strategy":"long"}))
+        .collect();
+    let mut sample =
+        json!({"ts_ms":1788000000000i64,"kind":"engine","realm":"mainnet","state":"live"});
+    engine_fields(
+        &mut sample,
+        &json!({
+            "wall_ts_ms": 1000,
+            "account_equity_usdt": 130.28,
+            "positions": holdings,
+            "account_metrics": {"positions":[venue_position("Buy", 20.7, "2", Some(venue_amount("5","2")))]},
+        }),
+        1000,
+    );
+
+    assert!(sample["positions"].is_null());
+    assert_eq!(sample["positions_truncated"], json!(true));
+    assert_eq!(sample["unrealised_pnl_usdt"], json!(10.35));
+    assert_eq!(sample["wallet_cash_usdt"], json!(119.93));
+    assert_eq!(sample["position_count"], json!(60));
+    let dir = tempdir().unwrap();
+    assert!(json_text(&sample).len() < MAX_LINE_BYTES);
+    append(dir.path(), &sample).unwrap();
+}

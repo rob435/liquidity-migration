@@ -7,6 +7,7 @@ use engine_core::{
 
 pub mod backtest;
 pub mod bench;
+pub mod cohort;
 pub mod equity_recorder;
 pub mod execution_study;
 pub mod sim;
