@@ -10,7 +10,7 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
-- **2026-09-09 — Incident id `mexc-a361f5d18861421a` fires twice on a healthy mexc engine, at 00:44:29 and ~01:24:29 UTC: MEXC's designed 600 s private-stream resync publishes `may_open=false` for the length of its history sweep, and the 30 s watchdog read two of those windows. Two false pages in nine resyncs, one on-call session each. Cause named, nothing impaired, no code changed; the fix is the owner's call and the rate is the argument for making it.**
+- **2026-09-09 — Incident id `mexc-a361f5d18861421a` fires three times on a healthy mexc engine, at 00:44:29, ~01:24:29 and 01:51:36 UTC: MEXC's designed 600 s private-stream resync publishes `may_open=false` for the length of its history sweep, and the 30 s watchdog read three of those windows. Three false pages in eleven resyncs across two engine generations and a deploy, one on-call session each. Cause named, nothing impaired, no code changed; the fix is the owner's call and the rate is the argument for making it.**
   - Not the incident that id names. `incident_id` is `sha256(scope + the newly
     due alert keys)[:16]` (`scripts/runtime/check_fleet_liveness.py:1170`), so
     every `may-open:liquidity-migration-engine-mexc.service` page carries
@@ -60,8 +60,8 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     (`engine/engine-core/src/heartbeat.rs:50`) and the watchdog reads it once
     per 30 s, so the page needs a heartbeat write to land inside the sweep and
     the watchdog's read to land inside the 5 s that beat is current. It is a
-    race, not a certainty — two pages in the nine resyncs to 01:25:45, one
-    on-call session each, about one wake per 45 minutes — and it re-arms every
+    race, not a certainty — three pages in the eleven resyncs to 01:52:44, one
+    on-call session each, about one wake per 40 minutes — and it re-arms every
     time: `select_incidents_to_fire` drops a key that is not currently alerting
     (`:1036`), so the next catch is again "not in state" and fires a fresh
     routine.
@@ -74,6 +74,23 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     mexc watchdog reads `ok scope=mexc units-and-heartbeats-healthy` at
     01:24:50, the firing after the page. No code changed; the owner's choice
     below is what closes this, and the rate is now the argument for making it.
+  - Third page, 2026-09-09 01:51:36 UTC, and a restart does not clear it. The
+    `beef5bc5` handover gave mexc a new engine at 01:31:39 and a new private
+    socket at 01:31:22, so the 600 s grid restarts at 01:41:22 and 01:51:22; the
+    page lands 14 s after the second one, on this generation's second resync.
+    [Diagnose run `34300920725`](https://github.com/rob435/liquidity-migration/actions/runs/34300920725)
+    (01:52:21–01:52:48) reads pid `3527710`, `ActiveEnterTimestamp=01:31:39`,
+    `NRestarts=0`, `uptime_s=1282`, `may_open=true`, `stream_resets=2`,
+    `strategy_errors=[]`, `entry_blockers=0`, `entry_blocker_reasons=[]`,
+    `positions=0`, `orders_sent=0`, and the engine journal from 01:31:41 to
+    01:52:42 holds only the seven one-time unlisted-instrument notices and the
+    one-per-minute latency counter — no latch line. The mexc watchdog reads `ok
+    scope=mexc units-and-heartbeats-healthy` at 01:52:05 and 01:52:35, the two
+    firings after the page. So the mechanism survives a fresh process, a fresh
+    socket and a deploy: nothing short of one of the three fixes below stops it.
+    The same reading puts `venue_clock_offset_ms` at `-4366`, the widest MEXC
+    value recorded and still undiagnosed; it alerts on nothing and is not this
+    page's cause.
   - Impaired: nothing. mexc holds no positions, `orders_sent=0` since the
     23:54:07 start, and its USDT futures wallet reads `equity 0`, so no entry
     could size during the window in any case. The window itself is the engine
