@@ -10,7 +10,7 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
-- **2026-09-09 — Incident id `mexc-a361f5d18861421a` fires again at 00:44:29 UTC on a healthy mexc engine: MEXC's designed 600 s private-stream resync publishes `may_open=false` for the length of its history sweep, and the 30 s watchdog read one of those windows. Cause named, nothing impaired, no code changed; the fix is the owner's call.**
+- **2026-09-09 — Incident id `mexc-a361f5d18861421a` fires twice on a healthy mexc engine, at 00:44:29 and ~01:24:29 UTC: MEXC's designed 600 s private-stream resync publishes `may_open=false` for the length of its history sweep, and the 30 s watchdog read two of those windows. Two false pages in nine resyncs, one on-call session each. Cause named, nothing impaired, no code changed; the fix is the owner's call and the rate is the argument for making it.**
   - Not the incident that id names. `incident_id` is `sha256(scope + the newly
     due alert keys)[:16]` (`scripts/runtime/check_fleet_liveness.py:1170`), so
     every `may-open:liquidity-migration-engine-mexc.service` page carries
@@ -51,19 +51,29 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     `may_open is not True` with no dwell — the condition exactly as
     [notifications](docs/notifications.md) §Realm/Admission documents it.
   - The grid fits to the second. Heartbeat `stream_resets` reads 1 at 00:09:27,
-    3 at 00:33:52, 5 at 00:45:53 and 8 at 01:21:55: eight resets 600 s apart
-    from the 23:54:29 socket, at 00:04:29 through 01:14:29. The page is on the
-    fifth. Both Bybit engines read `stream_resets=0` over the same window and
-    neither paged; this is MEXC's paced re-read, not a lost socket.
-  - Why once and not five times. The heartbeat is rewritten every 5 s
+    3 at 00:33:52, 5 at 00:45:53, 8 at 01:21:55 and 9 at 01:25:45: nine resets
+    600 s apart from the 23:54:29 socket, at 00:04:29 through 01:24:29. The two
+    pages are on the fifth and the ninth. Both Bybit engines read
+    `stream_resets=0` over the same window and neither paged; this is MEXC's
+    paced re-read, not a lost socket.
+  - How often it wakes somebody. The heartbeat is rewritten every 5 s
     (`engine/engine-core/src/heartbeat.rs:50`) and the watchdog reads it once
     per 30 s, so the page needs a heartbeat write to land inside the sweep and
     the watchdog's read to land inside the 5 s that beat is current. It is a
-    race, not a certainty — one page in the eight resyncs to 01:21:55, and the
-    three after the page all passed unpaged — and it re-arms every time:
-    `select_incidents_to_fire` drops a key that is not currently alerting
+    race, not a certainty — two pages in the nine resyncs to 01:25:45, one
+    on-call session each, about one wake per 45 minutes — and it re-arms every
+    time: `select_incidents_to_fire` drops a key that is not currently alerting
     (`:1036`), so the next catch is again "not in state" and fires a fresh
     routine.
+  - Second page, 2026-09-09 ~01:24:29 UTC, on the ninth resync. Same shape:
+    [diagnose run `34299124321`](https://github.com/rob435/liquidity-migration/actions/runs/34299124321)
+    (01:25:33–01:25:49) reads pid `3491854`, `ActiveEnterTimestamp=23:54:29`,
+    `uptime_s=5493`, `may_open=true`, `strategy_errors=[]`, `entry_blockers=0`,
+    `positions=0`, `orders_sent=0`, and the engine journal from 00:46:34 to
+    01:25:37 holds only the one-per-minute latency counter — no latch line. The
+    mexc watchdog reads `ok scope=mexc units-and-heartbeats-healthy` at
+    01:24:50, the firing after the page. No code changed; the owner's choice
+    below is what closes this, and the rate is now the argument for making it.
   - Impaired: nothing. mexc holds no positions, `orders_sent=0` since the
     23:54:07 start, and its USDT futures wallet reads `equity 0`, so no entry
     could size during the window in any case. The window itself is the engine
