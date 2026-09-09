@@ -37,6 +37,7 @@ Entry-point wrapper for all operational workflows. Prefix `liquidity-migration-`
 | **Hyperliquid preflight** | `scripts/ops.sh real-money preflight-hyperliquid` | Read-only | Validates the Hyperliquid credential file (address shape, API wallet key shape, no other venue's keys), its arming switch, and the hyperliquid worker source. |
 | **Verify Identity** | `scripts/ops.sh verify-account-identity --environment <demo\|mainnet\|mexc\|hyperliquid>` | Read-only | Authenticates the realm's GET-only probe and binds it to `EXPECTED_ENGINE_ACCOUNT_USER_ID`; a mismatch prints the id the credentials answered as. |
 | **Canary Order** | `scripts/ops.sh canary-order --environment <demo\|mexc\|hyperliquid> --symbol SYMBOL --expected-user-id ID [--execute]` | Mutating with `--execute` | One bounded live order lifecycle through the realm's own credential file: one venue-minimum post-only order 0.5% under the bid, cancelled, the account proved clean twice. The engine accepts it on the Bybit demo and on `live-canary` realms only; `hyperliquid_mainnet` is the one `live-canary` realm today, and `mexc_mainnet` is `live-proven`, so it is refused there. |
+| **Storage** | `scripts/ops.sh storage [plan]` | Read-only | Prints the reclaimer's receipt and `status.json`. `plan` re-measures the budget and reports the candidates without pruning, uploading or unlinking. |
 | **Deploy** | `scripts/ops.sh deploy [mode]` | Mutating | Executes exact-commit deployment (`deploy`, `rollback`, `verify`, `stop-mainnet`, `disarm-mainnet`, `stop-mexc`, `disarm-mexc`, `stop-hyperliquid`, `disarm-hyperliquid`). |
 
 ### Venue-Confirmed Trade Accounting
@@ -83,6 +84,68 @@ python scripts/research/reconcile_venue_wal.py \
 
 The existing reconciliation report includes `observed_window`. Its `complete_production_reproduction` remains false and its missing requirements remain explicit. Missing cash fields, discontinuities, funding mismatches and unmatched executions are reported individually; missing values never become zero. `accounting_only=True` streams/CRC-checks every frame while retaining only accounting records and original sequence numbers.
 
+### Realm table
+
+Every realm the fleet runs is declared in [`deploy/realms.tsv`](../deploy/realms.tsv), and every unit file, env template and manifest row for it is rendered from that one row.
+
+| Column | Meaning | Allowed values |
+| :--- | :--- | :--- |
+| `realm` | The realm's name; every derived path and unit name is spelled from it | lowercase name, unique |
+| `venue` | The credential family and the prose the venue owns | a key of `VENUE_FACTS` in `liquidity_migration/policy/realms.py` |
+| `engine_venue` | The name `engine venues` prints, and what `realm_run_ready` gates on | e.g. `bybit_demo`, `mexc_mainnet` |
+| `engine_realm` | `EXPECTED_ENGINE_REALM` in the realm's engine env file | e.g. `demo`, `mainnet`, `mexc_mainnet` |
+| `kind` | Practice account or the owner's money | `practice` (exactly one row) \| `funded` |
+| `posture` | Whether a deploy starts the realm's units or stops and disables them | `running` \| `stopped` |
+| `legacy_names` | The engine's unit, env, config, state directory and env template carry no `-<realm>` suffix | `true` (practice only) \| `false` |
+| `long_entries`, `carry_entries`, `exodus_entries` | What `render-native-config` permits per sleeve | `true` \| `false` \| `toggles` (defers to `LONG_SLEEVE`/`CARRY_SLEEVE`) |
+| `owner_stop`, `worker_stop`, `liveness_timer_stop`, `liveness_service_stop` | The realm's four manifest stop orders; irregular because two hand-written realm extras sit between the clusters | positive integers, unique within their lifecycle phase |
+
+Everything else is derived, in `liquidity_migration/policy/realms.py` and its bash twin `lm_realm_field` in [`deploy/lib_realms.sh`](../deploy/lib_realms.sh):
+
+| Realm | Engine unit | Worker unit | Engine user | State directory | Engine env | Engine config | Credential file |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `demo` | `liquidity-migration-engine.service` | `liquidity-migration-signal-worker-demo.service` | `liquidity-engine-demo` | `/var/lib/liquidity-migration-engine` | `/etc/liquidity-migration/engine.env` | `/etc/liquidity-migration/engine.toml` | `/etc/liquidity-migration/bybit-demo.env` |
+| `mainnet` | `liquidity-migration-engine-mainnet.service` | `liquidity-migration-signal-worker-mainnet.service` | `liquidity-engine-mainnet` | `/var/lib/liquidity-migration-engine-mainnet` | `/etc/liquidity-migration/engine-mainnet.env` | `/etc/liquidity-migration/engine-mainnet.toml` | `/etc/liquidity-migration/bybit-mainnet.env` |
+| `mexc` | `liquidity-migration-engine-mexc.service` | `liquidity-migration-signal-worker-mexc.service` | `liquidity-engine-mexc` | `/var/lib/liquidity-migration-engine-mexc` | `/etc/liquidity-migration/engine-mexc.env` | `/etc/liquidity-migration/engine-mexc.toml` | `/etc/liquidity-migration/mexc-mainnet.env` |
+| `hyperliquid` | `liquidity-migration-engine-hyperliquid.service` | `liquidity-migration-signal-worker-hyperliquid.service` | `liquidity-engine-hyperliquid` | `/var/lib/liquidity-migration-engine-hyperliquid` | `/etc/liquidity-migration/engine-hyperliquid.env` | `/etc/liquidity-migration/engine-hyperliquid.toml` | `/etc/liquidity-migration/hyperliquid-mainnet.env` |
+
+Also derived per realm: the liveness service and timer, the signal spool `/var/lib/liquidity-migration/signals/<realm>`, the control spool `/var/lib/liquidity-migration/controls/<realm>`, the worker source env and its operational profile, the Telegram route `/etc/liquidity-migration/telegram-<realm>.env`, the three data roots `/opt/liquidity-migration/data/bybit-{long,carry,exodus}-<realm>-event`, the `UnsetEnvironment` list of every unit, and the arming verb (`preflight`, else `preflight-<realm>`).
+
+| Generated file | Count |
+| :--- | :--- |
+| `deploy/systemd/` engine, signal-worker, liveness service and liveness timer | 4 per realm |
+| `deploy/engine[.<realm>].env.template`, `deploy/signal-worker-<realm>.env.template` | 2 per realm |
+| `deploy/fleet_manifest.tsv` rows between `# BEGIN GENERATED …`/`# END GENERATED …` markers | 4 per realm, in 4 regions |
+
+**Invariants**
+
+- Must never hand-edit a generated file; edit the table or the renderer and re-render.
+- `python -m liquidity_migration.policy.realms check` must exit 0; `tests/policy/test_realms.py` fails the gate otherwise.
+- Must keep the hand-written manifest rows (shared units, the mainnet `execution-study` pair, the demo `chaos-drill` pair) outside every generated region.
+- Must keep `lm_realm_field` and `realms.py` answering the same value for every field of every realm; the parity test compares them.
+- The practice realm must be `posture=running`: the deploy soaks on it before any funded handover.
+- A new realm on a known venue is one table row, plus its `configs/signal-worker-<realm>.json`, its `deploy/engine.<realm>.toml.template`, and the owner's credential file on the host. A new **venue** also needs its credential families and labels in `VENUE_FACTS` (`realms.py`) and in `lm_realm_field` (`lib_realms.sh`).
+- Must never read `posture` as authorization: `REAL_MONEY=true` in the realm's own credential file is still the only arming gate, and the engine's own `readiness` still gates the start.
+
+**Recipes**
+
+```bash
+# Re-render every generated file from the table, then prove no drift.
+python -m liquidity_migration.policy.realms render
+python -m liquidity_migration.policy.realms check
+
+# Read one realm's derived names, from bash or from Python.
+bash -c '. deploy/lib_realms.sh; lm_realm_field mexc engine_config'
+python -c 'from liquidity_migration.policy.realms import realm; print(realm("mexc").engine_config)'
+
+# Stop a funded realm permanently: set its posture, then deploy. The next
+# deploy stops and disables its units and leaves them stopped.
+#   deploy/realms.tsv: mexc|...|funded|stopped|...
+EXPECTED_COMMIT=<40-hex-commit> scripts/ops.sh deploy
+```
+
+---
+
 ### Fleet Manifest & Systemd Unit Inventory
 
 | Systemd Unit | Realm | User / Group | Activation Policy | Role |
@@ -93,8 +156,8 @@ The existing reconciliation report includes `observed_window`. Its `complete_pro
 | `liquidity-migration-engine-hyperliquid.service` | Hyperliquid | `liquidity-engine-hyperliquid:liquidity-migration` | `manual` (requires `REAL_MONEY` in `hyperliquid-mainnet.env`) | Execution engine on the funded Hyperliquid account. |
 | `liquidity-migration-signal-worker-demo.service` | Demo | `liquidity-signal-worker:liquidity-migration`| `multi-user.target` | Public feature ingestion & IPC. |
 | `liquidity-migration-signal-worker-mainnet.service`| Mainnet | `liquidity-signal-worker:liquidity-migration`| `multi-user.target` | Public feature ingestion & IPC. |
-| `liquidity-migration-signal-worker-mexc.service` | MEXC | `liquidity-signal-worker:liquidity-migration`| `manual` (with its realm) | Public feature ingestion & IPC; the features are Bybit mainnet's. |
-| `liquidity-migration-signal-worker-hyperliquid.service` | Hyperliquid | `liquidity-signal-worker:liquidity-migration`| `manual` (with its realm) | Public feature ingestion & IPC; the features are Bybit mainnet's. |
+| `liquidity-migration-signal-worker-mexc.service` | MEXC | `liquidity-signal-worker:liquidity-migration`| `manual` (with its realm) | Public feature ingestion & IPC; the features are built from MEXC's own public data. |
+| `liquidity-migration-signal-worker-hyperliquid.service` | Hyperliquid | `liquidity-signal-worker:liquidity-migration`| `manual` (with its realm) | Public feature ingestion & IPC; the features are built from Hyperliquid's own public data. |
 | `liquidity-migration-mexc-liveness.timer` | MEXC | `liquidity-observer:liquidity-migration` | Timer (every 30 s while armed) | MEXC engine and worker watchdog. |
 | `liquidity-migration-hyperliquid-liveness.timer` | Hyperliquid | `liquidity-observer:liquidity-migration` | Timer (every 30 s while armed) | Hyperliquid engine and worker watchdog. |
 | `liquidity-migration-forward-capture.service` | Global | `liquidity-capture:liquidity-migration` | `independent` (boot) | Continuous Bybit tick & L2 capture. |
@@ -103,10 +166,13 @@ The existing reconciliation report includes `observed_window`. Its `complete_pro
 | `liquidity-migration-trade-notify.timer` | Global | `liquidity-observer:liquidity-migration` | Timer (every 1m) | Fills and closed-trade alert dispatcher. |
 | `liquidity-migration-market-tape-upload.timer` | Global | `root:root` | Timer (hourly at :10) | Ships finished tape archives to Google Drive, then deletes shipped hours older than `--keep-hours 24` from both tape roots. |
 | `liquidity-migration-backup.timer` | Global | `root:root` | Timer (every 15 min) | Ships engine state & WAL to Google Drive. |
+| `liquidity-migration-storage-reclaim.timer` | Global | `root:root` | Timer (hourly at :41) | Reclaims host storage that has been verified off-box: release directories, the apt cache, the quarantine archive, and sealed WAL segments below the engine's retention floor. |
+
+The realm rows above are generated from [the realm table](#realm-table); the shared rows are hand-written.
 
 | Independent families | Deploy behavior |
 | --- | --- |
-| `forward-capture`, `forward-capture-binance`, `market-tape-upload`, `backup`, `equity-recorder`, `host-liveness` | Remain running through realm handover and disarm; a recorder restarts when its own unit, configuration or runtime inputs change |
+| `forward-capture`, `forward-capture-binance`, `market-tape-upload`, `backup`, `storage-reclaim`, `equity-recorder`, `host-liveness` | Remain running through realm handover and disarm; a recorder restarts when its own unit, configuration or runtime inputs change |
 
 ---
 
@@ -263,7 +329,7 @@ dial written in either is read by nothing.
 | Unit environment | `/etc/liquidity-migration/engine-mexc.env`, root-owned `0600`, written by hand |
 | Rendered config | `/etc/liquidity-migration/engine-mexc.toml`, rendered by deploy |
 | Sleeves | LONG entries on; CARRY and EXODUS entries rendered off. CARRY scores Bybit funding, MEXC funding differs per symbol. No maker, no probe |
-| Public data | Bybit mainnet, exactly as the other realms (`configs/signal-worker.mexc.json`, `public_market_realm` `mainnet`) |
+| Public data | MEXC's own: `sources.public_venue = "mexc"` in `configs/signal-worker.mexc.json`. Instruments, tickers, hourly klines and settled funding from `api.mexc.com`, the `contract.mexc.com` `edge` socket for the live ticker and candle; quantities converted from contracts to base by `contractSize`; funding carries each contract's own `collectCycle` (8 h, 4 h, 1 h or 24 h). The Binance top-trader ratio and the LLM gate are shared. Switching venue changed the realm's feature-contract hashes and checkpoint key, so its worker cold-starts |
 | Symbols the venue does not list | Dropped before ranking: `universe.listed_on` is `mexc`, so the worker reads `GET /api/v1/contract/detail` on `live.instrument_cadence_ms` and keeps the USDT-settled, API-tradable contracts in the engine's spelling (`BTC_USDT` is `BTCUSDT`; Bybit's `1000PEPEUSDT` is not MEXC's `PEPEUSDT`). A name that still reaches the engine waits at admission and is said once |
 | Source readiness | `mexc_mainnet` is `live-proven` (canary lifecycle 2026-09-08 20:16 UTC): `engine run` takes the realm, `engine canary-order` refuses it. `engine venues` prints the current value |
 
@@ -324,7 +390,7 @@ read-only modes drop `REAL_MONEY`, the canary keeps it.
 | Unit environment | `/etc/liquidity-migration/engine-hyperliquid.env`, root-owned `0600`, written by hand |
 | Rendered config | `/etc/liquidity-migration/engine-hyperliquid.toml`, rendered by deploy |
 | Sleeves | LONG entries on; CARRY and EXODUS entries rendered off. Both score Bybit's eight-hourly funding rate and Hyperliquid funds hourly. No maker, no probe |
-| Public data | Bybit mainnet, exactly as the other realms (`configs/signal-worker.hyperliquid.json`, `public_market_realm` `mainnet`). The engine prices against Hyperliquid's own `bbo` / `activeAssetCtx` socket |
+| Public data | Hyperliquid's own: `sources.public_venue = "hyperliquid"` in `configs/signal-worker.hyperliquid.json`. `meta` and `metaAndAssetCtxs` for instruments and tickers, `candleSnapshot` for hourly klines (quote turnover is approximated as base volume × the bar's mean price, because the venue states none), `fundingHistory` for the hourly settled rate stamped on the hour, and the `activeAssetCtx`/`candle` socket. Listing age comes from the first daily candle. The engine prices against Hyperliquid's own `bbo` / `activeAssetCtx` socket |
 | Source readiness | `hyperliquid_mainnet` is `live-canary`: `engine canary-order` runs, `engine run` refuses. `engine venues` prints the current value |
 
 | Venue fact | Where it changes a decision |
@@ -402,16 +468,68 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 | :--- | :--- | :--- | :--- |
 | **Engine State & WAL** | Every 15 min (`backup.timer`; completed-copy age alerts after 30 min) | `LiquidityMigration/engine-state/latest/` | 60 days in `history/` |
 | **Market Tape Hours** | Hourly at :10 (`upload.timer`)| `LiquidityMigration/market-tape/<tape>/YYYY/MM/DD/` | Permanent archive; the host keeps a 24 h sliding window of shipped hours ([market_tape/README.md](../market_tape/README.md) §Local Sliding Window) |
+| **Reclaimed Sealed History** | Hourly at :41 (`storage-reclaim.timer`), only below the low-water mark | `LiquidityMigration/engine-state/sealed/` | Sealed WAL segments and archived quarantine files the host has reclaimed; permanent |
 
 | Local backup stage | Contract |
 | --- | --- |
 | Sealed WAL segments | After successful remote checksum verification, byte-identical staged copies of numbered segments below the current maximum become hard links to the immutable source on the same filesystem |
 | Growing WAL / other state | Remain independent copies; rsync uses replacement files, never `--inplace`; a later append cannot change the active segment's staged snapshot |
-| Physical disk usage | Linking releases duplicate blocks without pruning the live WAL or cloud history; `du` on the stage alone still counts shared blocks |
+| Physical disk usage | Linking releases duplicate blocks without pruning cloud history; `du` on the stage alone still counts shared blocks. A source segment is pruned only by the reclaimer below, only below the engine's own retention floor, and only after remote verification |
 | Stage on its own mount | `link` needs one mount, not one matching `st_dev`: a stage the kernel refuses a link into keeps both copies, counts `unlinkable_roots=` in the run's last line, and leaves the backup successful |
 | Implementation | `scripts/runtime/backup_state.sh`, `scripts/runtime/link_sealed_backup_wals.py`; the existing backup lock covers staging, verification and linking |
 | Mount namespace | The script creates `backup/` on the same mount as source WALs; systemd manages only `receipts/` through `StateDirectory`, because a separate backup bind mount prevents hard links even when device IDs match |
 * **Security Invariant**: Backup scripts explicitly reject `*.env` files to prevent credentials from ever leaving the host.
+
+---
+
+### Host storage reclamation
+
+`liquidity-migration-storage-reclaim.service`, hourly at :41 UTC, runs `scripts/runtime/reclaim_host_storage.py` as root. It measures the filesystem, prunes what is rebuildable, and reclaims sealed history only after that history is verified off-box.
+
+| Budget term | Value |
+| :--- | :--- |
+| Reserve | `max(12% of capacity, 8 GiB)` |
+| Writer headroom | `6 GiB` |
+| Low water | reserve + writer headroom; below it, sealed-WAL reclamation is permitted |
+| High water | low water + two days of measured growth |
+| Growth measurement | `statvfs` samples appended to `samples.jsonl`, one per run |
+| Runway | `estimated_runway_s` = (free − low water) / growth, and `runway_with_verified_history_s` counting retained verified WAL as reclaimable, both in `status.json` |
+
+| Reclaim class | Rule | Keep set | Verification | Destination |
+| :--- | :--- | :--- | :--- | :--- |
+| Release directories and staged tarballs under `/opt/liquidity-migration-engine` | Every run | deployed commit, previous commit, `8c92c964…`, any override-referenced release, anything younger than 3 days | Local: the retained release is the one the fleet runs | Deleted |
+| Apt cache | Every run, `apt-get clean` | — | Rebuildable from the archive | Deleted |
+| Archive roots (`/var/lib/liquidity-migration-wal-quarantine`) | Every run, immutable files only, 2 GiB per run | — | Uploaded, then verified by size and md5 | `engine-state/sealed/`, then deleted |
+| Sealed WAL segments | Only while free space is below low water; oldest first; 12 GiB per run | at or above `retention_floor_segment`, the newest three numbered segments, anything under 48 h old, and segment 1 (`engine.wal`) always | (a) below the engine's floor from `engine-tools wal-retention --json`, (b) not the newest 3, (c) older than 48 h, (d) hard-linked into the backup stage, (e) re-verified against `engine-state/latest/` by size and md5, (f) server-side copied to `engine-state/sealed/` and verified there | `engine-state/sealed/`, then unlinked from source and stage |
+
+| File | Holds |
+| :--- | :--- |
+| `/var/lib/liquidity-migration/storage-reclaim/status.json` | The last run's measurement: capacity, free, reserve, low and high water, measured growth, runway, per-class bytes reclaimed (`st_blocks × 512`), the unverified backlog with reasons, the run's `plan` (what went, or would go under `--dry-run`), `errors` and `lock_timeout` |
+| `/var/lib/liquidity-migration/storage-reclaim/md5-cache.json` | Local md5 of sealed segments keyed by `dev:ino:size:mtime_ns`, so an hourly run does not re-read 40 GB beside the engines |
+| `/var/lib/liquidity-migration/storage-reclaim/ledger.jsonl` | One append-only row per reclaimed file: class, path, bytes, md5, remote destination, timestamp; a `wal` row also carries the deleted inode's `st_dev` and `st_ino`. Written and fsynced before the unlink. The realm watchdogs read it (`reclaimed_wal_identities` in `check_fleet_liveness.py`) so a segment the reclaimer deleted is not a segment the family lost |
+| `/var/lib/liquidity-migration/storage-reclaim/samples.jsonl` | One `statvfs` sample per run; the growth measurement reads this |
+| `/var/lib/liquidity-migration/receipts/storage-reclaim.last-success` | `key=value` receipt written only when every step succeeded, like `backup.last-success` |
+
+**Invariants**
+
+- Must persist and fsync the ledger row before unlinking the file it describes.
+- Must hold the backup's own lock (`/var/lib/liquidity-migration/backup/backup.lock`) while unlinking a source segment and its stage link.
+- Must exit non-zero unless every step of the run succeeded.
+- Must never delete a segment at or above `retention_floor_segment`, in the newest three numbered segments, or segment 1 (`engine.wal`).
+- Must never delete anything that has not been verified remotely by size and md5.
+- Must never touch the tape roots; the market-tape upload owns its own sliding window.
+- Must never reclaim sealed WAL while free space is at or above the low-water mark.
+
+```sh
+# The last run's receipt and status, read on the host.
+scripts/ops.sh storage
+
+# What one run would reclaim right now, measured and reported, nothing touched.
+scripts/ops.sh storage plan
+
+# The engine's own retention floor for one family, on the host.
+engine-tools wal-retention --wal /var/lib/liquidity-migration-engine-mainnet/engine.wal
+```
 
 ---
 

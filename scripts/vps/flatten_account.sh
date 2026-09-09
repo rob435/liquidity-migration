@@ -7,7 +7,9 @@ set -Eeuo pipefail
 
 usage() {
     cat >&2 <<'USAGE'
-usage: flatten_account.sh --environment demo|mainnet|mexc|hyperliquid [--reason TEXT] [--execute]
+usage: flatten_account.sh --environment REALM [--reason TEXT] [--execute]
+
+  REALM is a row of deploy/realms.tsv.
 
   Without --execute: show the durable controls that would be submitted.
   With --execute:    disable entries for LONG, CARRY, and Exodus, submit one
@@ -41,43 +43,22 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-# ENGINE_REALM is the venue realm the engine stamps into its heartbeat and its
-# identity contract, which is not always the fleet realm's name.
-case "$ENVIRONMENT" in
-    demo)
-        ENGINE_UNIT=liquidity-migration-engine.service
-        ENGINE_USER=liquidity-engine-demo
-        ENGINE_REALM=demo
-        ENGINE_CONFIG="${FLATTEN_ENGINE_CONFIG_PATH:-/etc/liquidity-migration/engine.toml}"
-        ENGINE_ENV="${FLATTEN_ENGINE_ENV_PATH:-/etc/liquidity-migration/engine.env}"
-        HEARTBEAT="${FLATTEN_HEARTBEAT_PATH:-/var/lib/liquidity-migration-engine/heartbeat.json}"
-        ;;
-    mainnet)
-        ENGINE_UNIT=liquidity-migration-engine-mainnet.service
-        ENGINE_USER=liquidity-engine-mainnet
-        ENGINE_REALM=mainnet
-        ENGINE_CONFIG="${FLATTEN_ENGINE_CONFIG_PATH:-/etc/liquidity-migration/engine-mainnet.toml}"
-        ENGINE_ENV="${FLATTEN_ENGINE_ENV_PATH:-/etc/liquidity-migration/engine-mainnet.env}"
-        HEARTBEAT="${FLATTEN_HEARTBEAT_PATH:-/var/lib/liquidity-migration-engine-mainnet/heartbeat.json}"
-        ;;
-    mexc)
-        ENGINE_UNIT=liquidity-migration-engine-mexc.service
-        ENGINE_USER=liquidity-engine-mexc
-        ENGINE_REALM=mexc_mainnet
-        ENGINE_CONFIG="${FLATTEN_ENGINE_CONFIG_PATH:-/etc/liquidity-migration/engine-mexc.toml}"
-        ENGINE_ENV="${FLATTEN_ENGINE_ENV_PATH:-/etc/liquidity-migration/engine-mexc.env}"
-        HEARTBEAT="${FLATTEN_HEARTBEAT_PATH:-/var/lib/liquidity-migration-engine-mexc/heartbeat.json}"
-        ;;
-    hyperliquid)
-        ENGINE_UNIT=liquidity-migration-engine-hyperliquid.service
-        ENGINE_USER=liquidity-engine-hyperliquid
-        ENGINE_REALM=hyperliquid_mainnet
-        ENGINE_CONFIG="${FLATTEN_ENGINE_CONFIG_PATH:-/etc/liquidity-migration/engine-hyperliquid.toml}"
-        ENGINE_ENV="${FLATTEN_ENGINE_ENV_PATH:-/etc/liquidity-migration/engine-hyperliquid.env}"
-        HEARTBEAT="${FLATTEN_HEARTBEAT_PATH:-/var/lib/liquidity-migration-engine-hyperliquid/heartbeat.json}"
-        ;;
-    *) echo "--environment must be demo, mainnet, mexc or hyperliquid, and has no default" >&2; usage ;;
-esac
+# Every name comes from deploy/realms.tsv. ENGINE_REALM is the venue realm the
+# engine stamps into its heartbeat and its identity contract, which is not
+# always the fleet realm's name.
+FLATTEN_REPO_ROOT="${FLATTEN_REPO_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}"
+LM_REALM_TABLE="${LM_REALM_TABLE:-$FLATTEN_REPO_ROOT/deploy/realms.tsv}"
+. "$FLATTEN_REPO_ROOT/deploy/lib_realms.sh"
+lm_is_realm "$ENVIRONMENT" || {
+    echo "--environment must be one of: $(lm_realms | paste -sd ' ' -), and has no default" >&2
+    usage
+}
+ENGINE_UNIT="$(lm_realm_field "$ENVIRONMENT" engine_unit)"
+ENGINE_USER="$(lm_realm_field "$ENVIRONMENT" engine_user)"
+ENGINE_REALM="$(lm_realm_field "$ENVIRONMENT" engine_realm)"
+ENGINE_CONFIG="${FLATTEN_ENGINE_CONFIG_PATH:-$(lm_realm_field "$ENVIRONMENT" engine_config)}"
+ENGINE_ENV="${FLATTEN_ENGINE_ENV_PATH:-$(lm_realm_field "$ENVIRONMENT" engine_env)}"
+HEARTBEAT="${FLATTEN_HEARTBEAT_PATH:-$(lm_realm_field "$ENVIRONMENT" engine_heartbeat)}"
 
 case "$WAIT_SECONDS" in
     ''|*[!0-9]*) echo "--wait-seconds must be a non-negative integer" >&2; usage ;;

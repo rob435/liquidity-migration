@@ -11,6 +11,12 @@ LM_RUNTIME_SYSTEMD_UNIT_DIR="${LM_RUNTIME_SYSTEMD_UNIT_DIR:-/run/systemd/system}
 _LM_DEPLOY_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LM_FLEET_MANIFEST="${LM_FLEET_MANIFEST:-$_LM_DEPLOY_DIRECTORY/fleet_manifest.tsv}"
 
+# The realm table's helpers. A checkout without the file predates the table.
+if [ -f "$_LM_DEPLOY_DIRECTORY/lib_realms.sh" ]; then
+    LM_REALM_TABLE="${LM_REALM_TABLE:-$_LM_DEPLOY_DIRECTORY/realms.tsv}"
+    . "$_LM_DEPLOY_DIRECTORY/lib_realms.sh"
+fi
+
 lm_validate_fleet_manifest() {
     [ -f "$LM_FLEET_MANIFEST" ] || {
         echo "fleet manifest is missing: $LM_FLEET_MANIFEST" >&2
@@ -25,13 +31,29 @@ lm_validate_fleet_manifest() {
         echo "fleet manifest column contract is invalid: $LM_FLEET_MANIFEST" >&2
         return 1
     }
-    LC_ALL=C awk -F '|' '
+    _lvfm_realms="$(lm_realms | paste -sd ' ' -)" || return 1
+    _lvfm_funded="$(lm_funded_realms | paste -sd ' ' -)" || return 1
+    LC_ALL=C awk -F '|' \
+        -v realm_list="$_lvfm_realms" -v funded_list="$_lvfm_funded" '
 function fail_at(line, message) {
     print "invalid fleet manifest at " FILENAME ":" line ": " message > "/dev/stderr"
     failed = 1
 }
 function is_uint(value) { return value ~ /^[1-9][0-9]*$/ }
-BEGIN { expected_fields = 16 }
+function is_listed(value, list) { return index(" " list " ", " " value " ") > 0 }
+# The realm one signal-worker unit name carries, or "" for any other unit.
+function worker_realm(unit,   candidate) {
+    if (substr(unit, 1, length(worker_prefix)) != worker_prefix) return ""
+    if (substr(unit, length(unit) - 7) != ".service") return ""
+    candidate = substr(unit, length(worker_prefix) + 1)
+    candidate = substr(candidate, 1, length(candidate) - 8)
+    return is_listed(candidate, realm_list) ? candidate : ""
+}
+BEGIN {
+    expected_fields = 16
+    worker_prefix = "liquidity-migration-signal-worker-"
+    account_realm_count = split(realm_list, account_realms, " ")
+}
 /\r/ { fail_at(NR, "carriage returns are not allowed"); next }
 /^#/ { next }
 /^[[:space:]]*$/ { next }
@@ -60,12 +82,14 @@ BEGIN { expected_fields = 16 }
 
     if ($2 !~ /^(service|timer)$/) fail_at(NR, "invalid kind for " unit)
     if (unit !~ ("\\." $2 "$") ) fail_at(NR, "kind disagrees with unit suffix for " unit)
-    if ($3 !~ /^(demo|mainnet|mexc|hyperliquid|shared)$/) fail_at(NR, "invalid realm for " unit)
+    if ($3 != "shared" && !is_listed($3, realm_list)) fail_at(NR, "invalid realm for " unit)
     if ($4 !~ /^(downstream|owner|independent)$/) fail_at(NR, "invalid lifecycle phase for " unit)
     if (!is_uint($5)) fail_at(NR, "invalid stop order for " unit)
     order_key = $4 SUBSEP $5
     if (order_seen[order_key]++) fail_at(NR, "duplicate stop order in " $4 ": " $5)
-    if ($6 !~ /^(always|mainnet|mexc|hyperliquid|job|job-now)$/) fail_at(NR, "invalid activation for " unit)
+    if ($6 !~ /^(always|job|job-now)$/ && !is_listed($6, funded_list)) {
+        fail_at(NR, "invalid activation for " unit)
+    }
     if ($7 !~ /^(direct|funded|none)$/) fail_at(NR, "invalid operator policy for " unit)
     if ($8 != "-" && $8 !~ /^liquidity-migration-[A-Za-z0-9_.@-]+\.(service|timer)(,liquidity-migration-[A-Za-z0-9_.@-]+\.(service|timer))*$/) {
         fail_at(NR, "invalid dependency list for " unit)
@@ -81,9 +105,9 @@ BEGIN { expected_fields = 16 }
     if ($16 != "-" && ($2 != "service" || $8 == "-")) {
         fail_at(NR, "input artifact requires a dependent service: " unit)
     }
-    if (unit ~ /^liquidity-migration-signal-worker-(demo|mainnet|mexc|hyperliquid)\.service$/) {
-        expected_worker = "liquidity-migration-signal-worker-" $3 ".service"
-        expected_activation = ($3 == "demo" ? "always" : $3)
+    if (worker_realm(unit) != "") {
+        expected_worker = worker_prefix $3 ".service"
+        expected_activation = (is_listed($3, funded_list) ? $3 : "always")
         if (unit != expected_worker || $3 == "shared" ||
             $2 != "service" || $4 != "downstream" || $6 != expected_activation ||
             $8 != "-" || $9 != "active" || $10 == "-" || $16 != "-") {
@@ -91,10 +115,10 @@ BEGIN { expected_fields = 16 }
         }
         signal_worker_count[$3]++
     }
-    if ($7 == "funded" && $3 !~ /^(mainnet|mexc|hyperliquid)$/) {
+    if ($7 == "funded" && !is_listed($3, funded_list)) {
         fail_at(NR, "funded operator policy requires a funded realm: " unit)
     }
-    if ($6 ~ /^(mainnet|mexc|hyperliquid)$/ && $3 != $6) {
+    if (is_listed($6, funded_list) && $3 != $6) {
         fail_at(NR, "funded activation requires its own realm: " unit)
     }
     if ($4 == "independent" && ($3 != "shared" || ($6 != "always" && $6 != "job") || $7 == "funded")) {
@@ -159,8 +183,7 @@ END {
     for (job in timer_jobs) {
         if (!(job in referenced_jobs)) fail_at(row_line[job], "job has no timer " job)
     }
-    split("demo mainnet mexc hyperliquid", account_realms, " ")
-    for (slot in account_realms) {
+    for (slot = 1; slot <= account_realm_count; slot++) {
         if (owner_count[account_realms[slot]] != 1) {
             fail_at(1, "manifest must have one " account_realms[slot] " owner")
         }
@@ -179,7 +202,7 @@ lm_fleet_manifest_rows() {
 
 lm_realm_units() {
     _lru_realm="$1"
-    case "$_lru_realm" in demo|mainnet|mexc|hyperliquid|shared) ;; *) return 2 ;; esac
+    [ "$_lru_realm" = shared ] || lm_is_realm "$_lru_realm" || return 2
     lm_validate_fleet_manifest || return 1
     lm_fleet_manifest_rows \
         | awk -F '|' -v realm="$_lru_realm" '
@@ -206,7 +229,7 @@ lm_independent_units() {
 lm_activation_units() {
     _lau_realm="$1"
     _lau_direction="$2"
-    case "$_lau_realm" in demo|mainnet|mexc|hyperliquid) ;; *) return 2 ;; esac
+    lm_is_realm "$_lau_realm" || return 2
     case "$_lau_direction" in
         start) _lau_sort=-k1,1nr ;;
         stop) _lau_sort=-k1,1n ;;
@@ -230,7 +253,7 @@ lm_activation_units() {
 
 lm_immediate_timer_jobs() {
     _litj_realm="$1"
-    case "$_litj_realm" in demo|mainnet|mexc|hyperliquid) ;; *) return 2 ;; esac
+    lm_is_realm "$_litj_realm" || return 2
     lm_validate_fleet_manifest || return 1
     lm_fleet_manifest_rows \
         | awk -F '|' -v realm="$_litj_realm" '
@@ -243,7 +266,7 @@ lm_immediate_timer_jobs() {
 
 lm_owner_unit() {
     _lou_realm="$1"
-    case "$_lou_realm" in demo|mainnet|mexc|hyperliquid) ;; *) return 2 ;; esac
+    lm_is_realm "$_lou_realm" || return 2
     lm_validate_fleet_manifest || return 1
     _lou_unit="$(
         lm_fleet_manifest_rows | awk -F '|' -v realm="$_lou_realm" '
@@ -258,7 +281,7 @@ lm_owner_unit() {
 
 lm_signal_worker_unit() {
     _lswu_realm="$1"
-    case "$_lswu_realm" in demo|mainnet|mexc|hyperliquid) ;; *) return 2 ;; esac
+    lm_is_realm "$_lswu_realm" || return 2
     lm_validate_fleet_manifest || return 1
     _lswu_unit="$(
         lm_fleet_manifest_rows | awk -F '|' -v realm="$_lswu_realm" '
@@ -275,13 +298,18 @@ lm_signal_worker_unit() {
 
 lm_operator_status_rows() {
     lm_validate_fleet_manifest || return 1
-    lm_fleet_manifest_rows | awk -F '|' '
+    _losr_realms="$(lm_realms | paste -sd ' ' -)" || return 1
+    lm_fleet_manifest_rows | awk -F '|' -v realm_list="$_losr_realms" '
+        BEGIN {
+            realm_count = split(realm_list, realm_slot, " ")
+            for (slot = 1; slot <= realm_count; slot++) realm_rank[realm_slot[slot]] = slot - 1
+        }
         $2 != "service" || $3 == "shared" ||
-            ($4 != "owner" && $1 !~ /^liquidity-migration-signal-worker-(demo|mainnet|mexc|hyperliquid)\.service$/) { next }
+            ($4 != "owner" && $1 != "liquidity-migration-signal-worker-" $3 ".service") { next }
         {
             role = ($4 == "owner" ? "owner" : "signal")
             sleeve = (role == "signal" ? "directional" : "-")
-            realm_order = ($3 == "demo" ? 0 : ($3 == "mainnet" ? 1 : ($3 == "mexc" ? 2 : 3)))
+            realm_order = realm_rank[$3]
             role_order = (role == "owner" ? 0 : 1)
             print realm_order "|" role_order "|" sleeve "|" \
                 $1 "|" $3 "|" role "|" sleeve

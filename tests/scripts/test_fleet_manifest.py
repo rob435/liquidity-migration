@@ -5,11 +5,13 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from liquidity_migration.policy.realms import funded_realms, realm as realm_row, realms
+
 ROOT = Path(__file__).resolve().parents[2]
 #: Every realm that owns a venue account, in the order the operator surfaces
-#: report them.
-REALMS = ("demo", "mainnet", "mexc", "hyperliquid")
-FUNDED_REALMS = ("mainnet", "mexc", "hyperliquid")
+#: report them: deploy/realms.tsv, which also generates the manifest rows below.
+REALMS = tuple(row.realm for row in realms())
+FUNDED_REALMS = tuple(row.realm for row in funded_realms())
 MANIFEST = ROOT / "deploy" / "fleet_manifest.tsv"
 SYSTEMD = ROOT / "deploy" / "systemd"
 
@@ -82,12 +84,8 @@ def test_directional_runtime_units_are_manifest_derived() -> None:
         assert _helper(f"lm_signal_worker_unit {realm}") == [
             f"liquidity-migration-signal-worker-{realm}.service"
         ]
-    assert _helper("lm_owner_unit demo") == ["liquidity-migration-engine.service"]
-    assert _helper("lm_owner_unit mainnet") == ["liquidity-migration-engine-mainnet.service"]
-    assert _helper("lm_owner_unit mexc") == ["liquidity-migration-engine-mexc.service"]
-    assert _helper("lm_owner_unit hyperliquid") == [
-        "liquidity-migration-engine-hyperliquid.service"
-    ]
+    for name in REALMS:
+        assert _helper(f"lm_owner_unit {name}") == [realm_row(name).engine_unit]
 
 
 def test_heartbeat_artifacts_are_manifest_derived() -> None:
@@ -172,13 +170,16 @@ def test_realm_units_cover_the_funded_stop_surface() -> None:
             row.unit for row in rows if row.realm == realm
         }
     deploy = (ROOT / "scripts" / "vps" / "deploy_remote.sh").read_text(encoding="utf-8")
-    # One stop surface per funded realm, taken from the manifest.
+    # One stop surface per funded realm, taken from the manifest, and the
+    # stop/disarm modes validated against the realm table's funded rows.
     assert 'lm_realm_units "$realm"' in deploy
     assert 'stop_funded_units "${MODE#stop-}"' in deploy
-    assert (
-        'disarm-mainnet|disarm-mexc|disarm-hyperliquid) disarm_funded_mode "${MODE#disarm-}"'
-        in deploy
-    )
+    assert 'disarm_funded_mode "${MODE#disarm-}"' in deploy
+    for prefix in ("stop-", "disarm-"):
+        arm = deploy.split(f"    {prefix}*)\n", 1)[1].split(";;", 1)[0]
+        assert f'lm_realm_field "${{MODE#{prefix}}}" kind' in arm
+        assert "= funded ]" in arm
+        assert 'fail "unknown deploy mode: $MODE"' in arm
 
 
 def test_each_realm_has_one_credential_free_signal_worker() -> None:
@@ -219,6 +220,8 @@ def test_independent_units_are_shared_never_stopped_by_a_realm_and_recorder_firs
         "liquidity-migration-market-tape-upload.service",
         "liquidity-migration-backup.timer",
         "liquidity-migration-backup.service",
+        "liquidity-migration-storage-reclaim.timer",
+        "liquidity-migration-storage-reclaim.service",
         "liquidity-migration-host-liveness.timer",
         "liquidity-migration-host-liveness.service",
         "liquidity-migration-equity-recorder.timer",

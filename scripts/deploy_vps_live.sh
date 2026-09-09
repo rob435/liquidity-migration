@@ -7,28 +7,37 @@
 # rollback: deploy the last commit whose deploy finished (or, when the current
 #   one finished, the one before it).
 # verify: read-only fleet summary.
-# stop-mainnet, stop-mexc, stop-hyperliquid: stop that funded realm's units;
-#   exposure is unchanged.
-# disarm-mainnet, disarm-mexc, disarm-hyperliquid: stop that realm's units and
-#   set REAL_MONEY=false in its own credential file.
+# stop-<realm>: stop that funded realm's units; exposure is unchanged.
+# disarm-<realm>: stop that realm's units and set REAL_MONEY=false in its own
+#   credential file. The realms are deploy/realms.tsv's funded rows.
 #
 # Units the manifest marks independent (the market recorder, its upload, the
 # state backup, the host watchdog) are never stopped by any mode here; deploy
 # restarts the recorder only when its own inputs changed.
 set -euo pipefail
 
+SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+LOCAL_REPOSITORY="$(cd -P -- "$SCRIPT_DIRECTORY/.." && pwd)"
+LM_REALM_TABLE="${LM_REALM_TABLE:-$LOCAL_REPOSITORY/deploy/realms.tsv}"
+. "$LOCAL_REPOSITORY/deploy/lib_realms.sh"
+
+# The funded stops and disarms, one pair per funded realm in the table.
+FUNDED_MODES=""
+for funded_realm in $(lm_funded_realms); do
+    FUNDED_MODES="$FUNDED_MODES stop-$funded_realm disarm-$funded_realm"
+done
+
 deploy_usage() {
-    cat >&2 <<'USAGE'
-usage: deploy_vps_live.sh {deploy|rollback|verify|stop-mainnet|disarm-mainnet|stop-mexc|disarm-mexc|stop-hyperliquid|disarm-hyperliquid}
-  EXPECTED_COMMIT=<40-hex>   exact commit to deploy (default: origin/main tip)
-USAGE
+    printf 'usage: deploy_vps_live.sh {deploy|rollback|verify%s}\n' \
+        "$(printf '%s' "$FUNDED_MODES" | tr ' ' '|')" >&2
+    echo "  EXPECTED_COMMIT=<40-hex>   exact commit to deploy (default: origin/main tip)" >&2
     exit 2
 }
 
 MODE="${1:-verify}"
 [ "$#" -le 1 ] || deploy_usage
-case "$MODE" in
-    deploy|rollback|verify|stop-mainnet|disarm-mainnet|stop-mexc|disarm-mexc|stop-hyperliquid|disarm-hyperliquid) ;;
+case " deploy rollback verify$FUNDED_MODES " in
+    *" $MODE "*) ;;
     *) deploy_usage ;;
 esac
 
@@ -46,8 +55,6 @@ if [ -n "$EXPECTED_COMMIT" ] && [[ ! "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; th
     exit 2
 fi
 
-SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-LOCAL_REPOSITORY="$(cd -P -- "$SCRIPT_DIRECTORY/.." && pwd)"
 if [ -z "$EXPECTED_COMMIT" ]; then
     EXPECTED_COMMIT="$(
         git -C "$LOCAL_REPOSITORY" rev-parse --verify --quiet \
@@ -117,6 +124,10 @@ fi
     printf 'BRANCH=%q\n' "$BRANCH"
     printf 'EXPECTED_COMMIT=%q\n' "$EXPECTED_COMMIT"
     printf 'GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
+    # The realm table and its helpers, so the remote body reads realm facts
+    # before it has a checkout of this commit.
+    printf 'LM_REALM_TABLE_TEXT=%q\n' "$(cat "$LOCAL_REPOSITORY/deploy/realms.tsv")"
+    printf 'LM_REALMS_SH=%q\n' "$(cat "$LOCAL_REPOSITORY/deploy/lib_realms.sh")"
     if [ "$MODE" = deploy ] || [ "$MODE" = rollback ]; then
         # The verifier must survive a rollback to a checkout that predates it.
         printf 'RELEASE_ARTIFACT_PY=%q\n' "$(cat "$LOCAL_REPOSITORY/scripts/release_artifact.py")"

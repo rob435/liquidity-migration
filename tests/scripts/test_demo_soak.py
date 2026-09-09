@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from liquidity_migration.policy.realms import funded_realms, realms
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -19,6 +21,15 @@ def remote() -> str:
 def function(name: str) -> str:
     body = remote().split(f"{name}() {{", 1)[1]
     return f"{name}() {{" + body.split("\n}\n", 1)[0] + "\n}\n"
+
+
+#: The realm table's helpers, as the shipped remote body loads them.
+REALM_PREAMBLE = "\n".join([
+    f'LM_REALM_TABLE="{ROOT}/deploy/realms.tsv"',
+    f'. "{ROOT}/deploy/lib_realms.sh"',
+    'PRACTICE_REALM="$(lm_practice_realm)"',
+    "DIALS_REALM=mainnet",
+])
 
 
 @pytest.mark.parametrize("soak_status", [0, 1])
@@ -34,18 +45,16 @@ def test_demo_gate_precedes_every_mainnet_candidate_change(tmp_path: Path, soak_
     ).split()
     harness = "\n".join([
         "set -euo pipefail",
+        REALM_PREAMBLE,
         'fail() { echo "$*" >&2; exit 1; }',
         *[f'{name}() {{ echo {name}; }}' for name in noop],
-        "mainnet_armed() { return 0; }",
-        "mexc_armed() { return 0; }",
-        "hyperliquid_armed() { return 0; }",
+        "realm_armed() { return 0; }",
         "realm_run_ready() { return 0; }",
+        'stop_funded_units() { echo "stopped-$1"; }',
         "realm_unchanged() { return 1; }",
         "handover_realm() { echo handover-$1; }",
         "install_release() { echo candidate-shared-install; }",
-        "provision_mainnet() { echo mainnet-config; }",
-        "provision_mexc() { echo mexc-config; }",
-        "provision_hyperliquid() { echo hyperliquid-config; }",
+        'provision_funded_realm() { echo "$1-config"; }',
         f"wait_demo_soak() {{ echo demo-soak; return {soak_status}; }}",
         function("deploy_mode"),
         "deploy_mode",
@@ -57,22 +66,31 @@ def test_demo_gate_precedes_every_mainnet_candidate_change(tmp_path: Path, soak_
         capture_output=True, text=True, check=False,
     )
     trace = result.stdout.splitlines()
+    funded = list(funded_realms())
     if soak_status:
-        for line in ("handover-mainnet", "mainnet-config", "handover-mexc", "mexc-config",
-                     "handover-hyperliquid", "hyperliquid-config",
-                     "candidate-shared-install"):
-            assert line not in trace, trace
+        for row in funded:
+            for line in (f"handover-{row.realm}", f"{row.realm}-config"):
+                assert line not in trace, trace
+        assert "candidate-shared-install" not in trace, trace
         assert result.returncode != 0
     else:
         assert result.returncode == 0, result.stderr
         assert "demo-soak" in trace, trace
-        assert trace.index("handover-demo") < trace.index("demo-soak") < trace.index("candidate-shared-install")
-        for realm in ("mainnet", "mexc", "hyperliquid"):
+        practice = next(row.realm for row in realms() if not row.funded)
+        assert (
+            trace.index(f"handover-{practice}")
+            < trace.index("demo-soak")
+            < trace.index("candidate-shared-install")
+        )
+        # Every funded realm is configured after the shared install, and only
+        # then does the table's posture decide between a handover and a stop.
+        for row in funded:
+            after = "handover" if row.posture == "running" else "stopped"
             assert (
                 trace.index("candidate-shared-install")
-                < trace.index(f"{realm}-config")
-                < trace.index(f"handover-{realm}")
-            )
+                < trace.index(f"{row.realm}-config")
+                < trace.index(f"{after}-{row.realm}")
+            ), (row.realm, trace)
 
 
 @pytest.fixture
@@ -182,13 +200,14 @@ def recorder_handover(tmp_path: Path):
             "prepare_recorder_runtime", "clear_recorder_runtime",
         ) if f"{name}() {{" in remote()]
         harness = "\n".join([
-            "set -euo pipefail", "QUALIFIED_RELEASE_DIR= INCUMBENT_STAGE= CANDIDATE_RELEASE_DIR=",
+            "set -euo pipefail", REALM_PREAMBLE,
+            "QUALIFIED_RELEASE_DIR= INCUMBENT_STAGE= CANDIDATE_RELEASE_DIR=",
             'fail() { echo "$*" >&2; exit 1; }',
             *[f"{name}() {{ :; }}" for name in noop],
             'install() { local last="${!#}"; if [ "$1" = -d ]; then mkdir -p "$last"; '
             'else local before=$(( $# - 1 )); cp "${!before}" "$last"; chmod 0755 "$last"; fi; }',
-            "git_authorized() { :; }", "mainnet_armed() { return 0; }", "mexc_armed() { return 1; }",
-            "hyperliquid_armed() { return 1; }",
+            "git_authorized() { :; }",
+            'realm_armed() { [ "$1" = mainnet ]; }', "realm_run_ready() { return 0; }",
             "realm_unchanged() { return 1; }",
             f"rollback_runtime_compatible() {{ return {0 if compatible else 1}; }}",
             'build_engine() { QUALIFIED_RELEASE_DIR="$(mktemp -d "$RELEASE_DIR/.qualified.XXXXXX")"; '
@@ -201,7 +220,7 @@ def recorder_handover(tmp_path: Path):
             'cmp "$RELEASE_DIR/bin/$binary" "$FIXTURE_INCUMBENT/$binary"; done; '
             f'tick soak; return {soak_status}; }}',
             'install_release() { cp "$QUALIFIED_RELEASE_DIR/"* "$RELEASE_DIR/bin/"; }',
-            "provision_mainnet() { tick after-install; }",
+            "provision_funded_realm() { tick after-install; }",
             *definitions, "trap cleanup_release EXIT", "deploy_mode",
         ])
         result = subprocess.run(
@@ -471,6 +490,15 @@ def run_pin(environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
         # The realm is armed and its credential path is irrelevant here: what
         # this exercises is the frozen snapshot, not the arming read.
         "funded_credential_env() { echo credential; }", "credential_armed() { return 0; }",
+        # The realm's names, as deploy/realms.tsv answers them, with this
+        # fixture's own incumbent inputs.
+        'lm_realm_field() { case "$2" in '
+        'kind) echo funded ;; '
+        'engine_config) echo "$ENGINE_MAINNET_CONFIG" ;; '
+        'worker_env) echo "$SIGNAL_WORKER_MAINNET_ENV" ;; '
+        'engine_unit) echo liquidity-migration-engine-mainnet.service ;; '
+        'worker_unit) echo liquidity-migration-signal-worker-mainnet.service ;; '
+        'esac; }',
         function("cleanup_release"), "trap cleanup_release EXIT",
         function("pin_realm_runtime"), "pin_realm_runtime mainnet",
     ])
@@ -518,6 +546,9 @@ def test_checkpoint_source_config_survives_deploy_retries(tmp_path: Path) -> Non
     source.write_text("incumbent bytes\n")
     harness = "\n".join([
         "set -euo pipefail",
+        REALM_PREAMBLE,
+        # Every realm's rendered config is this one fixture file.
+        'lm_realm_field() { printf \'%s\\n\' "$CHECKPOINT_SOURCE"; }',
         'fail() { echo "$*" >&2; exit 1; }',
         'install() { local -a args=(); while [ "$#" -gt 0 ]; do '
         'case "$1" in -o|-g) shift 2 ;; *) args+=("$1"); shift ;; esac; '
@@ -526,14 +557,12 @@ def test_checkpoint_source_config_survives_deploy_retries(tmp_path: Path) -> Non
         "retain_native_checkpoint_configs",
     ])
     env = {**os.environ, "DEPLOYED_COMMIT_FILE": str(deployed), "RELEASE_DIR": str(tmp_path),
-           "ENGINE_DEMO_CONFIG": str(source), "ENGINE_MAINNET_CONFIG": str(source),
-           "ENGINE_MEXC_CONFIG": str(source), "ENGINE_HYPERLIQUID_CONFIG": str(source),
-           "RUNTIME_GROUP": "unused"}
+           "CHECKPOINT_SOURCE": str(source), "RUNTIME_GROUP": "unused"}
     subprocess.run(["bash", "-c", harness], env=env, check=True, capture_output=True, text=True)
     source.write_text("candidate bytes\n")
     subprocess.run(["bash", "-c", harness], env=env, check=True, capture_output=True, text=True)
-    for realm in ("demo", "mainnet", "mexc", "hyperliquid"):
-        saved = tmp_path / "checkpoint-configs" / ("a" * 40) / f"engine.{realm}.toml"
+    for row in realms():
+        saved = tmp_path / "checkpoint-configs" / ("a" * 40) / f"engine.{row.realm}.toml"
         assert saved.read_text() == "incumbent bytes\n"
     deployed.write_text("b" * 40)
     subprocess.run(["bash", "-c", harness], env=env, check=True, capture_output=True, text=True)

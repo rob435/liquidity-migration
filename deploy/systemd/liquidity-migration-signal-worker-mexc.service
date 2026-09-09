@@ -15,8 +15,9 @@ StateDirectoryMode=0750
 WorkingDirectory=/var/lib/liquidity-migration-signal-worker-mexc
 EnvironmentFile=/etc/liquidity-migration/signal-worker-mexc.env
 UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID MEXC_REAL_API_KEY MEXC_REAL_API_SECRET HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
-# Public market data comes from Bybit mainnet for every realm; only the account
-# owner this worker feeds trades MEXC.
+# Public market data comes from MEXC's own public API (`sources.public_venue`
+# in this realm's configs/signal-worker.<realm>.json); the account owner this
+# worker feeds trades MEXC.
 Environment=SIGNAL_WORKER_CONFIG_FILE=/opt/liquidity-migration/configs/signal-worker.mexc.json
 Environment=LONG_NATIVE_RULE_FILE=/opt/liquidity-migration/configs/long_native_v12.json
 Environment=CARRY_SIGNAL_CONFIG_FILE=/opt/liquidity-migration/configs/lane2_carry_hold_v7.json

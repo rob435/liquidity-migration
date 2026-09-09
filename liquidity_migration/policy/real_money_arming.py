@@ -21,6 +21,7 @@ from liquidity_migration.policy.real_money_profile import (
     parse_real_money_dials,
     render_real_money_profile,
 )
+from liquidity_migration.policy.realms import realm
 from liquidity_migration.policy.systemd_environment import parse_systemd_environment_bytes
 
 __all__ = [
@@ -31,16 +32,14 @@ __all__ = [
     "main",
 ]
 
-MAINNET_CREDENTIAL_ENV = Path("/etc/liquidity-migration/bybit-mainnet.env")
-MAINNET_SIGNAL_SOURCE_ENV = Path(
-    "/etc/liquidity-migration/signal-worker-mainnet-source.env"
-)
-MEXC_CREDENTIAL_ENV = Path("/etc/liquidity-migration/mexc-mainnet.env")
-MEXC_SIGNAL_SOURCE_ENV = Path("/etc/liquidity-migration/signal-worker-mexc-source.env")
-HYPERLIQUID_CREDENTIAL_ENV = Path("/etc/liquidity-migration/hyperliquid-mainnet.env")
-HYPERLIQUID_SIGNAL_SOURCE_ENV = Path(
-    "/etc/liquidity-migration/signal-worker-hyperliquid-source.env"
-)
+#: Default input paths per funded realm, from deploy/realms.tsv. The three
+#: subcommand names below stay as they are: they are the operator's verbs.
+MAINNET_CREDENTIAL_ENV = Path(realm("mainnet").credential_env)
+MAINNET_SIGNAL_SOURCE_ENV = Path(realm("mainnet").worker_source_env)
+MEXC_CREDENTIAL_ENV = Path(realm("mexc").credential_env)
+MEXC_SIGNAL_SOURCE_ENV = Path(realm("mexc").worker_source_env)
+HYPERLIQUID_CREDENTIAL_ENV = Path(realm("hyperliquid").credential_env)
+HYPERLIQUID_SIGNAL_SOURCE_ENV = Path(realm("hyperliquid").worker_source_env)
 
 _CREDENTIAL_KEYS = ("BYBIT_REAL_API_KEY", "BYBIT_REAL_API_SECRET")
 _MEXC_CREDENTIAL_KEYS = ("MEXC_REAL_API_KEY", "MEXC_REAL_API_SECRET")

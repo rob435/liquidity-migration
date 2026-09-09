@@ -1,0 +1,13 @@
+[Unit]
+Description=Hourly host storage reclamation of verified history
+
+[Timer]
+# Minute 41: the :32 backup has landed its stage, its remote check and its
+# hard links, and the :47 backup has not started. The reclaim's unlinks take
+# the same lock, so it runs in the gap rather than waiting on it.
+OnCalendar=*-*-* *:41:00 UTC
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

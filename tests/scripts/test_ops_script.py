@@ -4,6 +4,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from liquidity_migration.policy.realms import realm as realm_row, realms
+
 ROOT = Path(__file__).resolve().parents[2]
 OPS = ROOT / "scripts" / "ops.sh"
 
@@ -20,6 +22,21 @@ def _run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedP
         capture_output=True,
         check=False,
     )
+
+
+def _engine_control_values(name: str) -> list[str]:
+    """Every realm value ops.sh hands the remote engine-control body, in order."""
+    row = realm_row(name)
+    return [
+        row.engine_env,
+        row.credential_env,
+        row.inventory_credential_set,
+        row.engine_user,
+        row.engine_state_dir,
+        " ".join(row.control_unset),
+        row.attestor_env,
+        " ".join(row.control_unset_attestor),
+    ]
 
 
 def _ssh_capture(tmp_path: Path) -> tuple[Path, dict[str, str]]:
@@ -92,6 +109,27 @@ def test_execution_study_reads_only_the_selected_report(tmp_path: Path) -> None:
     assert _run("execution-study", "--execute", env=environment).returncode == 2
 
 
+def test_storage_reads_the_receipt_and_plans_without_reclaiming(tmp_path: Path) -> None:
+    capture, environment = _ssh_capture(tmp_path)
+    result = _run("storage", env=environment)
+    assert result.returncode == 0, result.stderr
+    payload = capture.read_text(encoding="utf-8")
+    assert "cat -- /var/lib/liquidity-migration/receipts/storage-reclaim.last-success" in payload
+    assert (
+        "python3 -m json.tool /var/lib/liquidity-migration/storage-reclaim/status.json" in payload
+    )
+
+    plan = _run("storage", "plan", env=environment)
+    assert plan.returncode == 0, plan.stderr
+    payload = capture.read_text(encoding="utf-8")
+    # A plan measures and reports; --dry-run is what keeps it read-only.
+    assert "REMOTE_ARGS=( --dry-run --json )" in payload
+    assert "scripts/runtime/reclaim_host_storage.py" in payload
+
+    for bad in (("storage", "reclaim"), ("storage", "plan", "--execute")):
+        assert _run(*bad, env=environment).returncode == 2, bad
+
+
 def test_unit_verbs_reach_systemd_and_qualify_short_names(tmp_path: Path) -> None:
     capture, environment = _ssh_capture(tmp_path)
 
@@ -159,15 +197,26 @@ def test_flatness_control_reaches_the_mexc_account_owner(tmp_path: Path) -> None
     result = _run("attest-flat", "--environment", "mexc", env=environment)
     assert result.returncode == 0, result.stderr
     payload = capture.read_text(encoding="utf-8")
-    assert "/etc/liquidity-migration/mexc-mainnet.env" in payload
-    assert "/etc/liquidity-migration/engine-mexc.env" in payload
-    assert "runtime_user=liquidity-engine-mexc" in payload
-    # The whole router travels; the realm picks its own arm. That arm unsets
-    # every Bybit key and the arming switch for the read-only run.
-    mexc_arm = payload.split("  mexc)", 1)[1].split(";;", 1)[0]
-    assert "BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET" in mexc_arm
-    assert "REAL_MONEY" in mexc_arm
-    assert "bybit" not in mexc_arm.replace("BYBIT_", "")
+    arguments = payload.split("REMOTE_ARGS=(", 1)[1].split(")\n", 1)[0]
+    assert arguments.startswith(" mexc attest-flat ")
+    # The realm's own files, users and unset list travel with the request; the
+    # remote body spells none of them. The unset list drops every Bybit and
+    # Hyperliquid key and the arming switch for the read-only run.
+    assert "/etc/liquidity-migration/mexc-mainnet.env" in arguments
+    assert "/etc/liquidity-migration/engine-mexc.env" in arguments
+    assert "liquidity-engine-mexc" in arguments
+    for value in _engine_control_values("mexc"):
+        if value:
+            assert value.replace(" ", "\\ ") in arguments or value in arguments, value
+    unset = " ".join(realm_row("mexc").control_unset)
+    assert "BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET" in unset
+    assert "HYPERLIQUID_REAL_API_WALLET_KEY" in unset
+    assert "REAL_MONEY" in unset
+    assert "MEXC_REAL_API_KEY" not in unset
+    # No other realm's credential file is named anywhere in the request.
+    for row in realms():
+        if row.realm != "mexc":
+            assert row.credential_env not in arguments, row.realm
 
 
 def test_flatness_control_reaches_the_hyperliquid_account_owner(tmp_path: Path) -> None:
@@ -175,17 +224,21 @@ def test_flatness_control_reaches_the_hyperliquid_account_owner(tmp_path: Path) 
     result = _run("attest-flat", "--environment", "hyperliquid", env=environment)
     assert result.returncode == 0, result.stderr
     payload = capture.read_text(encoding="utf-8")
-    assert "/etc/liquidity-migration/hyperliquid-mainnet.env" in payload
-    assert "/etc/liquidity-migration/engine-hyperliquid.env" in payload
-    assert "runtime_user=liquidity-engine-hyperliquid" in payload
-    # This arm unsets every other venue's credential and the arming switch for
-    # the read-only run, and reaches no other realm's files.
-    arm = payload.split("  hyperliquid)", 1)[1].split(";;", 1)[0]
-    assert "BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET" in arm
-    assert "MEXC_REAL_API_KEY MEXC_REAL_API_SECRET" in arm
-    assert "REAL_MONEY" in arm
-    assert "bybit" not in arm.replace("BYBIT_", "")
-    assert "mexc" not in arm.replace("MEXC_", "")
+    arguments = payload.split("REMOTE_ARGS=(", 1)[1].split(")\n", 1)[0]
+    assert arguments.startswith(" hyperliquid attest-flat ")
+    assert "/etc/liquidity-migration/hyperliquid-mainnet.env" in arguments
+    assert "/etc/liquidity-migration/engine-hyperliquid.env" in arguments
+    assert "liquidity-engine-hyperliquid" in arguments
+    # This request unsets every other venue's credential and the arming switch
+    # for the read-only run, and reaches no other realm's files.
+    unset = " ".join(realm_row("hyperliquid").control_unset)
+    assert "BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET" in unset
+    assert "MEXC_REAL_API_KEY MEXC_REAL_API_SECRET" in unset
+    assert "REAL_MONEY" in unset
+    assert "HYPERLIQUID_REAL_API_WALLET_KEY" not in unset
+    for row in realms():
+        if row.realm != "hyperliquid":
+            assert row.credential_env not in arguments, row.realm
 
 
 def test_flatness_control_rejects_incomplete_arguments() -> None:
@@ -198,7 +251,10 @@ def test_identity_check_routes_through_the_read_only_engine_control(tmp_path: Pa
     result = _run("verify-account-identity", "--environment", "mexc", env=environment)
     assert result.returncode == 0, result.stderr
     payload = capture.read_text(encoding="utf-8")
-    assert "REMOTE_ARGS=( mexc verify-account-identity )" in payload
+    arguments = payload.split("REMOTE_ARGS=(", 1)[1].split(")\n", 1)[0]
+    assert arguments.startswith(" mexc verify-account-identity ")
+    # Nothing follows the realm's own values: the mode takes no engine arguments.
+    assert arguments.rstrip().endswith("'' ''")
     assert '"$engine_binary" "$mode"' in payload
     assert _run("verify-account-identity").returncode == 2
     assert _run("verify-account-identity", "--environment", "prod").returncode == 2
@@ -212,9 +268,10 @@ def test_canary_order_keeps_the_arming_switch_and_refuses_the_funded_bybit_accou
     )
     assert result.returncode == 0, result.stderr
     payload = capture.read_text(encoding="utf-8")
-    assert (
-        "REMOTE_ARGS=( mexc canary-order --symbol BTCUSDT --expected-user-id key-0123456789abcdef --execute )"
-        in payload
+    arguments = payload.split("REMOTE_ARGS=(", 1)[1].split(")\n", 1)[0]
+    assert arguments.startswith(" mexc canary-order ")
+    assert arguments.rstrip().endswith(
+        "--symbol BTCUSDT --expected-user-id key-0123456789abcdef --execute"
     )
     # The read-only modes drop REAL_MONEY; the canary is the one mode that
     # keeps it, because a live-canary gateway refuses to build unarmed.
@@ -233,17 +290,20 @@ def test_canary_order_keeps_the_arming_switch_and_refuses_the_funded_bybit_accou
         "--expected-user-id", "579580669", env=environment,
     )
     assert dry.returncode == 0, dry.stderr
-    assert "--execute" not in capture.read_text(encoding="utf-8").split("REMOTE_ARGS=(", 1)[1].split(")", 1)[0]
+    assert "--execute" not in capture.read_text(encoding="utf-8").split(
+        "REMOTE_ARGS=(", 1
+    )[1].split(")\n", 1)[0]
 
     hyperliquid = _run(
         "canary-order", "--environment", "hyperliquid", "--symbol", "BTC",
         "--expected-user-id", "0x" + "ab" * 20, "--execute", env=environment,
     )
     assert hyperliquid.returncode == 0, hyperliquid.stderr
-    assert (
-        "REMOTE_ARGS=( hyperliquid canary-order --symbol BTC --expected-user-id "
-        + "0x" + "ab" * 20 + " --execute )"
-    ) in capture.read_text(encoding="utf-8")
+    tail = capture.read_text(encoding="utf-8").split("REMOTE_ARGS=(", 1)[1].split(")\n", 1)[0]
+    assert tail.startswith(" hyperliquid canary-order ")
+    assert tail.rstrip().endswith(
+        "--symbol BTC --expected-user-id " + "0x" + "ab" * 20 + " --execute"
+    )
 
     for bad in (
         ("canary-order", "--environment", "mainnet", "--symbol", "BTCUSDT", "--expected-user-id", "1"),

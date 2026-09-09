@@ -34,7 +34,9 @@ def _handover(realm: str, *, start_realm_fails: bool, enable_fails: bool = False
     script = f"""
 set -euo pipefail
 LM_FLEET_MANIFEST={MANIFEST}
+LM_REALM_TABLE={ROOT}/deploy/realms.tsv
 . {ROOT}/deploy/lib_sleeves.sh
+PRACTICE_REALM="$(lm_practice_realm)"
 fail() {{ echo "deploy failed: $*" >&2; exit 1; }}
 systemctl() {{
     if [ "$1" = enable ]; then

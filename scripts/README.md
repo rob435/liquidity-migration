@@ -9,9 +9,9 @@ Directory structure, invocation roles, naming conventions, and decision-parity t
 | Path | Primary Operator | Purpose & Mandate | Reference |
 | :--- | :--- | :--- | :--- |
 | **`dev.sh`** | Developer | Local development pre-flight: `doctor` and `check` (ruff, shellcheck, mypy, pytest, rustfmt, clippy). | CLI |
-| **`ops.sh`** | Operator / VPS | Fleet management router: status, logs, deploy, rollback, flatten, attest-flat and verify-account-identity per realm (`demo`, `mainnet`, `mexc`, `hyperliquid`), canary-order on `demo` and `hyperliquid`, and stop/disarm per funded realm. | [`docs/operations.md`](../docs/operations.md) |
+| **`ops.sh`** | Operator / VPS | Fleet management router: status, logs, deploy, rollback, flatten, attest-flat and verify-account-identity per realm, canary-order on any realm the fleet does not yet trade, and stop/disarm per funded realm. Every realm list comes from [`deploy/realms.tsv`](../deploy/realms.tsv). | [`docs/operations.md`](../docs/operations.md) |
 | **`deploy_vps_live.sh`** | CI / Ops | Deployment engine: decoupled handover, binary unpacking, state takeover, rollback. | [`docs/operations.md`](../docs/operations.md) |
-| **`runtime/`** | Systemd daemons | Service wrappers: liveness checks, Telegram notifications, Google Drive backup (`backup_state.sh`). | Systemd units |
+| **`runtime/`** | Systemd daemons | Service wrappers: liveness checks, Telegram notifications, Google Drive backup (`backup_state.sh`), host storage reclamation (`reclaim_host_storage.py`). | Systemd units |
 | **`data/`** | Refresh jobs | Data pipelines: PIT manifests, Bybit candidate-window mark tapes, Binance metrics refresh. | [`docs/data.md`](../docs/data.md) |
 | **`research/`** | Quant / Offline | Strategy scorers, equity curves, research-refresh pipelines, replay adapters. | [`docs/research/governance.md`](../docs/research/governance.md) |
 | **`vps/`** | Emergency ops | Disaster recovery scripts: SSH rescue, emergency flatten, manual state dump. | Runbook |
@@ -34,6 +34,11 @@ Directory structure, invocation roles, naming conventions, and decision-parity t
 ## 3. Strategy Replay & Decision-Parity Tools
 
 ```bash
+# Render every realm's units, env templates and fleet-manifest rows from
+# deploy/realms.tsv, then prove the checked-in bytes match
+python -m liquidity_migration.policy.realms render
+python -m liquidity_migration.policy.realms check
+
 # Replay native Rust Exodus contract against recorded test fixtures
 python scripts/research/replay_native_strategy_contract.py \
   --sleeve exodus --input tests/fixtures/exodus_live_contract_replay_v1.json

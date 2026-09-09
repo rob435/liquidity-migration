@@ -184,6 +184,8 @@ def _run(
             "FLATTEN_MAX_HEARTBEAT_AGE_SECONDS": "30",
             "FLATTEN_POLL_SECONDS": "0.01",
             "FLATTEN_TEST_SYSTEMCTL_LOG": str(tmp_path / "systemctl.log"),
+            # The copy below lives outside the checkout; the realm table does not.
+            "FLATTEN_REPO_ROOT": str(ROOT),
         }
     )
     command = [

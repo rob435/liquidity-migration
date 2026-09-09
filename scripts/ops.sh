@@ -6,7 +6,27 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SSH_TARGET="${SSH_TARGET:-root@208.84.103.4}"
 REPO_DIR="${REPO_DIR:-/opt/liquidity-migration}"
 LM_FLEET_MANIFEST="$ROOT_DIR/deploy/fleet_manifest.tsv"
+LM_REALM_TABLE="$ROOT_DIR/deploy/realms.tsv"
 . "$ROOT_DIR/deploy/lib_sleeves.sh"
+
+# The realms and the funded modes an operator may name, from the table.
+REALM_LIST="$(lm_realms | paste -sd ' ' -)"
+DEPLOY_MODES="deploy rollback verify"
+for funded_realm in $(lm_funded_realms); do
+  DEPLOY_MODES="$DEPLOY_MODES stop-$funded_realm disarm-$funded_realm"
+done
+# The canary proves an account the fleet has not started trading: the practice
+# realm, and any funded realm the table still holds stopped.
+CANARY_REALMS="$(lm_practice_realm)"
+for funded_realm in $(lm_funded_realms); do
+  if [ "$(lm_realm_field "$funded_realm" posture)" = stopped ]; then
+    CANARY_REALMS="$CANARY_REALMS $funded_realm"
+  fi
+done
+
+require_realm() {
+  lm_is_realm "$2" || die_usage "$1 realm must be one of: $REALM_LIST"
+}
 
 if [[ -n "${PYTHON:-}" ]]; then
   PYTHON_BIN="$PYTHON"
@@ -34,42 +54,45 @@ Operator commands:
   start UNIT...                start units
   equity [ARGS...]             standard descriptive equity curves (research)
   execution-study [--json]     read the latest paired execution cost report
+  storage [plan]               the host storage reclaimer's receipt and
+                               status.json, read on the host. `plan` re-measures
+                               the budget and reports what one run would reclaim
+                               without pruning, uploading or deleting anything
   curve [REALM] [SAMPLES]      the live account's recorded equity curve, read
                                on the host (default: mainnet, 240 minutes;
-                               REALM is demo, mainnet, mexc or hyperliquid)
-  flatten --environment demo|mainnet|mexc|hyperliquid
-          [--reason TEXT] [--execute]
+                               REALM is a row of deploy/realms.tsv)
+  flatten --environment REALM [--reason TEXT] [--execute]
                                ask each native directional reducer to close its
                                attributed exposure through durable Rust control
                                commands. Reports without --execute; the signal
                                worker stays live while exits complete
-  attest-flat --environment demo|mainnet|mexc|hyperliquid
+  attest-flat --environment REALM
                                run the installed Rust adapter's credential-wide
                                two-scan flatness proof (read-only)
-  verify-account-identity --environment demo|mainnet|mexc|hyperliquid
+  verify-account-identity --environment REALM
                                authenticate the realm's read-only probe and
                                print the account id the engine binds
-  canary-order --environment demo|mexc|hyperliquid --symbol SYMBOL
+  canary-order --environment REALM --symbol SYMBOL
                --expected-user-id ID [--execute]
                                one bounded live order lifecycle on the realm's
                                account: rest one minimum post-only order away
                                from the touch, cancel it, prove the account
                                clean twice. Without --execute nothing is sent
   research-refresh [ARGS...]   append-first data/features/backtest workflow
-  real-money preflight         report every remaining arming step for the
-                               funded Bybit account (read-only)
-  real-money preflight-mexc    the same for the MEXC account (read-only)
-  real-money preflight-hyperliquid
-                               the same for the Hyperliquid account (read-only)
+  real-money preflight[-REALM] report every remaining arming step for one
+                               funded account (read-only). Unsuffixed is the
+                               funded Bybit account
   real-money render-profile [--execute --output PATH]
                                render the operational profile from the
                                RM_* dials in the funded credential file
-  deploy [MODE]                MODE is deploy (default)|rollback|verify|
-                               stop-mainnet|disarm-mainnet|stop-mexc|
-                               disarm-mexc|stop-hyperliquid|
-                               disarm-hyperliquid; rollback deploys the last
-                               commit whose deploy finished
+  deploy [MODE]                MODE is deploy (default), rollback, verify, or
+                               stop-REALM/disarm-REALM for a funded realm;
+                               rollback deploys the last commit whose deploy
+                               finished
   help                         show this help and do nothing else
+
+Every REALM above is a row of deploy/realms.tsv; `deploy` and the funded
+verbs accept its funded rows.
 
 A UNIT that does not already start with `liquidity-migration-` gets the prefix:
 `logs signal-worker-demo.service` reads
@@ -138,63 +161,33 @@ exec .venv/bin/python -m "${REMOTE_ARGS[@]}"' "$module" "$@"
 #   attest-flat and verify-account-identity are read-only and run with the
 #   arming switch removed. canary-order keeps REAL_MONEY: a live-canary realm's
 #   gateway refuses to build without it, and the command places one order.
+#   Every realm value comes from deploy/realms.tsv; the attestor swap is the
+#   only choice left to the host, because only the host knows if the owner put
+#   a read-only credential file there.
 remote_engine_control() {
-  local realm="$1"
-  shift
+  local realm="$1" mode="$2"
+  shift 2
   remote_exec '
 realm="${REMOTE_ARGS[0]}"
 mode="${REMOTE_ARGS[1]}"
-engine_args=("${REMOTE_ARGS[@]:2}")
+env_file="${REMOTE_ARGS[2]}"
+credential_file="${REMOTE_ARGS[3]}"
+inventory_credential_set="${REMOTE_ARGS[4]}"
+runtime_user="${REMOTE_ARGS[5]}"
+state_dir="${REMOTE_ARGS[6]}"
+unset_environment="${REMOTE_ARGS[7]}"
+attestor_file="${REMOTE_ARGS[8]}"
+attestor_unset_environment="${REMOTE_ARGS[9]}"
+engine_args=("${REMOTE_ARGS[@]:10}")
 engine_binary=/opt/liquidity-migration-engine/bin/engine
 
-case "$realm" in
-  demo)
-    env_file=/etc/liquidity-migration/engine.env
-    credential_file=/etc/liquidity-migration/bybit-demo.env
-    inventory_credential_set=demo
-    runtime_user=liquidity-engine-demo
-    state_dir=/var/lib/liquidity-migration-engine
-    unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
-    ;;
-  mainnet)
-    env_file=/etc/liquidity-migration/engine-mainnet.env
-    credential_file=/etc/liquidity-migration/bybit-mainnet.env
-    inventory_credential_set=execution
-    if [ -e /etc/liquidity-migration/bybit-mainnet-attestor.env ]; then
-      credential_file=/etc/liquidity-migration/bybit-mainnet-attestor.env
-      inventory_credential_set=attestor
-    fi
-    runtime_user=liquidity-engine-mainnet
-    state_dir=/var/lib/liquidity-migration-engine-mainnet
-    if [ "$inventory_credential_set" = attestor ]; then
-      unset_environment="BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET MEXC_REAL_API_KEY MEXC_REAL_API_SECRET HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
-    else
-      unset_environment="BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET MEXC_REAL_API_KEY MEXC_REAL_API_SECRET HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
-    fi
-    ;;
-  mexc)
-    env_file=/etc/liquidity-migration/engine-mexc.env
-    credential_file=/etc/liquidity-migration/mexc-mainnet.env
-    # MEXC has no separate read-only attestor key; this is the execution pair,
-    # and the Rust inventory type it reaches exposes no mutation method.
-    inventory_credential_set=execution
-    runtime_user=liquidity-engine-mexc
-    state_dir=/var/lib/liquidity-migration-engine-mexc
-    unset_environment="BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
-    ;;
-  hyperliquid)
-    env_file=/etc/liquidity-migration/engine-hyperliquid.env
-    credential_file=/etc/liquidity-migration/hyperliquid-mainnet.env
-    # The API wallet the account approved is the only credential this realm
-    # has; it cannot withdraw, and the Rust inventory type the read-only
-    # modes reach exposes no mutation method.
-    inventory_credential_set=execution
-    runtime_user=liquidity-engine-hyperliquid
-    state_dir=/var/lib/liquidity-migration-engine-hyperliquid
-    unset_environment="BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID MEXC_REAL_API_KEY MEXC_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID"
-    ;;
-  *) echo "invalid engine-control realm: $realm" >&2; exit 2 ;;
-esac
+# A funded realm whose venue publishes a read-only key prefers it when the
+# owner has installed one; that run holds no write key at all.
+if [ -n "$attestor_file" ] && [ -e "$attestor_file" ]; then
+  credential_file="$attestor_file"
+  inventory_credential_set=attestor
+  unset_environment="$attestor_unset_environment"
+fi
 
 # The read-only modes write nothing, so the sandbox stays read-only. The canary
 # takes the account lease, a kernel lock on a file under the fleet lock root.
@@ -235,7 +228,16 @@ exec systemd-run --quiet --wait --pipe --collect --service-type=exec \
     --property=ProtectHome=true \
     --property=UMask=0027 \
     "$engine_binary" "$mode" ${engine_args[@]+"${engine_args[@]}"}
-' "$realm" "$@"
+' "$realm" "$mode" \
+    "$(lm_realm_field "$realm" engine_env)" \
+    "$(lm_realm_field "$realm" credential_env)" \
+    "$(lm_realm_field "$realm" inventory_credential_set)" \
+    "$(lm_realm_field "$realm" engine_user)" \
+    "$(lm_realm_field "$realm" engine_state_dir)" \
+    "$(lm_realm_field "$realm" control_unset)" \
+    "$(lm_realm_field "$realm" attestor_env)" \
+    "$(lm_realm_field "$realm" control_unset_attestor)" \
+    "$@"
 }
 
 command="${1:-help}"
@@ -282,10 +284,7 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
     # the minute recorder appends to. Read-only, and it says nothing about
     # research backtests -- that is `equity` above.
     curve_realm="${1:-mainnet}"
-    case "$curve_realm" in
-      demo|mainnet|mexc|hyperliquid) ;;
-      *) die_usage "curve realm must be demo, mainnet, mexc or hyperliquid" ;;
-    esac
+    require_realm curve "$curve_realm"
     curve_samples="${2:-240}"
     [[ "$curve_samples" =~ ^[1-9][0-9]*$ ]] || die_usage "curve samples must be a positive integer"
     remote_exec 'exec /opt/liquidity-migration-engine/bin/engine-tools record-equity \
@@ -299,6 +298,25 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
       study_file=latest.json
     fi
     remote_exec 'cat -- "/var/lib/liquidity-migration/execution-study/${REMOTE_ARGS[0]}"' "$study_file"
+    ;;
+  storage)
+    # Read-only both ways. Without an argument this prints the last successful
+    # run's receipt and the reclaimer's own status file. `plan` runs the
+    # reclaimer with --dry-run, which measures the budget and reports the
+    # candidates without pruning, uploading or unlinking anything.
+    [[ "$#" -le 1 ]] || die_usage "storage accepts only plan"
+    case "${1:-report}" in
+      report)
+        remote_exec 'cat -- /var/lib/liquidity-migration/receipts/storage-reclaim.last-success
+exec python3 -m json.tool /var/lib/liquidity-migration/storage-reclaim/status.json'
+        ;;
+      plan)
+        remote_exec 'cd "$REPO_DIR"
+exec .venv/bin/python scripts/runtime/reclaim_host_storage.py "${REMOTE_ARGS[@]}"' \
+          --dry-run --json
+        ;;
+      *) die_usage "storage accepts only plan" ;;
+    esac
     ;;
   research-refresh)
     exec bash "$ROOT_DIR/scripts/research/research_refresh.sh" "$@"
@@ -314,9 +332,13 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
     if [[ "$#" -eq 0 ]]; then
       set -- preflight
     fi
-    case "${1:-}" in
-      preflight|preflight-mexc|preflight-hyperliquid|render-profile) ;;
-      *) die_usage "real-money subcommand must be preflight, preflight-mexc, preflight-hyperliquid or render-profile" ;;
+    real_money_subcommands="render-profile"
+    for funded_realm in $(lm_funded_realms); do
+      real_money_subcommands="$real_money_subcommands $(lm_realm_field "$funded_realm" preflight_command)"
+    done
+    case " $real_money_subcommands " in
+      *" ${1:-} "*) ;;
+      *) die_usage "real-money subcommand must be one of:$(printf ' %s' $real_money_subcommands)" ;;
     esac
     # LOCAL=1 runs it against this checkout instead of the VPS, so the dials
     # can be proved before anything is copied to the host.
@@ -348,20 +370,14 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
     ;;
   attest-flat)
     [[ "$#" -eq 2 && "$1" == "--environment" ]] \
-      || die_usage "attest-flat requires --environment demo|mainnet|mexc|hyperliquid"
-    case "$2" in
-      demo|mainnet|mexc|hyperliquid) ;;
-      *) die_usage "attest-flat environment must be demo, mainnet, mexc or hyperliquid" ;;
-    esac
+      || die_usage "attest-flat requires --environment REALM"
+    require_realm attest-flat "$2"
     remote_engine_control "$2" attest-flat
     ;;
   verify-account-identity)
     [[ "$#" -eq 2 && "$1" == "--environment" ]] \
-      || die_usage "verify-account-identity requires --environment demo|mainnet|mexc|hyperliquid"
-    case "$2" in
-      demo|mainnet|mexc|hyperliquid) ;;
-      *) die_usage "verify-account-identity environment must be demo, mainnet, mexc or hyperliquid" ;;
-    esac
+      || die_usage "verify-account-identity requires --environment REALM"
+    require_realm verify-account-identity "$2"
     remote_engine_control "$2" verify-account-identity
     ;;
   canary-order)
@@ -375,11 +391,12 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
         *) die_usage "canary-order does not take '$1'" ;;
       esac
     done
-    # A live-proven realm is never the canary's account; the engine refuses it
-    # too, but a typo should stop here, before the host.
-    case "$canary_environment" in
-      demo|mexc|hyperliquid) ;;
-      *) die_usage "canary-order requires --environment demo|mexc|hyperliquid" ;;
+    # A realm the fleet already trades is never the canary's account; the
+    # engine refuses a live-proven one too, but a typo should stop here, before
+    # the host.
+    case " $CANARY_REALMS " in
+      *" $canary_environment "*) ;;
+      *) die_usage "canary-order requires --environment$(printf ' %s' $CANARY_REALMS)" ;;
     esac
     [[ -n "$canary_symbol" && -n "$canary_user_id" ]] \
       || die_usage "canary-order requires --symbol SYMBOL and --expected-user-id ID"
@@ -392,9 +409,9 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
     if [[ "${1:-}" == "--execute" ]]; then
       shift
     fi
-    case "${1:-deploy}" in
-      deploy|rollback|verify|stop-mainnet|disarm-mainnet|stop-mexc|disarm-mexc|stop-hyperliquid|disarm-hyperliquid) ;;
-      *) die_usage "deploy mode must be deploy, rollback, verify, stop-mainnet, disarm-mainnet, stop-mexc, disarm-mexc, stop-hyperliquid, or disarm-hyperliquid" ;;
+    case " $DEPLOY_MODES " in
+      *" ${1:-deploy} "*) ;;
+      *) die_usage "deploy mode must be one of:$(printf ' %s' $DEPLOY_MODES)" ;;
     esac
     exec "$ROOT_DIR/scripts/deploy_vps_live.sh" "${1:-deploy}"
     ;;

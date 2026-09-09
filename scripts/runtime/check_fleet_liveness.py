@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Liveness watchdog for the deployed fleet and for the host itself.
 
-Scope is ``demo``, ``mainnet``, ``mexc``, ``hyperliquid``, or ``host``. The realm
+Scope is any realm in ``deploy/realms.tsv``, or ``host``. The realm
 scopes read the fleet
 manifest, require every always-on unit in the realm to be active, require each
 heartbeat-bearing unit's heartbeat file to be fresh, require each signal worker
@@ -59,16 +59,24 @@ from liquidity_migration.policy.oncall_environment import (  # noqa: E402
     validate_notifications,
     validate_oncall,
 )
+from liquidity_migration.policy.realms import (  # noqa: E402
+    funded_realms as _funded_realm_rows,
+    realms as _realm_rows,
+)
 
 _MANIFEST = _REPO_ROOT / "deploy" / "fleet_manifest.tsv"
 _DEPLOY_LOCK = Path("/run/liquidity-migration/deploy.lock")
 _MAX_DEPLOY_AGE_SEC = 1_800.0
 _DISK_FORECAST_SEC = 195.0  # Host timer: 180-second cadence plus 15-second accuracy.
 _BOOT_ID_FILE = Path("/proc/sys/kernel/random/boot_id")
-_ACCOUNT_SCOPES = ("demo", "mainnet", "mexc", "hyperliquid", "host")
+_REALMS = tuple(row.realm for row in _realm_rows())
+_ACCOUNT_SCOPES = (*_REALMS, "host")
 #: Realms whose units run only while their own credential file is armed. Their
 #: watchdog timers are expected up only once enabled or once their engine runs.
-_FUNDED_REALMS = ("mainnet", "mexc", "hyperliquid")
+_FUNDED_REALMS = tuple(row.realm for row in _funded_realm_rows())
+#: The realm on a practice account: watched unconditionally, and the one the
+#: deploy soaks on. It alone also watches the shared fleet units.
+_PRACTICE_REALM = next(row.realm for row in _realm_rows() if not row.funded)
 _SIGNAL_WORKER_HEARTBEAT_KIND = "liquidity_migration_signal_worker_heartbeat"
 _DEPLOY_TRANSITIONAL_ALERT_PREFIXES = (
     "unit:",
@@ -86,12 +94,7 @@ _DEPLOY_TRANSITIONAL_ALERT_PREFIXES = (
     "engine-",
     "manifest",
 )
-_ENGINE_UNITS = {
-    "liquidity-migration-engine.service",
-    "liquidity-migration-engine-mainnet.service",
-    "liquidity-migration-engine-mexc.service",
-    "liquidity-migration-engine-hyperliquid.service",
-}
+_ENGINE_UNITS = {row.engine_unit for row in _realm_rows()}
 # Past any healthy sweep and inside one MEXC resync period, so a stream that is
 # genuinely gone still pages before the next paced re-read could mask it. The
 # sweep is one signed request per followed symbol, issued sequentially
@@ -101,6 +104,10 @@ _ENGINE_UNITS = {
 _PRIVATE_STREAM_STUCK_MS = 180_000
 _ENGINE_WAL_BYTES_PER_SECOND = 1_048_576
 _ENGINE_RSS_BYTES = 1_610_612_736
+# Written by scripts/runtime/reclaim_host_storage.py, one JSON row per deleted
+# file; a `wal` row names the deleted inode, so a sealed segment it reclaimed
+# is not a segment the family lost.
+_RECLAIM_LEDGER = Path("/var/lib/liquidity-migration/storage-reclaim/ledger.jsonl")
 _DEMO_SOAK_SECONDS = 300
 _DEMO_SOAK_INTERVAL_SECONDS = 10
 _CGROUP_ROOT = Path("/sys/fs/cgroup")
@@ -150,17 +157,17 @@ def load_fleet_manifest(path: Path = _MANIFEST) -> list[FleetUnit]:
 
 
 def scope_units(scope: str, rows: list[FleetUnit]) -> list[FleetUnit]:
-    # Host watches the independent units and nothing else. Demo watches demo
-    # and shared fleet units; each funded realm watches only its own realm, so
-    # one cause cannot page two scopes.
+    # Host watches the independent units and nothing else. The practice realm
+    # watches its own and the shared fleet units; each funded realm watches only
+    # its own realm, so one cause cannot page two scopes.
     if scope == "host":
         return [row for row in rows if row.lifecycle == "independent"]
-    realms = {"demo", "shared"} if scope == "demo" else {scope}
+    scoped = {scope, "shared"} if scope == _PRACTICE_REALM else {scope}
     wanted = []
     for row in rows:
-        if row.lifecycle == "independent" or row.realm not in realms:
+        if row.lifecycle == "independent" or row.realm not in scoped:
             continue
-        if scope == "demo" and row.activation not in {"always", "job", "job-now"}:
+        if scope == _PRACTICE_REALM and row.activation not in {"always", "job", "job-now"}:
             continue
         wanted.append(row)
     return wanted
@@ -605,9 +612,35 @@ def _wal_files(family: Path) -> dict[str, float] | None:
     return files or None
 
 
-def _wal_attribution(rows: list[FleetUnit], previous: dict[str, float], counters: dict[str, float]) -> str:
+def reclaimed_wal_identities(ledger: Path | None = None) -> set[str]:
+    """`st_dev:st_ino` of every WAL segment the storage reclaimer has deleted."""
+    try:
+        lines = (ledger or _RECLAIM_LEDGER).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set()
+    identities = set()
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if (
+            isinstance(row, dict)
+            and row.get("class") == "wal"
+            and type(row.get("st_dev")) is int
+            and type(row.get("st_ino")) is int
+        ):
+            identities.add(f"{row['st_dev']}:{row['st_ino']}")
+    return identities
+
+
+def _wal_attribution(
+    rows: list[FleetUnit], previous: dict[str, float], counters: dict[str, float],
+    *, reclaim_ledger: Path | None = None,
+) -> str:
     details = []
     seen = set()
+    reclaimed = reclaimed_wal_identities(reclaim_ledger)
     for row in rows:
         if row.unit not in _ENGINE_UNITS or not Path(row.output_artifact).is_absolute():
             continue
@@ -623,7 +656,10 @@ def _wal_attribution(rows: list[FleetUnit], previous: dict[str, float], counters
             continue
         prefix = f"wal:{row.realm}:"
         current = {f"{prefix}{identity}": size for identity, size in files.items()}
-        prior = {key: value for key, value in previous.items() if key.startswith(prefix)}
+        prior = {
+            key: value for key, value in previous.items()
+            if key.startswith(prefix) and key.removeprefix(prefix) not in reclaimed
+        }
         counters.update(current)
         total = sum(current.values())
         if prior and all(
@@ -669,8 +705,10 @@ def engine_error_count(unit: str, since: float, until: float) -> int:
 
 def evaluate_engine_rates(
     rows: list[FleetUnit], *, now: float, counters: dict[str, float],
+    reclaim_ledger: Path | None = None,
 ) -> list[Alert]:
     alerts = []
+    reclaimed = reclaimed_wal_identities(reclaim_ledger)
     for row in rows:
         if row.unit not in _ENGINE_UNITS:
             continue
@@ -690,7 +728,10 @@ def evaluate_engine_rates(
                 elapsed = now - previous["time"]
                 if elapsed <= 0 or elapsed > 60:
                     raise ValueError(f"resource sample gap {elapsed:.1f}s is outside (0, 60]")
-                prior_wal = {key: size for key, size in previous.items() if key.startswith("wal:")}
+                prior_wal = {
+                    key: size for key, size in previous.items()
+                    if key.startswith("wal:") and key.removeprefix("wal:") not in reclaimed
+                }
                 if any(key not in sample or sample[key] < size for key, size in prior_wal.items()):
                     raise ValueError("WAL family shrank or lost a retained segment")
                 growth = sum(files.values()) - sum(prior_wal.values())
@@ -725,13 +766,14 @@ def deployment_blockers(alerts: list[Alert]) -> list[Alert]:
 
 def run_demo_soak() -> int:
     rows = [row for row in load_fleet_manifest()
-            if row.realm == "demo" and (row.unit in _ENGINE_UNITS or "signal-worker" in row.unit)]
+            if row.realm == _PRACTICE_REALM
+            and (row.unit in _ENGINE_UNITS or "signal-worker" in row.unit)]
     counters: dict[str, float] = {}
     reported_restrictions: set[str] = set()
     started = time.monotonic()
     while True:
         now = time.time()
-        alerts = evaluate_units("demo", rows)
+        alerts = evaluate_units(_PRACTICE_REALM, rows)
         alerts.extend(evaluate_heartbeats(rows, now=now, max_age_sec=30))
         alerts.extend(evaluate_engine_rates(rows, now=now, counters=counters))
         for alert in alerts:
@@ -750,7 +792,7 @@ def run_demo_soak() -> int:
                 print(f"CRITICAL telegram: {transport_error(error)}", flush=True)
             try:
                 fire_incident_routine(os.environ[INCIDENT_FIRE_URL_ENV], os.environ[INCIDENT_FIRE_TOKEN_ENV],
-                                      incident_text("demo", lines, alerts))
+                                      incident_text(_PRACTICE_REALM, lines, alerts))
             except (KeyError, OSError, RuntimeError, ValueError) as error:
                 print(f"CRITICAL incident-routine: {transport_error(error)}", flush=True)
             return 1
@@ -897,7 +939,7 @@ def evaluate_watchdog_chain(
 
     The deploy's existing exclusive lock is the maintenance boundary. A bounded
     lock suppresses transitional timer states; a stuck lock pages. Outside that
-    boundary, demo is always required and each funded realm is required while
+    boundary, the practice realm is always required and each funded realm is required while
     either its timer is enabled or its engine is running.
     """
 
@@ -923,20 +965,15 @@ def evaluate_watchdog_chain(
             )
         ]
 
-    timers = {
-        realm: f"liquidity-migration-{realm}-liveness.timer"
-        for realm in ("demo", *_FUNDED_REALMS)
-    }
-    engines = {
-        "mainnet": "liquidity-migration-engine-mainnet.service",
-        "mexc": "liquidity-migration-engine-mexc.service",
-        "hyperliquid": "liquidity-migration-engine-hyperliquid.service",
-    }
+    rows = _realm_rows()
+    timers = {row.realm: row.liveness_timer for row in rows}
+    services = {row.realm: row.liveness_service for row in rows}
+    engines = {row.realm: row.engine_unit for row in rows if row.funded}
     active = unit_states([*timers.values(), *engines.values()])
     alerts: list[Alert] = []
     for realm, timer in timers.items():
         enabled = unit_enabled_state(timer)
-        expected = realm == "demo" or enabled.startswith("enabled")
+        expected = realm == _PRACTICE_REALM or enabled.startswith("enabled")
         engine = engines.get(realm)
         if engine is not None and active.get(engine) == "active":
             expected = True
@@ -952,7 +989,7 @@ def evaluate_watchdog_chain(
                 )
             )
             continue
-        service = f"liquidity-migration-{realm}-liveness.service"
+        service = services[realm]
         result = unit_result(service)
         if result not in {"", "success"}:
             alerts.append(
@@ -1324,7 +1361,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--account-scope",
         choices=_ACCOUNT_SCOPES,
-        default=os.environ.get("ACCOUNT_LIVENESS_SCOPE") or "demo",
+        default=os.environ.get("ACCOUNT_LIVENESS_SCOPE") or _PRACTICE_REALM,
         help="which units and heartbeats to check: a realm, or the host itself (default: environment or demo)",
     )
     p.add_argument(
@@ -1452,8 +1489,11 @@ def main() -> int:
             return 2
         return run_delivery_drill(scope, deadman_url)
     if args.demo_soak:
-        if scope != "demo" or not args.require_oncall:
-            print("demo soak requires --account-scope demo --require-oncall", file=sys.stderr)
+        if scope != _PRACTICE_REALM or not args.require_oncall:
+            print(
+                f"demo soak requires --account-scope {_PRACTICE_REALM} --require-oncall",
+                file=sys.stderr,
+            )
             return 2
         return run_demo_soak()
     now = time.time()

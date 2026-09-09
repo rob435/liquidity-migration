@@ -1835,3 +1835,96 @@ def test_synced_ntp_does_not_hide_venue_clock_drift(monkeypatch, offset, elapsed
     assert [a.severity for a in alerts] == ([] if expected is None else [expected])
     if expected == "CRITICAL":
         assert "venue" in alerts[0].message
+
+
+def _reclaim_ledger(path: Path, *identities: tuple[int, int]) -> Path:
+    path.write_text(
+        "".join(
+            json.dumps({"class": "wal", "st_dev": dev, "st_ino": ino, "path": "engine.wal.000002"}) + "\n"
+            for dev, ino in identities
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _rate_probe(monkeypatch) -> None:
+    monkeypatch.setattr(liveness, "engine_service_sample", lambda unit: {"pid": 7.0, "restarts": 0.0, "rss": 1.0})
+    monkeypatch.setattr(liveness, "engine_error_count", lambda unit, since, until: 0)
+
+
+def test_a_segment_the_reclaim_ledger_names_is_not_a_lost_segment(tmp_path: Path, monkeypatch) -> None:
+    _rate_probe(monkeypatch)
+    row = _engine_row(tmp_path / "demo")
+    family = Path(row.output_artifact).with_name("engine.wal")
+    family.write_bytes(b"x" * 100)
+    sealed = family.with_name("engine.wal.000002")
+    sealed.write_bytes(b"y" * 200)
+    identity = sealed.stat()
+    ledger = tmp_path / "ledger.jsonl"
+    counters: dict[str, float] = {}
+    assert liveness.evaluate_engine_rates([row], now=1_000.0, counters=counters, reclaim_ledger=ledger) == []
+    sealed.unlink()
+    family.write_bytes(b"x" * 130)
+    # No ledger: the vanished inode is a retained segment the family lost.
+    unrecorded = dict(counters)
+    alerts = liveness.evaluate_engine_rates([row], now=1_010.0, counters=unrecorded, reclaim_ledger=ledger)
+    assert [alert.key for alert in alerts] == [f"engine-resource-sample:{row.unit}"]
+    assert "lost a retained segment" in alerts[0].message
+    # The ledger names the inode: the family grew by its own 30 bytes and nothing pages.
+    _reclaim_ledger(ledger, (identity.st_dev, identity.st_ino))
+    assert liveness.evaluate_engine_rates([row], now=1_010.0, counters=counters, reclaim_ledger=ledger) == []
+    assert not any(key.endswith(f":{identity.st_ino}") for key in counters)
+
+
+def test_the_reclaim_ledger_excuses_only_the_inode_it_names(tmp_path: Path, monkeypatch) -> None:
+    _rate_probe(monkeypatch)
+    row = _engine_row(tmp_path / "demo")
+    family = Path(row.output_artifact).with_name("engine.wal")
+    family.write_bytes(b"x" * 100)
+    sealed = family.with_name("engine.wal.000002")
+    sealed.write_bytes(b"y" * 200)
+    identity = sealed.stat()
+    ledger = _reclaim_ledger(tmp_path / "ledger.jsonl", (identity.st_dev, identity.st_ino + 1))
+    counters: dict[str, float] = {}
+    liveness.evaluate_engine_rates([row], now=1_000.0, counters=counters, reclaim_ledger=ledger)
+    sealed.unlink()
+    alerts = liveness.evaluate_engine_rates([row], now=1_010.0, counters=counters, reclaim_ledger=ledger)
+    assert len(alerts) == 1 and "lost a retained segment" in alerts[0].message
+    # A shrunk family file is a fault whatever the ledger says.
+    family.write_bytes(b"x" * 100)
+    liveness.evaluate_engine_rates([row], now=1_020.0, counters=counters, reclaim_ledger=ledger)
+    family.write_bytes(b"x" * 50)
+    alerts = liveness.evaluate_engine_rates([row], now=1_030.0, counters=counters, reclaim_ledger=ledger)
+    assert len(alerts) == 1 and "shrank" in alerts[0].message
+
+
+def test_reclaimed_identities_ignore_a_missing_or_malformed_ledger(tmp_path: Path) -> None:
+    assert liveness.reclaimed_wal_identities(tmp_path / "absent.jsonl") == set()
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text(
+        'not json\n{"class": "archive", "st_dev": 1, "st_ino": 2}\n{"class": "wal", "st_dev": "1", "st_ino": 2}\n'
+        '{"class": "wal", "st_dev": 3, "st_ino": 4}\n',
+        encoding="utf-8",
+    )
+    assert liveness.reclaimed_wal_identities(ledger) == {"3:4"}
+
+
+def test_wal_attribution_delta_survives_a_ledgered_reclaim(tmp_path: Path, disk_sampler, monkeypatch) -> None:
+    observed, counters, sample = disk_sampler
+    row = _engine_row(tmp_path / "demo")
+    wal = Path(row.output_artifact).with_name("engine.wal")
+    wal.write_bytes(b"x" * 100)
+    segment = wal.with_name("engine.wal.000002")
+    segment.write_bytes(b"x" * 200)
+    sample([row])
+    identity = segment.stat()
+    monkeypatch.setattr(
+        liveness, "_RECLAIM_LEDGER", _reclaim_ledger(tmp_path / "ledger.jsonl", (identity.st_dev, identity.st_ino))
+    )
+    segment.unlink()
+    wal.write_bytes(b"x" * 150)
+    observed.update(time=1_180.0, free=6_000_000_000)
+    alerts = sample([row])
+    assert len(alerts) == 1
+    assert "demo=150 bytes (delta +50)" in alerts[0].message

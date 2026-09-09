@@ -39,6 +39,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from liquidity_migration.policy.realms import funded_realms, realms
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -52,30 +54,26 @@ __all__ = [
 ]
 
 CONTROL_HELPER = "/opt/liquidity-migration-engine/bin/telegram-control-helper"
+_ENVIRONMENTS = tuple(row.realm for row in realms())
 CONTROL_COMMANDS: dict[str, tuple[str, ...]] = {
     action: ("/usr/bin/sudo", "-n", CONTROL_HELPER, action)
     for action in (
-        "pause-demo",
-        "resume-demo",
-        "pause-mainnet",
-        "resume-mainnet",
-        "pause-mexc",
-        "resume-mexc",
-        "pause-hyperliquid",
-        "resume-hyperliquid",
+        *(f"{verb}-{name}" for name in _ENVIRONMENTS for verb in ("pause", "resume")),
         "status-fleet",
     )
 }
 CONTROLS_STATE_DIR = Path("/var/lib/liquidity-migration-telegram-controls")
 
-_ENVIRONMENTS = ("demo", "mainnet", "mexc", "hyperliquid")
 #: How each funded realm is named in an operator message.
-_FUNDED_LABELS = {"mainnet": "Real-money", "mexc": "MEXC", "hyperliquid": "Hyperliquid"}
+_FUNDED_LABELS = {row.realm: row.telegram_label for row in funded_realms()}
 #: Realms whose owner and worker rows the helper always reports, and whose
 #: entry permissions it must therefore always know. A realm outside this set
 #: reports entry rows only while its engine publishes a heartbeat, which is
-#: only while its own credential file is armed.
-_REQUIRED_ENVIRONMENTS = ("demo", "mainnet")
+#: only while its own credential file is armed and the table lets it run.
+_REQUIRED_ENVIRONMENTS = (
+    tuple(row.realm for row in realms() if not row.funded)
+    + tuple(row.realm for row in funded_realms() if row.posture == "running")
+)
 
 
 class ControlApiError(RuntimeError):

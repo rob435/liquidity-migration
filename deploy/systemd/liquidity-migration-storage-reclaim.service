@@ -1,0 +1,50 @@
+[Unit]
+Description=Reclaim host storage: old releases, the apt cache, the quarantine archive, and sealed WAL segments below the engine's retention floor
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+KillMode=control-group
+# One measure-prune-upload-verify pass. The budget covers a run that has to
+# upload and verify a 2 GiB archive batch and the per-run sealed-segment cap
+# before it may unlink anything; killed short of that, no run ever completes
+# a verification and each later run repeats the whole transfer.
+TimeoutStartSec=1500
+# Root, because the sources are four engines' state directories with four
+# different owners, the release tree under /opt, the apt cache, and the
+# quarantine root; the rclone configuration is root's.
+User=root
+Group=root
+WorkingDirectory=/opt/liquidity-migration
+# This unit touches files, not an account. No venue credential is loaded here
+# at all, and every venue key an engine unit names is dropped.
+UnsetEnvironment=BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID MEXC_REAL_API_KEY MEXC_REAL_API_SECRET HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=RECLAIM_RCLONE_CONFIG=/var/lib/liquidity-migration/backup/rclone.conf
+ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/runtime/reclaim_host_storage.py
+
+# Readable by the observer: the realm watchdogs read ledger.jsonl to tell a
+# reclaimed segment from a lost one, and `receipts/` (reached through the
+# ReadWritePaths below, created 0755 by the script) is read the same way.
+StateDirectory=liquidity-migration/storage-reclaim
+StateDirectoryMode=0755
+# Every realm's engine state directory, because that is where the sealed
+# segments are; /var/lib/liquidity-migration, because the source and its stage
+# link are unlinked while holding the backup's own flock there
+# (backup/backup.lock) and the backup stages and hard-links the same files.
+ReadWritePaths=/var/lib/liquidity-migration /var/lib/liquidity-migration-engine /var/lib/liquidity-migration-engine-mainnet /var/lib/liquidity-migration-engine-mexc /var/lib/liquidity-migration-engine-hyperliquid /var/lib/liquidity-migration-wal-quarantine /opt/liquidity-migration-engine /var/cache/apt /var/lib/apt
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ProtectHome=true
+MemoryMax=1G
+TasksMax=128
+# Reclaiming disk must not preempt anything that trades.
+Nice=15
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal

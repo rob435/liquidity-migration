@@ -13,6 +13,8 @@ from typing import Any
 import pytest
 import yaml
 
+from liquidity_migration.policy.realms import funded_realms, realm as realm_row, realms
+
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "scripts" / "deploy_vps_live.sh"
 SYSTEMD = ROOT / "deploy" / "systemd"
@@ -25,6 +27,15 @@ def _remote_script() -> str:
 
 def _bash_ok(script: str) -> None:
     subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True, check=True)
+
+
+#: The realm table's helpers, as the shipped remote body loads them.
+_REALM_PREAMBLE = "\n".join([
+    f'LM_REALM_TABLE="{ROOT}/deploy/realms.tsv"',
+    f'. "{ROOT}/deploy/lib_realms.sh"',
+    'PRACTICE_REALM="$(lm_practice_realm)"',
+    "DIALS_REALM=mainnet",
+])
 
 
 def test_deploy_local_and_remote_scripts_parse() -> None:
@@ -81,13 +92,19 @@ def test_deployed_shell_entrypoints_are_executable() -> None:
         assert os.access(path, os.X_OK), f"{relative} is not executable"
 
 
-def test_deploy_modes_are_exactly_the_nine_operations() -> None:
+def test_deploy_modes_are_the_three_fleet_verbs_plus_a_pair_per_funded_realm() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
-    match = re.search(r"case \"\$MODE\" in\n\s+(\S+)\)", text)
-    assert match is not None
-    assert (
-        "deploy|rollback|verify|stop-mainnet|disarm-mainnet|stop-mexc|disarm-mexc"
-        "|stop-hyperliquid|disarm-hyperliquid" in text
+    assert "lm_funded_realms" in text
+    expected = ["deploy", "rollback", "verify"]
+    for row in funded_realms():
+        expected += [f"stop-{row.realm}", f"disarm-{row.realm}"]
+    refused = subprocess.run(
+        ["bash", str(DEPLOY), "definitely-not-a-mode"],
+        text=True, capture_output=True, check=False,
+    )
+    assert refused.returncode == 2
+    assert refused.stderr.splitlines()[0] == (
+        "usage: deploy_vps_live.sh {" + "|".join(expected) + "}"
     )
     for retired in ("install)", "activate)", "staged)", "rollout)", "--profile"):
         assert retired not in text
@@ -161,24 +178,26 @@ def test_disarm_rewrite_refuses_an_ambiguous_credential(tmp_path: Path) -> None:
 def test_deploy_starts_each_funded_realm_only_when_its_own_switch_is_armed() -> None:
     remote = _remote_script()
     deploy_body = remote[remote.index("deploy_mode()") :]
-    assert "if mainnet_armed; then" in deploy_body
-    assert "handover_realm mainnet" in deploy_body
-    assert "real-money off: funded units stay stopped" in deploy_body
-    for realm in ("mexc", "hyperliquid"):
-        assert f"if ! {realm}_armed; then" in deploy_body
-        assert f"if ! realm_run_ready {realm}; then" in deploy_body
-        # The config is rendered whenever the switch is armed, so the canary has
-        # a file to run against; only the start waits for the engine's readiness.
-        assert deploy_body.index(f"provision_{realm}") < deploy_body.index(
-            f"if ! realm_run_ready {realm}; then"
-        )
-        assert f"handover_realm {realm}" in deploy_body
-        assert f"real-money off: {realm} units stay stopped" in deploy_body
+    assert 'for realm in $(lm_funded_realms); do' in deploy_body
+    assert 'if ! realm_armed "$realm"; then' in deploy_body
+    assert 'echo "real-money off: $realm units stay stopped"' in deploy_body
+    assert 'if ! realm_run_ready "$realm"; then' in deploy_body
+    # The config is rendered whenever the switch is armed, so the canary has a
+    # file to run against; only the start waits for the engine's readiness.
+    assert deploy_body.index('provision_funded_realm "$realm"') < deploy_body.index(
+        'if ! realm_run_ready "$realm"; then'
+    )
+    assert 'handover_realm "$realm"' in deploy_body
     assert "units stay stopped until the canary evidence promotes it" in deploy_body
+    # The table's posture is the switch that keeps a proven realm stopped.
+    assert 'posture=stopped in deploy/realms.tsv: units stay stopped' in deploy_body
+    assert 'stop_funded_units "$realm"' in deploy_body
     # Each realm reads its own credential file; one arming switch never implies
     # another.
-    assert "$MEXC_CREDENTIAL_ENV" in _function_body(remote, "mexc_armed")
-    assert "$HYPERLIQUID_CREDENTIAL_ENV" in _function_body(remote, "hyperliquid_armed")
+    armed = _function_body(remote, "realm_armed")
+    assert 'lm_realm_field "$1" credential_env' in armed
+    seen = {row.credential_env for row in funded_realms()}
+    assert len(seen) == len(list(funded_realms()))
 
 
 @pytest.mark.parametrize("realm", ["mexc", "hyperliquid"])
@@ -201,8 +220,9 @@ def test_a_funded_handover_waits_for_the_engines_own_live_proven_readiness(
     remote = _remote_script()
     harness = "\n".join([
         "set -euo pipefail",
+        _REALM_PREAMBLE,
         'fail() { echo "$*" >&2; exit 1; }',
-        _function_body(remote, "realm_run_ready"),
+        _function(remote, "realm_run_ready"),
         f'if realm_run_ready {realm}; then echo "ready=$FUNDED_REALM_READINESS"; else echo "blocked=$FUNDED_REALM_READINESS"; fi',
     ])
     result = subprocess.run(
@@ -249,8 +269,8 @@ def test_observers_load_dedicated_notification_files_not_venue_credentials() -> 
         assert "EnvironmentFile=/etc/liquidity-migration/notifications.env" in text
         assert "EnvironmentFile=/etc/liquidity-migration/bybit-demo.env" not in text
         assert "EnvironmentFile=/etc/liquidity-migration/bybit-mainnet.env" not in text
-    for realm in ("demo", "mainnet", "mexc", "hyperliquid", "host"):
-        text = (SYSTEMD / f"liquidity-migration-{realm}-liveness.service").read_text(encoding="utf-8")
+    for scope in [row.realm for row in realms()] + ["host"]:
+        text = (SYSTEMD / f"liquidity-migration-{scope}-liveness.service").read_text(encoding="utf-8")
         assert "EnvironmentFile=/etc/liquidity-migration/oncall.env" in text
         assert "--require-oncall" in text
 
@@ -276,8 +296,8 @@ def test_engine_units_unset_credentials_they_must_not_see() -> None:
         "TELEGRAM_BOT_TOKEN",
     ):
         assert secret in demo
-    for realm in ("demo", "mainnet", "mexc", "hyperliquid"):
-        worker = (SYSTEMD / f"liquidity-migration-signal-worker-{realm}.service").read_text(encoding="utf-8")
+    for row in realms():
+        worker = (SYSTEMD / row.worker_unit).read_text(encoding="utf-8")
         assert "bybit-demo.env" not in worker
         assert "bybit-mainnet.env" not in worker
         assert "mexc-mainnet.env" not in worker
@@ -364,8 +384,8 @@ def test_a_realm_that_does_not_come_up_rolls_back_to_the_last_finished_deploy() 
     remote = _remote_script()
     deploy_body = remote[remote.index("deploy_mode()") : remote.index("rollback_mode()")]
     assert "seed_generation_record" in deploy_body
-    assert "handover_realm demo" in deploy_body
-    assert "handover_realm mainnet" in deploy_body
+    assert 'handover_realm "$PRACTICE_REALM"' in deploy_body
+    assert 'handover_realm "$realm"' in deploy_body
     assert "record_generation" in deploy_body
     handover = _function_body(remote, "handover_realm")
     assert 'stop_realm_units "$realm"' in handover
@@ -389,26 +409,32 @@ def test_a_realm_whose_inputs_did_not_change_is_left_running() -> None:
     fingerprint = _function_body(remote, "realm_fingerprint")
     # The engine source tree, not the binary: the binary embeds the commit.
     assert 'rev-parse "$commit:engine"' in fingerprint
-    assert '"$commit:configs/signal-worker.$realm.json"' in fingerprint
-    assert "$ENGINE_MAINNET_CONFIG" in fingerprint and "$ENGINE_DEMO_CONFIG" in fingerprint
+    assert '"$commit:deploy/realms.tsv"' in fingerprint
+    assert 'worker_config_repo' in fingerprint
+    assert 'lm_realm_field "$realm" engine_config' in fingerprint
     unchanged = _function_body(remote, "realm_unchanged")
     assert 'systemctl is-active --quiet "$worker_unit" && systemctl is-active --quiet "$owner_unit"' in unchanged
 
     deploy_body = remote[remote.index("deploy_mode()") : remote.index("rollback_mode()")]
-    assert "if realm_unchanged demo && demo_candidate_running; then" in deploy_body
-    assert "if realm_unchanged mainnet; then" in deploy_body
-    for realm in ("demo", "mainnet"):
-        assert f'echo "{realm}-ok result=unchanged-left-running"' in deploy_body
-        # The handover, when it runs, records what it started so the next deploy can compare.
-        assert f"handover_realm {realm}" in deploy_body
-    assert deploy_body.index("stage_demo_candidate") < deploy_body.index("handover_realm demo")
+    assert 'if realm_unchanged "$PRACTICE_REALM" && demo_candidate_running; then' in deploy_body
+    assert 'elif realm_unchanged "$realm"; then' in deploy_body
+    assert 'echo "$PRACTICE_REALM-ok result=unchanged-left-running"' in deploy_body
+    assert 'echo "$realm-ok result=unchanged-left-running"' in deploy_body
+    # The handover, when it runs, records what it started so the next deploy can compare.
+    assert 'handover_realm "$PRACTICE_REALM"' in deploy_body
+    assert 'handover_realm "$realm"' in deploy_body
+    assert deploy_body.index("stage_demo_candidate") < deploy_body.index(
+        'handover_realm "$PRACTICE_REALM"'
+    )
     assert deploy_body.index("wait_demo_soak") < deploy_body.index("install_release")
     # The first gated deploy seeds the record from the commit that started the realm,
     # before anything is rendered, so it compares against what actually runs.
     assert deploy_body.index("seed_realm_fingerprints") < deploy_body.index("install_release")
     seed = _function_body(remote, "seed_realm_fingerprints")
     assert 'realm_fingerprint "$realm" "$deployed"' in seed and "$DEPLOYED_COMMIT_FILE" in seed
-    assert "handover_realm demo" not in deploy_body[: deploy_body.index("prepare_demo_inputs")]
+    assert 'handover_realm "$PRACTICE_REALM"' not in deploy_body[
+        : deploy_body.index("prepare_demo_inputs")
+    ]
 
 
 def test_ci_checks_main_pushes_and_keeps_release_work_explicit() -> None:
@@ -524,10 +550,13 @@ def test_mainnet_takeover_reloads_the_owner_arming_switch() -> None:
     # BYBIT_INVENTORY_CREDENTIAL_SET.
     body = _function_body(_remote_script(), "run_engine_takeover_command")
     subshell = body[body.index("unset BYBIT_DEMO_API_KEY") :]
-    mainnet = subshell[subshell.index("mainnet)") :]
-    mainnet = mainnet[: mainnet.index(";;")]
-    assert "REAL_MONEY" in mainnet
-    assert "BYBIT_INVENTORY_CREDENTIAL_SET" in mainnet
+    assert 'lm_load_private_systemd_environment "$PYTHON" "$credential_env" $credential_vars' in subshell
+    allowlist = realm_row("mainnet").takeover_vars
+    assert "REAL_MONEY" in allowlist
+    assert "BYBIT_INVENTORY_CREDENTIAL_SET" in allowlist
+    # The practice realm reloads its own pair and no arming switch at all.
+    practice = next(row for row in realms() if not row.funded)
+    assert "REAL_MONEY" not in practice.takeover_vars
 
 
 def test_the_systemd_unit_runs_the_packer_over_every_tape_and_receipts_it() -> None:
@@ -547,6 +576,79 @@ def test_the_systemd_unit_runs_the_packer_over_every_tape_and_receipts_it() -> N
         assert Path(root).is_absolute()
     timer = (SYSTEMD / "liquidity-migration-market-tape-upload.timer").read_text(encoding="utf-8")
     assert "Persistent=true" in timer
+
+
+def _storage_reclaim_unit() -> str:
+    return (SYSTEMD / "liquidity-migration-storage-reclaim.service").read_text(encoding="utf-8")
+
+
+def _unset_environment(unit: str) -> set[str]:
+    return set(unit.split("UnsetEnvironment=", 1)[1].splitlines()[0].split())
+
+
+def test_the_storage_reclaimer_may_write_every_realms_wal_directory() -> None:
+    # A new realm's sealed segments are unreachable until this list names their
+    # directory, and a reclaim that cannot reach them silently reclaims nothing.
+    unit = _storage_reclaim_unit()
+    writable = set(unit.split("ReadWritePaths=", 1)[1].splitlines()[0].split())
+    for row in realms():
+        assert str(Path(row.engine_wal).parent) in writable, row.realm
+    # The backup's lock and the reclaimer's own ledger live here; the quarantine
+    # root, the release tree and the apt cache are the other reclaim classes.
+    for path in (
+        "/var/lib/liquidity-migration",
+        "/var/lib/liquidity-migration-wal-quarantine",
+        "/opt/liquidity-migration-engine",
+        "/var/cache/apt",
+        "/var/lib/apt",
+    ):
+        assert path in writable, path
+    # Never the tape roots: the upload owns those hours.
+    assert not [path for path in writable if "forward-market" in path]
+
+
+def test_the_storage_reclaimer_runs_the_committed_script_in_the_backups_gap() -> None:
+    unit = _storage_reclaim_unit()
+    # Repo-relative like every other Python entrypoint: the host import smoke
+    # runs it by that path from WorkingDirectory=/opt/liquidity-migration.
+    assert (
+        "ExecStart=/opt/liquidity-migration/.venv/bin/python"
+        " scripts/runtime/reclaim_host_storage.py\n"
+    ) in unit
+    assert "Type=oneshot" in unit
+    assert "User=root" in unit and "Group=root" in unit
+    reclaim_row = next(
+        line.split("|")
+        for line in (ROOT / "deploy/fleet_manifest.tsv").read_text(encoding="utf-8").splitlines()
+        if line.startswith("liquidity-migration-storage-reclaim.timer|")
+    )
+    assert int(reclaim_row[14]) == 1500
+    assert f"TimeoutStartSec={reclaim_row[14]}" in unit
+
+    timer = (SYSTEMD / "liquidity-migration-storage-reclaim.timer").read_text(encoding="utf-8")
+    assert "Persistent=true" in timer
+    calendar = re.search(r"^OnCalendar=\*-\*-\* \*:(\d\d):00 UTC$", timer, re.MULTILINE)
+    assert calendar is not None
+    minute = int(calendar.group(1))
+    assert minute == 41
+    # The unlinks take the backup's own flock, so the hour must land in a gap
+    # between two backups rather than waiting on one.
+    backup = (SYSTEMD / "liquidity-migration-backup.timer").read_text(encoding="utf-8")
+    slots = re.search(r"^OnCalendar=\*-\*-\* \*:([0-9,]+):00 UTC$", backup, re.MULTILINE)
+    assert slots is not None
+    backup_minutes = [int(value) for value in slots.group(1).split(",")]
+    assert minute not in backup_minutes
+    assert max(value for value in backup_minutes if value < minute) == 32
+    assert min(value for value in backup_minutes if value > minute) == 47
+
+
+def test_the_storage_reclaimer_holds_no_venue_credential() -> None:
+    unit = _storage_reclaim_unit()
+    unset = _unset_environment(unit)
+    for row in realms():
+        assert _unset_environment((SYSTEMD / row.engine_unit).read_text(encoding="utf-8")) <= unset
+    assert "REAL_MONEY" in unset
+    assert "EnvironmentFile" not in unit
 
 
 def _function(text: str, name: str) -> str:
@@ -665,12 +767,16 @@ def _ensure_native_state(
     harness = "\n".join(
         [
             "set -uo pipefail",
-            "ENGINE_DEMO_CONFIG=demo.toml",
-            "ENGINE_MAINNET_CONFIG=mainnet.toml",
-            'CARRY_DEMO_ROOT="$STATE_ROOT/carry-demo"',
-            'CARRY_MAINNET_ROOT="$STATE_ROOT/carry-mainnet"',
-            'EXODUS_DEMO_ROOT="$STATE_ROOT/exodus-demo"',
-            'EXODUS_MAINNET_ROOT="$STATE_ROOT/exodus-mainnet"',
+            # The realm's names, as deploy/realms.tsv answers them, relocated
+            # into this test's tree.
+            'lm_realm_field() { case "$2" in',
+            '  engine_config) printf \'%s\\n\' "$1.toml" ;;',
+            '  engine_wal) printf \'%s\\n\' '
+            '"$STATE_ROOT/liquidity-migration-engine$([ "$1" = demo ] || printf -- "-%s" "$1")/engine.wal" ;;',
+            '  carry_root) printf \'%s\\n\' "$STATE_ROOT/carry-$1" ;;',
+            '  exodus_root) printf \'%s\\n\' "$STATE_ROOT/exodus-$1" ;;',
+            '  *) printf \'\\n\' ;;',
+            "esac; }",
             "fail() { printf '%s\\n' \"$*\" >&2; exit 1; }",
             "verify_count=0",
             "run_engine_takeover_command() {",
@@ -810,6 +916,7 @@ def _trace_handover_realm(
     harness = "\n".join(
         [
             "set -uo pipefail",
+            "PRACTICE_REALM=demo",
             'trace() { printf \'%s\\n\' "$1" >> "$HANDOVER_TRACE"; }',
             "stop_realm_units() { trace stop; }",
             'retire_legacy_signal_sources() { trace retire; return "$RETIREMENT_STATUS"; }',
@@ -852,14 +959,14 @@ def _units(command: str) -> list[str]:
 
 
 def test_a_deploy_handover_stops_units_without_disabling_the_watchdogs(tmp_path: Path) -> None:
-    for realm in ("demo", "mainnet"):
-        calls = _trace_stop_realm(realm, tmp_path)
-        units = _units(f"lm_realm_units {realm}")
-        assert units, realm
+    for name in ("demo", "mainnet"):
+        calls = _trace_stop_realm(name, tmp_path)
+        units = _units(f"lm_realm_units {name}")
+        assert units, name
         for unit in units:
-            assert f"stop {unit}" in calls, (realm, unit, calls)
-            assert f"reset-failed {unit}" in calls, (realm, unit, calls)
-        assert all(not call.startswith("disable ") for call in calls), (realm, calls)
+            assert f"stop {unit}" in calls, (name, unit, calls)
+            assert f"reset-failed {unit}" in calls, (name, unit, calls)
+        assert all(not call.startswith("disable ") for call in calls), (name, calls)
 
 
 def test_every_handover_failure_rolls_back_before_recording_a_fingerprint(tmp_path: Path) -> None:
@@ -897,8 +1004,7 @@ def test_legacy_retirement_uses_the_realms_optional_plan_and_preserves_failure(
     harness = "\n".join(
         [
             "set -uo pipefail",
-            "ENGINE_DEMO_CONFIG=demo.toml",
-            "ENGINE_MAINNET_CONFIG=mainnet.toml",
+            'lm_realm_field() { printf \'%s\\n\' "$1.toml"; }',
             'run_engine_takeover_command() { printf \'%s\\n\' "$@"; return 19; }',
             helper,
             f"retire_legacy_signal_sources {realm}",
@@ -921,8 +1027,7 @@ def _run_reconciliation_clear(tmp_path: Path, realm: str, status: int) -> subpro
     harness = "\n".join(
         [
             "set -uo pipefail",
-            "ENGINE_DEMO_CONFIG=demo.toml",
-            "ENGINE_MAINNET_CONFIG=mainnet.toml",
+            'lm_realm_field() { printf \'%s\\n\' "$1.toml"; }',
             "fail() { printf '%s\\n' \"$*\" >&2; exit 1; }",
             "run_engine_takeover_command() {",
             '  "$TEST_PYTHON" -c \'import json, os, sys; '
@@ -1035,19 +1140,19 @@ def test_a_realm_start_runs_its_liveness_watchdog_after_every_unit_it_watches(
     about to enable.
     """
 
-    for realm in ("demo", "mainnet"):
-        calls = _trace_start_realm(realm, tmp_path)
-        jobs = _units(f"lm_immediate_timer_jobs {realm}")
-        assert jobs, realm
-        others = [unit for unit in _units(f"lm_activation_units {realm} start") if unit not in jobs]
-        assert others, realm
+    for name in ("demo", "mainnet"):
+        calls = _trace_start_realm(name, tmp_path)
+        jobs = _units(f"lm_immediate_timer_jobs {name}")
+        assert jobs, name
+        others = [unit for unit in _units(f"lm_activation_units {name} start") if unit not in jobs]
+        assert others, name
         for job in jobs:
-            assert f"start {job}" in calls, (realm, job, calls)
-            assert calls.count(f"start {job}") == 1, (realm, job, calls)
+            assert f"start {job}" in calls, (name, job, calls)
+            assert calls.count(f"start {job}") == 1, (name, job, calls)
             for unit in others:
-                assert f"enable --now {unit}" in calls, (realm, unit, calls)
+                assert f"enable --now {unit}" in calls, (name, unit, calls)
                 assert calls.index(f"enable --now {unit}") < calls.index(f"start {job}"), (
-                    realm,
+                    name,
                     unit,
                     calls,
                 )

@@ -10,6 +10,364 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-09 — The host reclaims its own storage: verified history first, budgeted by `statvfs`, and the sealed WAL below the engine's own retention floor is now prunable once its Drive copy is proven. Owner override of the standing "no live WAL is pruned" rule: "this system must be self sufficient. If it doesn't impact operation then go ahead and prune it."**
+  - The reading, 13:5x UTC. `/` is 117.0 GiB with 27.5 GiB writable free
+    (`f_bavail`); the two Bybit WAL families hold 80 and 79 segments of
+    256 MiB (~42 GB) and grow ~5 GB a day, so the disk had about five days
+    left. Every sealed numbered segment is already a hard link into the
+    backup stage, which the backup makes only after `rclone check` passed
+    for that file. Other weight: the market tape's 24 h window 20 GB (its
+    own contract, untouched), `/var/lib/liquidity-migration-wal-quarantine`
+    7.4 GB (the 2026-09-05 v5 originals and conversion evidence, in no
+    backup source, read by nothing live), 36 release directories and 74
+    staged tarballs 3.5 GB, apt cache 0.4 GB. Journald is already capped at
+    500M by `journald.conf.d`.
+  - What made pruning unsafe, from source. Boot reads only the newest
+    trusted segment (`replay_current`), with the trusted one before it as the
+    fallback for a torn rotation; retained callback recovery opens whatever
+    segment a `CallbackWalCursor` in that restatement names. But
+    `engine-wal`'s order-lineage reader (`order_lineage::Reader::new`) began
+    every archive walk at segment 1 and returned `retained order lineage
+    source segment N unavailable` for a missing one; the same reader serves
+    `max_order_epoch_ms`. And `check_fleet_liveness.py` paged `WAL family
+    shrank or lost a retained segment` on any sampled inode that vanished.
+  - Engine change, `engine-wal` and `engine-tools`. `engine_wal::retention_floor`
+    is the oldest segment of the unbroken run ending at the current one, and
+    the lineage/epoch reader starts there (every `SegmentBase` restates the
+    open orders and `order_id_epoch_ms`, so nothing live is lost; with no
+    segment missing the floor is 1 and the cursor is byte-identical to
+    before). `engine_wal::first_record` reads one frame, not a segment. New
+    `engine-tools wal-retention --wal PATH [--json]` reports `segments`,
+    `current_segment`, `newest_trusted_segment`, `boot_fallback_segment`,
+    `callback_floor_segment` (the minimum segment any queue slot, source
+    frontier or order-origin cursor in the newest base names, through the
+    engine's own `CallbackPages::replay`) and `retention_floor_segment` =
+    min of the last two: the lowest index a running engine may still open.
+    Proof: `a_pruned_family_front_starts_the_lineage_read_at_the_retention_floor`
+    fails on the old code with the `segment 2 unavailable` error above;
+    `a_segment_stranded_below_a_hole_is_not_read`,
+    `the_order_epoch_read_survives_a_pruned_family_front`, three tool tests
+    (floor = boot fallback; a torn newest restatement drops it one; a retained
+    callback cursor holds its own segment).
+  - The reclaimer, `scripts/runtime/reclaim_host_storage.py`, root, hourly at
+    :41 UTC (`liquidity-migration-storage-reclaim.timer`, the seventh
+    independent family; :32 backup landed, :47 not started). Budget from
+    `statvfs`: reserve `max(12 % capacity, 8 GiB)`, low water = reserve +
+    6 GiB writer headroom, high water = low water + two days of growth
+    measured from its own `samples.jsonl` (default +10 GiB unmeasured). Every
+    run: old `releases/<commit>/` and `staged/<commit>.tar.gz` (keeps
+    `deployed-commit`, `previous-commit`, `8c92c964…`, any commit a systemd
+    override names, anything under 3 days), `apt-get clean`; then, only while
+    free is under low water, the oldest sealed segments that are below
+    `retention_floor_segment`, not the newest three numbered, older than 48 h,
+    hard-linked into the stage, re-verified against Drive `engine-state/latest/`
+    by size and md5 (local md5 cached by `dev:ino:size:mtime_ns`), server-side
+    copied to `engine-state/sealed/` and verified there, until high water or
+    12 GiB a run; then archive roots (the quarantine) upload–verify–delete at
+    2 GiB a run. Segment 1 (`engine.wal`) is never deleted. Per file the ledger
+    row (`ledger.jsonl`, fsynced, with the deleted inode's `st_dev`/`st_ino`)
+    lands before the unlink, and source and stage link are unlinked under the
+    backup's own flock. `status.json` carries budget, growth, runway, retained
+    verified bytes, the unverified backlog with reasons, the run's plan and
+    errors; the receipt `receipts/storage-reclaim.last-success` is written only
+    on a clean run. `scripts/ops.sh storage` / `storage plan` read it.
+    22 tests (`tests/scripts/test_reclaim_host_storage.py`) on stub `rclone`,
+    `engine-tools` and `apt-get`, including ledger-before-unlink, lock held,
+    md5 mismatch never deleted, dry run mutating nothing.
+  - Watchdog. `reclaimed_wal_identities` reads the ledger; a vanished inode it
+    names is excluded from the engine-rate sample and the disk attribution,
+    everything else still pages. Four tests, including the shrunk family and
+    the wrong inode still paging.
+  - Drive layout gains `engine-state/sealed/`, permanent, beside `latest/`
+    (the mirror) and `history/` (60 days): the next backup's `--delete` moves
+    a reclaimed segment's `latest/` copy into `history/`; `sealed/` is the
+    durable one.
+  - Expected effect. First run: releases and tarballs (~3.2 GB) and the apt
+    cache go, the quarantine uploads at 2 GiB a run and is gone in four
+    hours. WAL reclamation begins when free falls under ~20 GiB in about
+    three days, then holds the disk between ~20 and ~30 GiB free. The
+    deploy receipt below records the first run.
+  - Not changed, the owner's to decide: the tape's 24 h local window
+    (`--keep-hours 24`, 20 GB; 6 h would return ~15 GB); a host-liveness
+    row for the reclaim receipt's age; linking segment 1 into the stage
+    (0.5 GB of duplicate blocks); `checkpoint-configs` (616 KB, left alone).
+
+- **2026-09-09 — Render the fleet's realm plumbing from one table, and hold mexc and hyperliquid provisioned but stopped.**
+  - Owner direction: collapse the realm plumbing into a manifest-driven form
+    with an exact-equivalence test, so adding or stopping a realm is one line;
+    end state "Hyperliquid and MEXC provisioned and proven but stopped".
+  - `deploy/realms.tsv` (`# realm-table-v1`) is the one realm table: `realm`,
+    `venue`, `engine_venue`, `engine_realm`, `kind` (`practice`|`funded`),
+    `posture` (`running`|`stopped`), `legacy_names`, the three sleeve entry
+    switches (`true`|`false`|`toggles`) and the four manifest stop orders.
+    Everything else — units, users, state and spool directories, env, config,
+    credential and Telegram paths, data roots — is derived, in
+    `liquidity_migration/policy/realms.py` and its bash twin `lm_realm_field`
+    in `deploy/lib_realms.sh`; a parity test compares every field of every
+    realm between the two.
+  - Generated from the table, byte-for-byte identical to what was checked in:
+    the 12 per-realm unit files under `deploy/systemd/`, the 8 realm env
+    templates, and the 16 per-realm rows of `deploy/fleet_manifest.tsv`
+    (between `# BEGIN GENERATED …`/`# END GENERATED …` markers, the only change
+    to that file). `python -m liquidity_migration.policy.realms check` proves
+    it and `tests/policy/test_realms.py` fails the gate on drift.
+  - Bash reads the table at runtime: `deploy/lib_sleeves.sh` derives its realm
+    alternations from it; `scripts/ops.sh` derives every realm allow-list and
+    the `remote_engine_control` values (env, credential, user, state dir, the
+    `UnsetEnvironment` set = every other venue's credential variables plus
+    `REAL_MONEY` and the Telegram trio); `scripts/deploy_vps_live.sh` derives
+    the `stop-<realm>`/`disarm-<realm>` modes and ships the table's text and
+    `lib_realms.sh` inside the piped body so `scripts/vps/deploy_remote.sh`
+    has realm facts before `fetch_exact_commit`. The three `provision_<realm>`
+    functions are one `provision_funded_realm`, `deploy_mode` loops the funded
+    realms in table order, and `scripts/vps/flatten_account.sh` lost its realm
+    case block. Python callers (`check_fleet_liveness.py`, `telegram_controls.py`,
+    `real_money_arming.py`) import the table; the Rust realm lists
+    (`NATIVE_REALMS`, signal-worker `REALMS`) and the workflow's `disarm-*`
+    options are pinned to it by test.
+  - Posture. In `deploy_mode`, an armed, `live-proven` funded realm whose
+    posture is `stopped` has its units stopped and disabled
+    (`stop_funded_units`) and prints `<realm> posture=stopped in
+    deploy/realms.tsv: units stay stopped`; `running` keeps today's
+    unchanged-or-handover path. The table holds `demo running`, `mainnet
+    running`, `mexc stopped`, `hyperliquid stopped`. The next deploy therefore
+    stops the mexc realm (no positions, empty wallet) and leaves hyperliquid
+    stopped after its promotion. Posture stops publication, not exposure, and
+    is never authorization: `REAL_MONEY` still is.
+  - Observable differences, none functional for the four realms: demo's engine
+    control `UnsetEnvironment` now also names the MEXC pair (a gap), mainnet's
+    list is in canonical group order, log strings name the realm
+    (`real-money off: mainnet units stay stopped`), `verify` prints `mainnet
+    readiness=live-proven`, `mainnet` passes through `realm_run_ready` (a
+    no-op at `live-proven`). A new realm on a known venue is one row plus its
+    credential template, worker config and engine template; a new venue also
+    needs its credential families in `VENUE_FACTS` and `lm_realm_field`.
+  - Proposed, not built: the demo and mainnet liveness units do not unset the
+    MEXC/Hyperliquid credential variables the mexc and hyperliquid liveness
+    units do; the renderer encodes that as it stands (`liveness_scope`), and
+    widening it is a one-line change with a two-unit byte change.
+  - Proof: 19 tests in `tests/policy/test_realms.py` (render == disk for all
+    25 paths; a fifth realm renders a coherent set that passes
+    `lm_validate_fleet_manifest`; bash/Python parity; Rust and workflow pins;
+    the posture branch); the full Python suite 1,825 passed; Ruff, mypy and
+    ShellCheck clean. Docs: `docs/operations.md` §Realm table,
+    `deploy/systemd/README.md`, `scripts/README.md`, `docs/architecture.md`.
+
+- **2026-09-09 — Hyperliquid canary run 1, 09:10 UTC: the create was refused before the wire, the cleanup looped on `unknownOid`, and the refusal never reached the operator. Fixed; the rerun is the owner's.**
+  - The owner moved the account's 52.4 USDC from the `xyz` HIP-3 dex to Spot
+    (09:03:51) and Spot to the main perps clearinghouse (09:08:06); the main
+    perps read `accountValue 52.4`, `xyz` 0. The dry run passed identity and
+    gateway build. `--execute` printed `canary quote symbol=BTCUSDT bid=79475
+    ask=79476 order_px=79077.6 qty=0.00014 stop=67216` and then thirty times
+    `WARN exact order status failed during canary cleanup error=venue reply
+    unreadable: the venue cannot state this order's disposition: Hyperliquid
+    has no retained order for this cloid`. The venue's order history, open
+    orders and fills are unchanged and the account is flat: no order was ever
+    created.
+  - Fault 1. `make_plan` quantized `bid × 0.995` on the venue's
+    `InstrumentRule.tick_size`, 0.1 for BTC, giving `79077.6` — six significant
+    figures where Hyperliquid allows five (the book itself is in whole
+    dollars). The gateway's exact-terms path judges every price with
+    `quantize_price` against `SignificantFigures { max_digits: 5, max_decimals:
+    1 }` (`validate_wire_grid`, `hyperliquid/gateway.rs:409`) and refused it
+    locally as `order violates venue constraint: price grid`.
+  - Fault 2. Both non-accepted branches of `execute_claimed` did
+    `cleanup(...).await?`, so when the cleanup also failed its error replaced
+    the create error and the refusal was lost.
+  - Fault 3. After an unacknowledged create, `orderStatus` by cloid answers
+    `unknownOid`; the canary read that as a lookup fault, so no scan could count
+    as clean and it exhausted its 30 attempts.
+  - Change, `engine/engine-tools/src/canary.rs` only. The plan prices the limit
+    (buy, floor) and the stop trigger (sell, ceil) through
+    `engine_types::order_terms::quantize_price` on the venue's exact spec
+    (`VenueGateway::instrument_specs`), the same function the adapters judge
+    legality with, and prints `canary exact_spec=venue-stated … price_precision=…`;
+    a venue with no exact spec falls back to the tick and says so. A failed
+    create now reports both halves: `order create was ambiguous or failed:
+    <venue's words>; create_ack=false; cleanup=…`. The receipt lookup answers a
+    typed `Stated` / `NoRecord` / `NoDisposition`; `NoDisposition` with no
+    create acknowledgement reads as never accepted (`canary
+    order_status=never-accepted create_ack=false detail=…`) so the two flat
+    account scans can complete and the command still ends in the create error;
+    with an acknowledgement it stays a fault. `engine-venue` and the engine's
+    recovery path are unchanged: an unknown order there is still an error.
+  - Proof: five new tests in `canary.rs` — the five-significant-figure price
+    (`79077`, and the tick-only `79077.6` is rejected by `validate_wire_grid`),
+    Bybit/MEXC tick pricing byte-identical with and without a spec, the create
+    error surviving a failed cleanup, never-accepted completing two clean scans
+    after an unacknowledged create, and an acknowledged order the venue cannot
+    find still failing — each fails on the old code. engine-tools 177 tests,
+    workspace 2,338, fmt and strict Clippy clean on Rust 1.90.
+  - Evidence boundary: no Hyperliquid order lifecycle has been observed yet;
+    `hyperliquid_mainnet` stays `live-canary` until the owner's rerun passes.
+
+- **2026-09-09 — Incident `mexc-signal-intake`, open since 2026-09-08 21:07 UTC: one signal batch naming seven instruments MEXC never listed froze the mexc engine's whole signal lane for twelve hours, with a healthy heartbeat. Fixed in the engine.**
+  - The reading. The mexc engine retired no spool file after 21:07:04 UTC on
+    09-08: 172 files by 09:00 on 09-09, 161 of them `funding_update`. The
+    head-of-line row is `00000000000000000015-d33f…json`, kind
+    `carry_feature_batch`, destination 0, the worker's first CARRY batch from
+    before `universe.listed_on = "mexc"` existed, with 278 subscriptions over
+    139 symbols; seven of those names MEXC has never listed (`1000PEPEUSDT`,
+    `ARCUSDT`, `FILUSDT`, `MONUSDT`, `RAYDIUMUSDT`, `SHIB1000USDT`,
+    `TRUMPUSDT`), and they are the seven `WARN the venue does not list this
+    instrument; its signals wait and nothing is sent` lines the engine printed
+    at every start and then said nothing more. It is the only row on disk that
+    carries subscriptions. The heartbeat read `may_open=true`,
+    `strategy_errors=[]`, `orders_sent=0` throughout: nothing reports the
+    pending queue or the unlisted set.
+  - The mechanism, from source. `queue_signal_observation`
+    (`engine-core/src/engine/signal_intake.rs`) parks a `Ready` row in
+    `pending_signal_deliveries` and pushes a `WantedSymbol` for every
+    subscription absent from the market table; `admit_wanted`
+    (`engine/symbol_admission.rs`) warned once about a never-listed name and
+    pushed it back onto `wanted_symbols` forever (the 2026-09-08 change that
+    stopped the once-per-second catalog refetch made the name "wait" instead);
+    `accept_pending_signals` re-queues the row while any of its names is
+    wanted; and `engine.rs` polls the signal lane only while
+    `pending_signal_deliveries` is empty. One reader, one outstanding row, one
+    realm-wide gate: the LONG destination's five `llm_gate_candidates` files
+    were collateral, and the freeze is deterministic across restarts. Demo and
+    mainnet cannot reach it: Bybit's universe is Bybit's own listing, and a
+    delisted name keeps its rule through `retain_previous`. A failed unlink is
+    excluded: it is a fatal, logged `SignalError::Source`.
+  - Change, `engine-core` only. A name the fresh table does not list AND the
+    catalog carries no rule for is unfollowable: `admit_wanted` drops its
+    subscription (warned once: `the venue does not list this instrument; its
+    subscription is dropped and nothing is sent for it`) instead of holding it;
+    a delisted name whose rule the catalog retained still waits, so an open
+    position in it can exit. The per-subscription installation check in
+    `signal_intake.rs` skips the same class instead of stopping the engine, the
+    observation is appended to the WAL byte-for-byte (its `content_sha256`
+    covers `subscriptions`, so replay still validates), the row is delivered
+    whole and acknowledged, and the file is unlinked. At boot,
+    `active_subscriptions_listed` and `restore_strategy_inputs` skip a replayed
+    route for such a name, because the accepted record now names it and the
+    old boot check would have refused the restored table (`durable signal
+    source … names ETHUSDT outside the restored symbol table`). No new WAL
+    record kind or shape: the incumbent binary reads everything the new one
+    writes. Risk, latch, pacing and timeout behaviour unchanged.
+  - Drain. On the first start under the fix the mexc engine delivers the CARRY
+    batch minus seven subscriptions (CARRY entries off, and the batch is far
+    past its 6 h `signal_validity_ms`), admits the 161 funding rows as
+    accounting payload, and consumes the five gate rows as `consume_only`
+    (`book_validity_ms` 3.6e6, `GATE_TRIGGER_MAX_AGE_MS`). Nothing trades. The
+    realm's posture is `stopped` from this deploy on, so the drain happens on
+    its next start.
+  - Proof. Five tests fail on the old code and pass on the new:
+    `a_name_the_venue_does_not_list_is_dropped_without_refetching_the_table`,
+    `an_unlisted_subscription_is_dropped_and_its_batch_is_delivered`,
+    `an_unlisted_head_of_line_row_retires_and_the_next_row_is_read` (a real
+    spool feed: row 1 names an unlisted symbol, row 2 nothing; before the fix
+    both files survive and row 2 is never read — the live stall),
+    `a_restored_route_for_an_unlisted_name_does_not_hold_up_boot`, and
+    `a_delisted_name_with_a_retained_rule_keeps_its_market_subscription`
+    guards the mainnet hazard. engine-core 857 passed, workspace 2,338, fmt and
+    strict Clippy clean on Rust 1.90.
+  - Proposed, not built: heartbeat fields for the oldest spool file's age and
+    the outstanding row's age; `attributed_exposure_is_flat` reads `false` for
+    a name with no symbol id, so a flatten naming an unfollowable symbol could
+    never read flat; durable routes keep unfollowable names for a source's
+    life (cap 4,096).
+
+- **2026-09-09 — The signal worker's public data is a venue module: Bybit, MEXC or Hyperliquid, selected per realm. mexc and hyperliquid now read their own venues; demo and mainnet are unchanged to the byte.**
+  - Owner direction: funding, settlement clock, klines, tickers and instruments
+    from MEXC or Hyperliquid natively, selected per realm, so CARRY and EXODUS
+    can be graded there and a Bybit switch-off is survivable. The caveat the
+    owner named stands and is now measured rather than assumed: CARRY was
+    graded on Bybit's eight-hourly settlement; Hyperliquid pays hourly, and
+    MEXC — the "easier port" — settles per contract on 8 h (603 contracts),
+    4 h (586), 1 h (6) and 24 h (1) cycles. Both realms keep CARRY and EXODUS
+    entries off at render; the code carries each venue's own rate and
+    interval, never rescaled, so the sizing decision can wait for data.
+  - The seam, `engine/signal-worker/src/venue/`: `PublicVenueKind`
+    (`bybit`|`mexc`|`hyperliquid`), the `PublicVenue` REST trait
+    (`instruments`, `ticker_page`, `ticker_snapshot`, `klines`, `funding`,
+    `settle_coin`, `open_stream`) and the `PublicStream` socket trait
+    (`next_event`, `sample_tickers`, `reconcile_tickers`, gap and fault marks,
+    `health`). The Bybit-shaped wire rows are the worker's neutral source wire
+    — the durable journal is frozen on them — so every `WireEvent` kind,
+    journal form and heartbeat field name is unchanged; the `bybit_ws_*`
+    heartbeat fields now mean "the realm's public stream". `sources.public_venue`
+    selects the venue (default `bybit`, so `configs/signal-worker.demo.json`
+    and `.mainnet.json` carry no key and load to the same struct); the
+    feature-contract hash covers `sources`, so a realm that switches venue
+    changes its LONG and CARRY `feature_contract_sha256` and its source-history
+    checkpoint key (folded in only when the venue is not Bybit: demo and
+    mainnet keep `37a1879719…`, pinned by test) and cold-starts its features.
+    `PublicVenue::settle_coin` is a venue fact threaded through the universe
+    domain, the runner and the worker's instrument checks (Hyperliquid settles
+    in USDC; the engine keeps the `…USDT` spelling).
+  - Bybit (`venue/bybit.rs`, `venue/bybit/stream.rs`): the existing fetchers
+    and the `tickers.*`/`kline.60.*` socket moved behind the traits,
+    logic-identical (diffed function by function against `HEAD`).
+  - MEXC (`venue/mexc.rs`, `venue/mexc/stream.rs`, `configs/signal-worker.mexc.json`
+    `public_venue = "mexc"`): REST on `api.mexc.com` (`contract/detail`,
+    bulk `contract/funding_rate`, `contract/ticker`, `contract/kline`,
+    `contract/funding_rate/history`), the `edge` socket (`sub.ticker`,
+    `sub.kline`, client ping). Every quantity is in contracts and is converted
+    to base by `contractSize` through `round_clean` (agrees with
+    `engine_public::venues::mexc::contracts` on all recorded rows); klines
+    answer in seconds and the `real*` columns are the traded bar; funding rows
+    carry each settlement's own `collectCycle`; `nextFundingTime` is the
+    venue's stated `nextSettleTime` rolled by the contract's cycle, never an
+    epoch multiple; `code 510` is a retryable network error; `maxOrderQty` is
+    `limitMaxVol` and `maxMktOrderQty` is `maxVol`, the engine adapter's
+    reading. Left absent because the venue states none: `openInterestValue`,
+    `minNotionalValue`, `deliveryTime`, bid/ask sizes, `symbolType`.
+    `universe.listed_on` is dropped: the instrument table is the listing.
+  - Hyperliquid (`venue/hyperliquid.rs`, `venue/hyperliquid/stream.rs`,
+    `configs/signal-worker.hyperliquid.json` `public_venue = "hyperliquid"`):
+    `meta` and `metaAndAssetCtxs` (aligned by index) for instruments and
+    tickers, `candleSnapshot 1h` for klines, `fundingHistory` floored to the
+    hour with interval 1, the `activeAssetCtx`/`candle` socket, a venue-wide
+    pacer of one `/info` read per second (a sustained ~2/s drew `429` live).
+    Approximations, stated: per-bar quote turnover is `v × mean(o, h, l, c)`
+    (the venue states none; LONG ranks on it); `lastPrice` is `midPx`;
+    `launchTime` is the first daily candle, one read per coin cached for the
+    process; bid/ask are absent (`impactPxs` are not the touch, and nothing
+    downstream reads them). `listed_on` dropped for the same reason as MEXC.
+  - Rendered: `deploy/engine.mexc.toml.template` and
+    `deploy/engine.hyperliquid.toml.template` generated regions
+    (`render-native-config --check` passes), the two realms' worker unit
+    files and env templates (the venue note), `docs/architecture.md`,
+    `docs/engine.md` module ownership, `docs/operations.md`,
+    `docs/trading_logic.md`, `deploy/systemd/README.md`.
+  - Known limits, the owner's to decide: (1) MEXC's table carries tokenized
+    equity, index and commodity perps (`TESLA_USDT`, `NAS100_USDT`,
+    `USOIL_USDT`, `XAU_USDT`, about 430 rows) with no reliable product-class
+    label, so on native data they sit in the LONG domain beside crypto,
+    bounded only by turnover and rank — the realm is `stopped`, and the
+    universe rule for it is open; (2) after a Hyperliquid worker restart the
+    launch-time pass takes ~3 minutes at the pacer's rate and the instrument
+    lane refreshes hourly, so the first hour's LONG/CARRY population can be
+    short until the cache is persisted under the worker's state directory
+    (proposed, not built); (3) the ticker cache is triplicated across the
+    three streams and `listed_on` plus its listing lane are now dead outside
+    tests (both proposed follow-ups).
+  - Proof: signal-worker 225 tests (60 new across the three venues on
+    fixtures recorded live on 2026-09-09; a one-row fixture once hid a
+    HashMap-order bug, so every table fixture carries many rows), the
+    worker's settle-coin test
+    (`the_worker_judges_instruments_by_its_venues_settle_coin`), workspace
+    2,408, fmt and strict Clippy clean on Rust 1.90.
+
+- **2026-09-09 — The MEXC market feed's funding clock is the contract's own, not eight hours from the epoch.**
+  - `engine-marketdata/src/mexc.rs` declared every MEXC contract eight-hourly
+    and derived `Ticker::next_funding_ms` as the next epoch multiple. Probed
+    live: 603 contracts at 8 h, 586 at 4 h, 6 at 1 h, 1 at 24 h, and
+    `US30_USDT` does not settle on an epoch multiple of its own cycle. The
+    feed's worker now reads the bulk `GET /api/v1/contract/funding_rate` page
+    at connect (`engine_public::venues::mexc::public::funding_schedule`, one
+    request for every contract) and hourly off the socket loop, and
+    `next_funding_ms` is the venue's stated stamp rolled forward by that
+    contract's cycle; an unstated schedule reads `0`. A connect-time read
+    failure fails the dial like the contract table; a refresh failure keeps
+    the last schedule and says so once. No in-tree consumer reads the engine's
+    `next_funding_ms` today (CARRY reads the worker's snapshot stamp, which the
+    MEXC venue fills per contract), so this removes a wrong number without
+    touching a live decision path. Tests on recorded rows for each cycle fail
+    on the epoch derivation and pass on the venue's stamp.
+
 - **2026-09-09 — Incident id `host-22826ce0bb838311`, first page 07:08:08 UTC: the mexc signal worker's LONG lane stopped completing at 07:04:53 and its watchdog has paged CRITICAL every 30 s since, with the age climbing one second per second — `193s` at 07:08:08 through `345s` at 07:10:39. The carry lane in the same worker stays fresh. Nothing is impaired in money terms: the mexc realm holds no positions, `orders_sent=0`, and its futures wallet is empty. The cause is read off the heartbeat: the worker's `current` signal-spool class is at its 8-file cap, so every `LongWatermark` commit is refused and the lane's completion clock cannot advance, while a carry watermark coalesces onto an already-pending path, projects no new file, and is admitted. The repository's own fault is that the page never says so — the heartbeat publishes `spool_backpressured_classes=["current"]` next to the aggregate `spool_backpressured=false`, the watchdog reads only the aggregate, and the operator gets the effect (`LONG cycle is 345s old`) with no mention of the spool. Fixed: the degraded reason now names the blocked class. Why `current` is not draining is not established, and the reading that settles it is named below. The stall itself ended at 08:52:52 UTC, when the `7f0214f` handover restarted the mexc pair: the fresh process re-read the inventory, the engine retired exactly one `current` file, and that was all the LONG watermark needed — `long_output_sequence` 18 → 19 and the lane 1 s old at 08:55:33. Contained, not repaired: 161 undrained `funding_update` files are untouched, `current` sits at 7 of 8, and the same block returns the moment a destination stops consuming again.**
   - The chain. `advance_kline_watermark`
     (`engine/signal-worker/src/live.rs:1231-1236`) publishes the LONG watermark
