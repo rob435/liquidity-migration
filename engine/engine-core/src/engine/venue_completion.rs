@@ -1643,11 +1643,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             ..
         } = journaled;
         let owned_fill = allocation.is_some();
-        let recorded = update.records_allocation();
         if let Some(allocation) = allocation {
             self.books
                 .attribution
-                .commit_portfolio_fill(allocation, recorded)
+                .commit_portfolio_fill(allocation)
                 .map_err(EngineError::State)?;
             if let Some(request) = fill_request.as_ref() {
                 self.books.attribution.remember_order_stop(request);

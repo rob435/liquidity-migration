@@ -135,7 +135,7 @@ impl Attribution {
                     let prepared = self
                         .prepare_portfolio_update_for_order(request, strategy_names, update)?
                         .ok_or("recorded fill has no valid allocation")?;
-                    self.commit_portfolio_fill(prepared, true)?;
+                    self.commit_portfolio_fill(prepared)?;
                     if let Some(request) = request {
                         self.remember_order_stop(request);
                     }
@@ -178,7 +178,7 @@ impl Attribution {
                     let prepared = self
                         .prepare_portfolio_recovered_for_order(request, strategy_names, record)?
                         .ok_or("recorded recovered fill has no valid allocation")?;
-                    self.commit_portfolio_fill(prepared, true)?;
+                    self.commit_portfolio_fill(prepared)?;
                     if let Some(request) = request {
                         self.remember_order_stop(request);
                     }

@@ -397,7 +397,7 @@ fn native_sub_ulp_partial_is_not_erased_by_a_legacy_forced_overfill() {
             .unwrap()
             .unwrap();
         let mut claims = claims;
-        claims.commit_portfolio_fill(prepared, true).unwrap();
+        claims.commit_portfolio_fill(prepared).unwrap();
         assert_eq!(
             claims.signed_exact(StrategyId(0), SymbolId(0)).abs(),
             n("0.00000000000000000001")
@@ -473,7 +473,7 @@ fn current_binary64_full_close_keeps_its_quantity_before_any_grid_adoption() {
         Exact::from_legacy_f64(0.1).unwrap()
     );
     assert!(prepared.allocation.legacy_quantity_step.is_none());
-    claims.commit_portfolio_fill(prepared, true).unwrap();
+    claims.commit_portfolio_fill(prepared).unwrap();
     assert!(claims.snapshot().positions.is_empty());
 }
 
@@ -817,7 +817,7 @@ fn a_legacy_close_on_an_adopted_sleeve_leaves_the_live_and_replayed_row_alike() 
         .prepare_portfolio_update_for_order(Some(request), &names, update)
         .unwrap()
         .unwrap();
-    live.commit_portfolio_fill(prepared, false).unwrap();
+    live.commit_portfolio_fill(prepared).unwrap();
 
     records.extend(closing);
     let replayed = Attribution::try_from_records(&records).unwrap();
@@ -827,5 +827,60 @@ fn a_legacy_close_on_an_adopted_sleeve_leaves_the_live_and_replayed_row_alike() 
         live.validate_sleeve_stop_exact(StrategyId(0), SymbolId(0), Side::Sell, &n("200")),
         Err("sleeve stop has no owned position".into()),
         "the live engine can still price a sleeve stop off binary64 rounding"
+    );
+}
+
+#[test]
+fn a_durable_binary64_close_on_an_adopted_sleeve_leaves_a_later_fifo_close_rederivable() {
+    let names: Vec<String> = ["left", "right", "third"]
+        .iter()
+        .map(|key| (*key).to_string())
+        .collect();
+    let mut records = vec![base(&[], 0.0)];
+    add(&mut records, 0, Side::Buy, "0.1", false, 1000);
+    records.push(plan(&records));
+    assert_eq!(
+        Attribution::try_from_records(&records)
+            .unwrap()
+            .signed_exact(StrategyId(0), SymbolId(0)),
+        n("0.1"),
+        "adoption did not put the sleeve on the venue grid"
+    );
+
+    let mut rows = fill("durable-legacy-close", Side::Sell, "0.1", false);
+    let WalRecord::OrderSent { request, .. } = rows[0].clone() else {
+        unreachable!()
+    };
+    let state = Attribution::try_from_records(&records).unwrap();
+    let WalRecord::OrderUpdate { update, .. } = &mut rows[1] else {
+        unreachable!()
+    };
+    let prepared = state
+        .prepare_portfolio_update_for_order(Some(&request), &names, update)
+        .unwrap()
+        .unwrap();
+    let OrderUpdate::Fill { allocation, .. } = update else {
+        unreachable!()
+    };
+    *allocation = Some(Box::new(prepared.allocation));
+    records.extend(rows);
+
+    add(&mut records, 0, Side::Buy, "0.1", false, 3000);
+    legacy_emergency(&mut records, "0.1", true);
+    let original = serde_json::to_vec(&records).unwrap();
+    let adoption = crate::legacy_quantity::plan(&records, &specs(), 5000)
+        .unwrap()
+        .unwrap();
+    records.push(adoption);
+    let claims = Attribution::try_from_records(&records).unwrap();
+    assert!(
+        claims.snapshot().positions.is_empty(),
+        "the durable binary64 close left its rounding behind as a holding"
+    );
+    assert!(claims.legacy_quantities.is_empty());
+    assert!(reconcile::physical_exposure(&records).unwrap().is_empty());
+    assert_eq!(
+        serde_json::to_vec(&records[..records.len() - 1]).unwrap(),
+        original
     );
 }

@@ -208,11 +208,10 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
             let offset = self.wal.segment_size();
             let sequence = self.wal.append(&record)?;
-            let recorded = record.records_allocation();
             if let Some(allocation) = allocation {
                 self.books
                     .attribution
-                    .commit_portfolio_fill(allocation, recorded)
+                    .commit_portfolio_fill(allocation)
                     .map_err(EngineError::State)?;
             }
             self.recovered_exec_ids.insert(exec.exec_id.clone(), now_ms);

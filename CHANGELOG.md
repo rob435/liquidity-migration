@@ -49,7 +49,7 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     `tests/policy/test_real_money_arming.py::test_committed_profile_is_the_default_render`
     pins the new bytes. The profile bytes and the engine tree both changed, so
     the next `deploy` restarts both Bybit realms.
-- **2026-09-09 — `engine sim` heavy sweep, 17:19 UTC onward: three pre-existing replay and accounting faults surface once the venue task reorders commands. One is fixed at the root — live and replay reduced an `amounts: None` fill by different rules — and the two others are reported here with their seeds. None can reach a funded log.**
+- **2026-09-09 — `engine sim` heavy sweep, 17:19 UTC onward: three pre-existing replay and accounting faults surface once the venue task reorders commands. All three are fixed at the root by 20:45 UTC: live and replay reduced an `amounts: None` fill by different rules, and a recorded allocation over such a fill was taken for an exact quantity. None can reach a funded log.**
   - Found how. `sim::one_seed_replays_byte_for_byte_under_heavy_faults` (seed
     7, `--seconds 300 --symbols 2 --crashes 2 --faults heavy`) went red under
     the F03 scheduling change with `engine: state: sleeve stop has no owned
@@ -69,10 +69,10 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     quantity is `Exact::from_legacy_f64(0.1)`; live kept the
     `-1/180143985094819840` dust row, priced a stop off it and wrote
     `SleeveStopSet`; replay dropped the row and found no owner. Fix: the live
-    path runs the same legacy tail when the allocation is not recorded
-    (`commit_portfolio_fill(prepared, recorded_allocation)`, with
-    `OrderUpdate::records_allocation` / `WalRecord::records_allocation`;
-    `PreparedPortfolioFill` carries `legacy_inputs`). Replay is byte-for-byte
+    path runs the same legacy tail (`commit_portfolio_fill` shares
+    `commit_prepared`'s tail; `PreparedPortfolioFill` carries `legacy_inputs`),
+    first only when the allocation was not recorded and, since the second fix
+    below, for every `amounts: None` fill. Replay is byte-for-byte
     unchanged for any given WAL; recorded allocations are unchanged; fees,
     prices and realized amounts are untouched. Proof:
     `legacy_quantity::context_tests::a_legacy_close_on_an_adopted_sleeve_leaves_the_live_and_replayed_row_alike`
@@ -87,18 +87,56 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     binary has run that reducer on an `amounts: None` Bybit fill. Exposure was
     `engine sim` and `engine backtest` in the unmodeled execution mode
     (`backtest/venue.rs:862`).
-  - Still open, pre-existing, same sweep. (1) `boot: boot: legacy FIFO
-    rederivation has no owned execution` (`legacy_quantity/replay.rs::rederived`),
-    a boot crash loop: seeds 42, 123, 240, 243, 247; seed 42's WAL hash
-    `bb33159076d3` is identical before and after the fix. (2)
-    `ledger_agrees_when_flat`: seed 166 fails identically before and after
-    (`engine -35.087131 venue -38.973795 differ by 3.886664`), and seed 33 now
-    lands on it after its trajectory changed (`engine -210.912470 venue
-    -211.090525`, 0.178055 over 60 round trips). Reproducers:
-    `engine/target/debug/engine-tools sim --seed 42 --seconds 300 --symbols 2
-    --crashes 2 --faults heavy` and `--seed 166`. Neither is in the F02/F03
-    change: replay and the judge are unchanged code for any WAL. Both are
-    separate root causes and are not fixed here.
+  - Root cause, fixed: the two remaining faults share it. A recorded allocation
+    over a fill the venue stated no `ExecutionAmounts` for carries a binary64
+    reading of the quantity (`Exact::from_legacy_f64(qty)`,
+    `3602879701896397/2^55` for "0.1"), not a venue-grid quantity, and three
+    readers took "recorded" for "exact": `commit_portfolio_fill`
+    (`attribution/allocated.rs`) emptied `legacy_inputs` whenever the log
+    carried the allocation, `Lots::on_fill_with_economics`
+    (`execution/roundtrip.rs`) gated its sub-`LEGACY_FLAT` tail on
+    `exact_qty.is_none()`, and `reconcile::position_state_with_adoption`
+    skipped the physical origin for the same records. Boot's grid adoption
+    therefore snapped only the covered rows onto the grid and left the
+    uncovered residue `1/180143985094819840` (5.55e-18) behind as a holding.
+    Symptom one, `boot: legacy FIFO rederivation has no owned execution`
+    (`legacy_quantity/replay.rs`), seeds 42, 123, 240, 243, 247:
+    `history_recovery.rs` records every recovered fill's allocation, so seed
+    42's `recovered_fill_v3` Sell 0.1 closing sleeve `(0, BTCUSDT)` left its
+    rounding in a position the retroactive cut had already put at `1/10`;
+    `Origin::resolve` then subtracted the next reading's error from a position
+    that no longer held it, the net landed one f64 ULP under the `0.1` the
+    emergency FIFO close needed (`allocated.rs`, `execution.qty > net`), and
+    boot crash-looped. Symptom two, `ledger_agrees_when_flat`, seeds 166 and
+    33: the live engine and the venue agreed to the last digit (13 trips,
+    −38.973795) and the replay closed 12 (−35.087131) because the residue
+    swallowed the next close. The missing row is `quotes` BTCUSDT,
+    `sim-exec-23` Buy 0.1 @ 50082.7 fee 2.003308 and `sim-exec-24` Sell 0.1 @
+    50083.9 fee 2.003356: gross 0.12, fees 4.006664, net −3.886664. The same
+    residue wrote `legacy_quantity_grid_adopted_v2 { before 0, after
+    1/180143985094819840 }` and `reconciled … may_open: false`, so seed 166
+    refused every entry for its last two segments (58 orders / 26 fills, now
+    88 / 36). Fix: a binary64 quantity is legacy whether or not its allocation
+    is durable. The `recorded_allocation` gate and
+    `OrderUpdate`/`WalRecord::records_allocation` are gone, the lots tail keys
+    on `fill.amounts.is_none()`, and the physical origin is noted for every
+    `amounts: None` fill. Recorded fills, fees, prices, allocations and
+    realized amounts are untouched; no record shape, field or key changes. One
+    claim reverses:
+    `durable_exact_allocation_without_native_amounts_preserves_a_canonical_residual`
+    becomes `…_settles_a_canonical_residual`, a sub-`FLAT` (1e-9) residue left
+    by a durable binary64 fill is settled, not kept. Replay of a log written
+    under the old rule can differ where such fills exist, and by the adapter
+    argument above no funded log has one. Proof:
+    `execution::roundtrip::migration_tests::a_legacy_allocated_close_of_a_canonical_snapshot_does_not_cost_the_next_trip_its_money`
+    fails on the old rule with `left 1 right 0` on the residue and re-derives
+    the −3.886664 row;
+    `legacy_quantity::context_tests::a_durable_binary64_close_on_an_adopted_sleeve_leaves_a_later_fifo_close_rederivable`
+    fails at `606f4459` with exactly `legacy FIFO rederivation has no owned
+    execution`. Seeds 1–44 plus 123, 166, 240, 243, 247 pass `--seconds 300
+    --symbols 2 --crashes 2 --faults heavy --twice`, every replay byte for
+    byte; seed 42's WAL hash moves from `bb33159076d3` to `e2e4c851aba1`
+    because the tail now runs live.
 
 - **2026-09-09 — The 2026-09-09 source audit's first hardening batch: four commits authored 15:36:34–15:38:51 UTC and rebased onto `origin/main` at 16:13:12. Leverage administration leaves the account-state owner's event loop, `floor_usdt` stops inventing capital nobody can see, MEXC gains a root-owned account binding and loses its `live-proven` claim, and a deployable archive must now carry qualification evidence for the exact candidate binaries. Nothing pushed, no deploy run.**
   - F05, leverage administration off the account owner (`98a4be7a`).

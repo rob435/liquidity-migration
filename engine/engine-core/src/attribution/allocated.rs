@@ -312,15 +312,13 @@ impl Attribution {
         }))
     }
 
-    /// `recorded_allocation` is whether the log carries this allocation. When
-    /// it does, the quantity every later read of the record uses is the
-    /// recorded exact one. When it does not, a read re-derives it from the
-    /// binary64 `qty` field, so the fill runs the same legacy tail that
-    /// replay of the record will run — `commit_prepared`'s.
+    /// `legacy_inputs` is empty exactly when the venue stated exact amounts.
+    /// A recorded allocation does not make a binary64 quantity exact — it
+    /// only makes it durable — so the fill runs the same legacy tail that
+    /// replay of the record will run, `commit_prepared`'s.
     pub(crate) fn commit_portfolio_fill(
         &mut self,
         prepared: PreparedPortfolioFill,
-        recorded_allocation: bool,
     ) -> Result<(), String> {
         let PreparedPortfolioFill {
             inventory,
@@ -328,11 +326,6 @@ impl Attribution {
             legacy_inputs,
             ..
         } = prepared;
-        let legacy_inputs = if recorded_allocation {
-            Vec::new()
-        } else {
-            legacy_inputs
-        };
         let origins = legacy_inputs
             .iter()
             .map(|(strategy, symbol, signed)| {
@@ -392,7 +385,7 @@ impl Attribution {
                 _ => unreachable!(),
             }
             .ok_or("recorded allocation has no owner")?;
-            self.commit_portfolio_fill(prepared, true)?;
+            self.commit_portfolio_fill(prepared)?;
             return Ok(true);
         }
         if request.is_some_and(|r| r.is_portfolio_reduction()) {

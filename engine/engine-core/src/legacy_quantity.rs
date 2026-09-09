@@ -599,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_exact_allocation_without_native_amounts_preserves_a_canonical_residual() {
+    fn durable_exact_allocation_without_native_amounts_settles_a_canonical_residual() {
         use engine_types::execution_allocation::{
             AllocationPolicy, ExecutionAllocation, ExecutionSlice,
         };
@@ -672,10 +672,10 @@ mod tests {
             .prepare_portfolio_update_for_order(Some(&request), &["left".into()], &update)
             .unwrap()
             .unwrap();
-        claims.commit_portfolio_fill(prepared, true).unwrap();
+        claims.commit_portfolio_fill(prepared).unwrap();
         assert_eq!(
             claims.signed_exact(StrategyId(0), SymbolId(0)),
-            exact("0.000000000000000001")
+            Exact::zero()
         );
         assert!(claims.legacy_quantities.is_empty());
         assert_eq!(

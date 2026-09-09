@@ -890,7 +890,7 @@ pub(crate) fn position_state_with_adoption(
                     };
                     let quantity =
                         crate::portfolio_allocation::fill_quantity(*qty, amounts, allocation)?;
-                    if amounts.is_none() && !has_allocation(record) {
+                    if amounts.is_none() {
                         origins
                             .entry(*symbol)
                             .or_default()

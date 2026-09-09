@@ -590,7 +590,10 @@ impl Lots {
         } else {
             -&quantity
         };
-        let legacy_flat_after = exact_qty.is_none()
+        // A recorded allocation over a fill the venue stated no exact amounts
+        // for still carries a binary64 reading of the quantity, so the tail
+        // belongs to every such fill, not only the ones read back off `qty`.
+        let legacy_flat_after = fill.amounts.is_none()
             && (&lot.signed_qty + &signed_fill)
                 .to_f64()
                 .is_ok_and(|qty| qty.abs() < LEGACY_FLAT);
@@ -1049,6 +1052,66 @@ mod migration_tests {
         );
         assert_eq!(lots.closed().len(), 1);
         assert!(lots.closed()[0].round_trip.is_none());
+    }
+
+    #[test]
+    fn a_legacy_allocated_close_of_a_canonical_snapshot_does_not_cost_the_next_trip_its_money() {
+        let legacy = |side, px: f64, fee: f64| Fill {
+            amounts: None,
+            client_order_id: "recovered".into(),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            side,
+            qty: 0.1,
+            px,
+            fee: Some(fee),
+            is_maker: true,
+            arrival_mid: 0.0,
+            venue_ts_ms: 1,
+        };
+        // What a recorded allocation over an `amounts: None` fill states.
+        let recorded = Exact::from_legacy_f64(0.1).unwrap();
+        let mut lots = Lots::default();
+        lots.restate_exact(&[(
+            "quotes".into(),
+            "BTCUSDT".into(),
+            -Exact::parse_decimal("0.1").unwrap(),
+        )])
+        .unwrap();
+        lots.on_fill_with_quantity(
+            "quotes",
+            "BTCUSDT",
+            &legacy(Side::Buy, 50_075.2, 2.003008),
+            Some(&recorded),
+        )
+        .unwrap();
+        assert_eq!(
+            lots.open(),
+            0,
+            "a binary64 close of a canonical short left analytic residue"
+        );
+        for (side, px, fee) in [
+            (Side::Buy, 50_082.7, 2.003308),
+            (Side::Sell, 50_083.9, 2.003356),
+        ] {
+            lots.on_fill_with_quantity(
+                "quotes",
+                "BTCUSDT",
+                &legacy(side, px, fee),
+                Some(&recorded),
+            )
+            .unwrap();
+        }
+        assert_eq!(lots.closed().len(), 2, "the second trip never closed");
+        let trip = lots.closed()[1]
+            .round_trip
+            .as_ref()
+            .expect("both legs are here");
+        assert!(
+            (trip.net_usdt - -3.886664).abs() < 1e-9,
+            "{}",
+            trip.net_usdt
+        );
     }
 }
 
