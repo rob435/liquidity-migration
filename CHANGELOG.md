@@ -10,7 +10,7 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
-- **2026-09-09 — Incident id `host-22826ce0bb838311`, first page 07:08:08 UTC: the mexc signal worker's LONG lane stopped completing at 07:04:53 and its watchdog has paged CRITICAL every 30 s since, with the age climbing one second per second — `193s` at 07:08:08 through `345s` at 07:10:39. The carry lane in the same worker stays fresh. Nothing is impaired in money terms: the mexc realm holds no positions, `orders_sent=0`, and its futures wallet is empty. The cause is read off the heartbeat: the worker's `current` signal-spool class is at its 8-file cap, so every `LongWatermark` commit is refused and the lane's completion clock cannot advance, while a carry watermark coalesces onto an already-pending path, projects no new file, and is admitted. The repository's own fault is that the page never says so — the heartbeat publishes `spool_backpressured_classes=["current"]` next to the aggregate `spool_backpressured=false`, the watchdog reads only the aggregate, and the operator gets the effect (`LONG cycle is 345s old`) with no mention of the spool. Fixed: the degraded reason now names the blocked class. Why `current` is not draining is not established, and the reading that settles it is named below.**
+- **2026-09-09 — Incident id `host-22826ce0bb838311`, first page 07:08:08 UTC: the mexc signal worker's LONG lane stopped completing at 07:04:53 and its watchdog has paged CRITICAL every 30 s since, with the age climbing one second per second — `193s` at 07:08:08 through `345s` at 07:10:39. The carry lane in the same worker stays fresh. Nothing is impaired in money terms: the mexc realm holds no positions, `orders_sent=0`, and its futures wallet is empty. The cause is read off the heartbeat: the worker's `current` signal-spool class is at its 8-file cap, so every `LongWatermark` commit is refused and the lane's completion clock cannot advance, while a carry watermark coalesces onto an already-pending path, projects no new file, and is admitted. The repository's own fault is that the page never says so — the heartbeat publishes `spool_backpressured_classes=["current"]` next to the aggregate `spool_backpressured=false`, the watchdog reads only the aggregate, and the operator gets the effect (`LONG cycle is 345s old`) with no mention of the spool. Fixed: the degraded reason now names the blocked class. Why `current` is not draining is not established, and the reading that settles it is named below. The stall itself ended at 08:52:52 UTC, when the `7f0214f` handover restarted the mexc pair: the fresh process re-read the inventory, the engine retired exactly one `current` file, and that was all the LONG watermark needed — `long_output_sequence` 18 → 19 and the lane 1 s old at 08:55:33. Contained, not repaired: 161 undrained `funding_update` files are untouched, `current` sits at 7 of 8, and the same block returns the moment a destination stops consuming again.**
   - The chain. `advance_kline_watermark`
     (`engine/signal-worker/src/live.rs:1231-1236`) publishes the LONG watermark
     only when no kline repair job is outstanding, and
@@ -258,6 +258,27 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     Ruff stage (`No module named ruff`) and its dependency doctor already reads
     `warning`; the change is Rust-only and the engine stages it gates ran here
     directly.
+  - Deploy and post-action receipts. [Deploy run
+    `34329881585`](https://github.com/rob435/liquidity-migration/actions/runs/34329881585),
+    dispatched 08:34:43 on green checks [run
+    `34328972779`](https://github.com/rob435/liquidity-migration/actions/runs/34328972779)
+    (`ci` 08:27:21, `rust` 08:32:32), ran its `vps` job 08:45:41–08:53:31 and
+    took the same boot window the last one refused: the demo pair came up
+    08:46:2x and the soak printed all 31 observations healthy from
+    `elapsed=0s` through `elapsed=300s` (08:46:49–08:51:49), past the 151 s
+    where `5b9b72b`'s soak died. Then `atomic mainnet handover` at 08:51:50,
+    `atomic mexc handover` at 08:52:22, and `deploy-ok
+    commit=7f0214f7b8318bad1526d09c5b3adc521ca30496` at 08:53:21 with
+    `real-money armed` and `mexc readiness=live-proven`; hyperliquid stays
+    stopped on `live-canary`. [Diagnose run
+    `34331779257`](https://github.com/rob435/liquidity-migration/actions/runs/34331779257)
+    at 08:55:23–08:55:38 is the healthy post-action reading: all three workers
+    `status=ready`, no `worker-status:` page anywhere, all three engines on
+    `engine_commit=7f0214f` with `private_stream_ready=true`,
+    `strategy_errors=[]`, `orders_sent=0` and positions 4 / 4 / 0 untouched.
+    `systemctl --failed` is down to demo, host and mainnet liveness, all three
+    on the refused Telegram route, which is the other half of
+    `host-51b05439c4f09794` and the owner's to clear.
   - Not what the two repairs named above would have done. Neither is taken:
     this does not move what the soak accepts by choice and does not change what
     the message counts. It restores the 120 s the verdict already declares for
