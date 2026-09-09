@@ -159,7 +159,7 @@ A realm is `live-proven` when, and only when, all six capabilities in
 `protection-place`, `protection-trigger`, `reconnect-history-recovery`) carry a
 current receipt from that exact realm.
 
-Legend: `observed <date>` = a dated receipt in `CHANGELOG.md`, `docs/history/`
+Legend: `observed <date>` = a dated receipt in `CHANGELOG.md`
 or `STATE.md`; `stale <date>` = that receipt predates a change to the adapter's
 execution semantics and counts as `implemented`; `implemented` = the adapter
 does it and offline conformance covers it, the live venue has not been seen

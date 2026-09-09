@@ -393,7 +393,7 @@ impl VenueName {
     ///
     /// Kept beside the one exhaustive realm registry so a newly added venue
     /// cannot silently inherit somebody else's evidence. Every `Observed` cell
-    /// names a dated receipt that exists in `CHANGELOG.md`, `docs/history/` or
+    /// names a dated receipt that exists in `CHANGELOG.md`, git history or
     /// `STATE.md`; where no such receipt exists the cell says `Implemented`,
     /// or `Unknown` where the adapter does not do the thing at all. The
     /// matrix is published in [`docs/engine.md`] §2 and a test compares the

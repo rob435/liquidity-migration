@@ -7,8 +7,7 @@ incident, or a check that changed nothing gets no entry. Current truth lives
 in [STATE.md](STATE.md); when something happens, add the dated entry here and
 edit STATE.md to match.
 
-Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
-[August 2026](docs/history/CHANGELOG-2026-08.md).
+Older history: Retained in git history (pre-September 6).
 
 - **2026-09-09 — The audit's deferred items are built or closed with a receipt, 21:00 UTC onward, on the owner's full authority: owed markouts survive a restart (F20), every source opportunity in a log is accounted for by `engine cohort` (F16), one production day is reconciled against the venue's own ledger with the residual named (F17), and the research standards for the maker, execution comparisons and cross-venue signals are written down (F18, F19, F21). F13/F14 stay deferred by the audit's own sequence; the MEXC identity waits on the account UID only the owner can read.**
   - F20, owed markouts. `Fills.pending` (`engine-core/src/execution.rs`) is
@@ -105,6 +104,26 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     `live-canary`. The MEXC registry `/etc/liquidity-migration/mexc-account-bindings.json`
     and the `uid-` identity in `engine-mexc.env` need the account UID from
     MEXC's own interface, which nothing on the host discovers.
+  - Deployed. [Run `34412394718`](https://github.com/rob435/liquidity-migration/actions/runs/34412394718),
+    dispatched 22:28:33 UTC on `e899ea21` (the twelve commits since
+    `42dd7446`, this batch included): `ci` and `rust` green by 22:39:55, the
+    release artifact by 22:42:58, `vps` 22:43:03–22:50:02 — release bytes
+    verified 22:43:31, both captures `unchanged-left-running`, demo handover
+    22:43:5x, the full 300 s demo soak 22:44:15–22:49:15, `atomic mainnet
+    handover` 22:49:16, `deploy-ok commit=e899ea21…` 22:49:51,
+    `rollback-target 42dd7446…`, `mainnet readiness=live-proven`, `mexc
+    readiness=live-canary`, `hyperliquid armed but … readiness=live-canary:
+    units stay stopped`. Host reading 22:50:47: both Bybit engines on
+    `e899ea21` (demo pid `3821204`, mainnet pid `3823469`), `may_open=true`,
+    `private_stream_ready=true`, `strategy_errors=[]`; every watchdog `ok`.
+    As the floor entry below says, mainnet's rolling-loss restriction is
+    tripped at handover: risk net −9.3433 USDT against a 3.4708 budget at
+    34.79 USDT equity; demo reads −112.08 against 152.73, untripped. The
+    recorder's 22:50:20 sample already carries `wallet_cash_usdt`
+    39.25806546, `unrealised_pnl_usdt` −4.52177 and both positions with their
+    marks. `storage-reclaim plan` on the host reads the hyperliquid family as
+    `no log yet`; the unit's `failed` state is from its 20:41 run and clears
+    at its 23:41 run.
 - **2026-09-09 — `floor_usdt` is removed: the capital reference has no fixed anchor. The owner's call, 19:40 UTC, after the audit batch's F11 change had turned the 100 USDT floor into an entry halt for the 36.8 USDT Bybit mainnet account. The reference and every cap scaled from it now follow verified equity all the way down; the only USDT figure left in the profile is the scale the ratios are written at.**
   - Removed. `EnvelopeConfig::floor_usdt`, `Envelope::viable_for_new_exposure()`
     and the kernel's `require_viable_reference()` with its deny `verified
@@ -462,7 +481,7 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     `reconnect-history-recovery`, `funding-fee-cash`), `Evidence`
     (`Unknown` | `Implemented` | `Observed { on, receipt, adapter_commit,
     current }`), `VenueName::capability` — one explicit row per realm, every
-    `Observed` cell naming a dated receipt in CHANGELOG, `docs/history/` or
+    `Observed` cell naming a dated receipt in CHANGELOG, git history or
     STATE.md — and `derive_readiness`: `live-proven` iff all six of
     `UNATTENDED_PROTECTED_TRADING` (`submit`, `cancel`, `fill-attribution`,
     `protection-place`, `protection-trigger`, `reconnect-history-recovery`) are
@@ -2804,7 +2823,7 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     races, replacement priority, native deadlines, missing observations,
     same-process clock alignment, recovered-fill deduplication, fee absence,
     actual-fill calibration and cache reuse after tape expiry. Source and
-    deployment status are recorded in [the study contract](docs/execution-study.md)
+    deployment status are recorded in [the study contract](docs/execution.md#2-one-sided-execution-study)
     and [STATE](STATE.md); no directional policy or arming setting is changed.
   - The first host run at 01:08:39 UTC finds an archived receive-time
     regression: `tape line 8263: local_receive_ts_ns 1788698566254491806
@@ -3626,7 +3645,7 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     transport, risk and collateral. Submit latency remains open. Current
     host reads show six fully protected positions per realm and healthy
     deployed engines and workers.
-    [Execution measurements](docs/execution-performance.md) retain every
+    [Execution measurements](docs/execution.md) retain every
     measured cell and its interference/source limits.
 
 - **2026-09-06 — Round-2 runtime cleanup and integration.**
@@ -3909,5 +3928,5 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
   - [Audit snapshot](https://github.com/rob435/liquidity-migration/blob/29366d3a2013701a0956a2a471a7c916bf6980e2/docs/tier1-audit-round-2.md),
     [source-bound evidence](https://github.com/rob435/liquidity-migration/blob/2422be0d9ca5a40e0ad954c6499d9f5a35e77d5c/docs/tier1-round-evidence.json) and
     [implementation checkpoint](https://github.com/rob435/liquidity-migration/blob/29366d3a2013701a0956a2a471a7c916bf6980e2/docs/tier1-round-handoff.md) contain the details.
-    The [archived callback incident](docs/history/CHANGELOG-2026-09-01-through-05.md) records its local repair. No deployment or
+    The archived callback incident (commit `29366d3a`) records its local repair. No deployment or
     live account qualification is performed in this round.

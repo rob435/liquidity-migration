@@ -9,7 +9,7 @@ symbols = ["BTCUSDT"]
 
 [runners.linux-x86_64]
 # Decision: median of four fixed-archive runs in 34084393881. Submit: 34074530152.
-# These are run-level reference statistics; execution-performance.md owns every cell.
+# These are run-level reference statistics; execution.md owns every cell.
 status = "measured-hosted-fixed-archive-decision-median"
 # Linux requires both the stored absolute limits and 1.5x this source's same-worker medians to pass.
 reference_commit = "a4189a4897409e65acba7a2078b964986ceea928"
@@ -17,7 +17,7 @@ decision_p99_ns = 9300
 submit_p50_ns = 1090000
 
 [runners.darwin-arm64]
-# Apple M4, same recipe, embedded execution with one order barrier; execution-performance.md.
+# Apple M4, same recipe, embedded execution with one order barrier; execution.md.
 status = "measured-embedded-one-barrier-uncontended"
 decision_p99_ns = 14200
 submit_p50_ns = 5570000

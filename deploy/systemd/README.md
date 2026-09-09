@@ -31,7 +31,7 @@ All family names below have the `liquidity-migration-` prefix; the group is `liq
 | `mainnet-liveness` | Mainnet | Downstream | Every 30 s while funded activation is enabled | `liquidity-observer` | Mainnet health |
 | `mexc-liveness` | MEXC | Downstream | Every 30 s while mexc activation is enabled | `liquidity-observer` | MEXC health |
 | `hyperliquid-liveness` | Hyperliquid | Downstream | Every 30 s while hyperliquid activation is enabled | `liquidity-observer` | Hyperliquid health |
-| `execution-study` | Mainnet | Downstream | Every 900 s after completion while funded activation is enabled | `liquidity-engine-mainnet` | Read account fees, compare one-sided execution on recorded orders/tape; [contract](../../docs/execution-study.md) |
+| `execution-study` | Mainnet | Downstream | Every 900 s after completion while funded activation is enabled | `liquidity-engine-mainnet` | Read account fees, compare one-sided execution on recorded orders/tape; [contract](../../docs/execution.md#2-one-sided-execution-study) |
 | `trade-notify` | Shared | Downstream | Every 5 minutes, second 30 | `liquidity-observer` | Attributed entries and realized exits to Telegram |
 | `telegram-controls` | Shared | Downstream | Boot | `liquidity-controls:liquidity-controls` | Control requests through the account owner |
 | `llm-ledger` | Shared | Downstream | Hourly, minute 05 | `liquidity-llm` | Public research nominations and judgments |

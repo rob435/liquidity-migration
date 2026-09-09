@@ -58,8 +58,6 @@ _REPO_PATH = re.compile(
 )
 _PATH_CLAIM_EXEMPT = frozenset({
     "CHANGELOG.md",
-    "docs/history/CHANGELOG-2026-08.md",
-    "docs/history/CHANGELOG-2026-09-01-through-05.md",
 })
 
 

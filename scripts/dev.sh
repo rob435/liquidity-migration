@@ -108,6 +108,10 @@ case "$command" in
     else
       # Without rustup the local cargo ignores rust-toolchain.toml, so CI's
       # pinned clippy can refuse what a newer local clippy accepts.
+      if command -v rustup >/dev/null 2>&1; then
+        rustup_cargo_dir="$(dirname "$(rustup which cargo)")"
+        export PATH="$rustup_cargo_dir:$PATH"
+      fi
       echo "[dev] cargo fmt"
       (cd "$ROOT_DIR/engine" && cargo fmt --all -- --check)
       echo "[dev] cargo clippy"
