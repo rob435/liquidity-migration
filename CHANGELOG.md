@@ -82,7 +82,7 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     costs a genuinely stuck stream one extra tick. Each changes when the funded
     realm pages, so the choice is the owner's.
 
-- **2026-09-09 — Incidents `demo-0922e9f30da3bf98` and `mainnet-014ec4a90a2fde5f`: every signal worker's CARRY cycle stopped completing at the UTC decision roll for five to eight minutes, paged CRITICAL on every realm including the funded one, and cleared itself. Root cause open; no code changed.**
+- **2026-09-09 — Incidents `demo-0922e9f30da3bf98`, `mainnet-014ec4a90a2fde5f` and `mexc-d62940e951288d4c`: every signal worker's CARRY cycle stopped completing at the UTC decision roll for five to eight minutes and paged CRITICAL on every realm including the funded one, because the freshness verdict judged the lane by 180 s while the worker's own funding supply frontier guarantees a longer wait. The lanes were working; the verdict was wrong, and is now measured from the instant the roll's cycle is actually due.**
   - Scope. All three running realms stall at the same boundary, not demo alone,
     and all three watchdogs page. Last CARRY completion before the stall:
     mainnet 00:00:33.728, mexc 00:00:54.261, demo 00:00:56.980 UTC. The funded
@@ -90,7 +90,8 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     worker-status:liquidity-migration-signal-worker-mainnet.service:
     liquidity-migration-signal-worker-mainnet.service reports 'degraded': carry
     cycle is 250s old (limit 180s)` at 00:04:43, `280s old` at 00:05:14 and
-    `310s old` at 00:05:44, and that page fired this on-call session. mexc pages
+    `310s old` at 00:05:44, and each realm's page fired its own on-call
+    session — three sessions on one fault. mexc pages
     the same clause at 00:04:43 (`229s old`), 00:05:14 and 00:05:44, the last
     reading `ticker coverage incomplete (149/149 rows, 149/149 topics accepted);
     carry cycle is 290s old (limit 180s)`.
@@ -154,46 +155,64 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     [run `34294110977`](https://github.com/rob435/liquidity-migration/actions/runs/34294110977)
     is a later, separate `bybit_ws_ticker_coverage_complete=false` wobble, not
     the tail of this stall.
-  - Open. Which of `try_carry_watermark`'s early returns held for those minutes
-    is not established. The two candidates are the lane gate
-    (`carry_required_lanes_pending`, `engine/signal-worker/src/live.rs:2700`:
-    an in-flight or last-failed funding pass blocks CARRY, and the funding lane
-    is spawned on the same 60000 ms cadence as the kline tick that calls the
-    gate) and the coverage gate (`covered < required`,
-    `engine/signal-worker/src/live.rs:1886`: at the roll `source_through_ms`
-    advances a day and every active symbol must have kline and funding coverage
-    through the new boundary). The one reading that would settle it is the
-    worker's `LaneState` and the gate that returned, at the moment of the
-    stall. Neither is in the heartbeat and `mode=diagnose` prints only the
-    heartbeat subset, so no sanctioned host reading distinguishes them today.
-    The next UTC decision roll is the natural repeat.
-  - What the window fits, unproven. The stall opens at the first kline tick
-    after `closed_kline_end` — `floor_hour(now - KLINE_PUBLICATION_LAG_MS
-    60000)`, `engine/signal-worker/src/live/acquisition.rs:858` — crosses the
-    new day, so `carry_source_through` (`engine/signal-worker/src/live.rs:2216`)
-    rolls its decision frontier a day forward from 00:01 and every carry
-    symbol's required funding range then ends at the new 00:00 boundary. The
-    funding lane may not ask for that settlement until `floor_hour(now -
-    FUNDING_PUBLICATION_LAG_MS 300000)` reaches it, which is 00:05
-    (`spawn_funding_lane`, `engine/signal-worker/src/live.rs:1369`), and it then
-    sweeps one symbol per request, awaiting each round trip before the next
-    (`spawn_funding_fetch_lane`,
-    `engine/signal-worker/src/live/acquisition.rs:306`; `spawn_repair_lane` at
-    `:392` is the same shape). mexc and mainnet clear 42 s and 60 s after
-    00:05:00. That fits a demand frontier four minutes ahead of the supply
-    frontier, with a sweep of about a minute behind it; it fits either gate
-    equally, and demo's longer stall is unexplained by it, so it stays a
-    hypothesis until the stall is read from inside the worker. Meanwhile the
-    heartbeat publishes
-    `carry_cycle_cadence_ms` as `live.kline_cadence_ms` 60000
-    (`engine/signal-worker/src/live.rs:2384`), so a lane whose real frontier
-    moves hourly and daily is judged on a 60 s clock.
-  - Owner's call. Closing this means shortening the post-roll sweep, holding
-    the CARRY source frontier back to what the funding lane may already
-    request, or publishing a CARRY cadence that admits the sweep. Each changes
-    either the fleet's request pressure on a venue or when the funded realm
-    pages, so none is taken unattended; nothing on the host is impaired
-    meanwhile and no decision is lost, `decision_kline_lag_ms` being 1200000.
+  - Cause, in the verdict rather than the lane. At the roll
+    `carry_source_through` (`engine/signal-worker/src/live.rs:2216`) rolls its
+    decision frontier a day forward, so every active symbol's required kline and
+    funding range ends at the new 00:00 boundary. The funding lane may not ask
+    for that settlement until `floor_hour(now - FUNDING_PUBLICATION_LAG_MS
+    300000)` reaches it — 00:05 (`spawn_funding_lane`,
+    `engine/signal-worker/src/live.rs:1369`) — and it then sweeps one symbol per
+    request, awaiting each round trip (`spawn_funding_fetch_lane`,
+    `engine/signal-worker/src/live/acquisition.rs:306`). So no carry watermark
+    can commit between the roll and that sweep, whichever of
+    `try_carry_watermark`'s two gates returns first — the lane gate
+    (`carry_required_lanes_pending`, `live.rs:2700`) while the sweep is in
+    flight, or the coverage gate (`covered < required`, `live.rs:1886`) before
+    it lands — because both wait on the same supply frontier. The verdict did
+    not: `startup_runtime_status` judged the carry lane by three times
+    `carry_cycle_cadence_ms`, published as `live.kline_cadence_ms` 60000, so a
+    lane whose frontier moves daily was judged on a 60 s clock and paged for the
+    wait the worker guarantees itself. Which gate returned is still unread, and
+    the fix does not depend on it. The verdict landed with `a994983` at
+    2026-09-08 08:41 UTC and this was its first UTC roll.
+  - Change. A lane's freshness contract now carries the instant before which it
+    cannot have completed for the boundary it is working on. The carry lane's is
+    the standing boundary plus the later of `decision_kline_lag_ms` (1200000)
+    and `FUNDING_PUBLICATION_LAG_MS` plus one `funding_cadence_ms`, published as
+    `carry_cycle_not_before_wall_ts_ms`, and both the worker's verdict and
+    `check_fleet_liveness.py`'s reason line measure the age from the later of
+    that and the last completion. So the roll's own carry cycle is overdue at
+    00:23 UTC — past the longest stall observed here by fourteen minutes, and
+    past the instant the day's decision becomes publishable — while every other
+    minute of the day keeps the 180 s window it has now. No cadence, gate,
+    frontier, request or sweep changes, so the fleet's request pressure on every
+    venue is exactly what it was; nothing but when a stalled carry lane pages.
+  - Proof. Two regressions fail before the fix and pass after:
+    `a_carry_lane_waiting_for_a_boundarys_funding_print_is_not_stale`
+    (`engine/signal-worker/src/live/tests.rs`) reproduces this page as
+    `left: "degraded", right: "ready"` at the roll plus 290 s and holds the
+    observed 00:08:55 clearance and the window past the due instant, and
+    `test_carry_cycle_age_runs_from_the_boundarys_publishable_funding_print`
+    (`tests/scripts/test_scripts_check_fleet_liveness.py`) reproduces the
+    `carry cycle is 296s old (limit 180s)` reason line.
+    `the_heartbeat_publishes_when_the_carry_cycle_is_first_due` holds the
+    published instant to the boundary. 154 signal-worker, 2,320 workspace Rust
+    and 194 runtime/watchdog/diagnose Python tests pass in this container, with
+    `cargo fmt --check` and strict Clippy clean and Ruff passing; mypy adds no
+    error. `failed_tape_decompression_cannot_report_successful_eof`,
+    `runtime_control_cli_bounds_history_memory_and_keeps_rotated_identity_and_torn_refusal`
+    and the research suites' collection reproduce identically on the pristine
+    tree from missing container tooling (`zstd`, `polars`, `yaml`); ShellCheck is
+    absent here. CI runs all of them.
+  - Also seen, not changed. One mexc sample at 00:05:44 and mainnet's
+    `recovering` at 00:14:15 carry `bybit_ws_ticker_coverage_complete=false`
+    with rows and topics full (`149/149`), so the clause that flipped is mark
+    freshness (`fresh_mark_coverage`,
+    `engine/signal-worker/src/bybit_ws.rs:239`). Both clear by the next sample
+    and no page names either alone.
+  - Host action. The fix reaches the fleet only through a deploy; until then
+    every realm pages once a day between roughly 00:03 and 00:07 UTC on a lane
+    that is working.
 
 - **2026-09-08 — Incident `mexc-a361f5d18861421a`: a rowless execution-history sweep reported no progress, so the mexc engine abandoned every recovery pass and could never open.**
   - Start. The mexc engine boots at 22:38:15 UTC on `62234c95`, logs `mexc

@@ -6,11 +6,12 @@ use super::{
     startup_runtime_status, stream_transport_healthy, trading_intervals_contain,
     transient_recovery_acceptable, validate_funding_source_against_state,
     validate_instrument_source_against_state, validate_source_grid_timestamp,
-    validate_source_page_rows, whale_fetch_bounds, FetchedFunding, FetchedFundingBatch,
-    FetchedInstruments, FetchedKlineBatch, FetchedKlineJobs, FetchedTickers, FetchedUniverseInputs,
-    FetchedWhales, LaneCompletion, LaneState, LiveRunOptions, LiveRunner, RecoveryState,
-    StreamEvent, StreamHealth, TickerSample, BOOT_REPAIR_MAX_MS, LANE_COMPLETION_QUEUE_CAPACITY,
-    STARTUP_MAX_MS, TRANSIENT_RECOVERY_MAX_MS,
+    validate_source_page_rows, whale_fetch_bounds, CycleFreshness, FetchedFunding,
+    FetchedFundingBatch, FetchedInstruments, FetchedKlineBatch, FetchedKlineJobs, FetchedTickers,
+    FetchedUniverseInputs, FetchedWhales, LaneCompletion, LaneState, LiveRunOptions, LiveRunner,
+    RecoveryState, StreamEvent, StreamHealth, TickerSample, BOOT_REPAIR_MAX_MS,
+    FUNDING_PUBLICATION_LAG_MS, LANE_COMPLETION_QUEUE_CAPACITY, STARTUP_MAX_MS,
+    TRANSIENT_RECOVERY_MAX_MS,
 };
 use crate::bybit_ws::{BybitPublicStream, StreamContinuity};
 use crate::config::SignalWorkerConfig;
@@ -71,7 +72,10 @@ fn runtime_stays_starting_only_for_the_bounded_cycle_warmup() {
     assert_eq!(
         startup_runtime_status(
             "degraded",
-            [(None, 60_000), (None, 60_000)],
+            [
+                CycleFreshness::on_cadence(None, 60_000),
+                CycleFreshness::on_cadence(None, 60_000)
+            ],
             true,
             1_000,
             STARTUP_MAX_MS,
@@ -81,7 +85,10 @@ fn runtime_stays_starting_only_for_the_bounded_cycle_warmup() {
     assert_eq!(
         startup_runtime_status(
             "ready",
-            [(Some(2_000), 60_000), (Some(3_000), 60_000)],
+            [
+                CycleFreshness::on_cadence(Some(2_000), 60_000),
+                CycleFreshness::on_cadence(Some(3_000), 60_000)
+            ],
             true,
             1_000,
             3_000,
@@ -91,7 +98,10 @@ fn runtime_stays_starting_only_for_the_bounded_cycle_warmup() {
     assert_eq!(
         startup_runtime_status(
             "degraded",
-            [(Some(2_000), 60_000), (None, 60_000)],
+            [
+                CycleFreshness::on_cadence(Some(2_000), 60_000),
+                CycleFreshness::on_cadence(None, 60_000)
+            ],
             true,
             1_000,
             STARTUP_MAX_MS + 1_000,
@@ -101,7 +111,10 @@ fn runtime_stays_starting_only_for_the_bounded_cycle_warmup() {
     assert_eq!(
         startup_runtime_status(
             "degraded",
-            [(None, 60_000), (None, 60_000)],
+            [
+                CycleFreshness::on_cadence(None, 60_000),
+                CycleFreshness::on_cadence(None, 60_000)
+            ],
             false,
             1_000,
             60_000,
@@ -112,7 +125,10 @@ fn runtime_stays_starting_only_for_the_bounded_cycle_warmup() {
     assert_eq!(
         startup_runtime_status(
             "ready",
-            [(Some(1_000), 60_000), (Some(200_000), 60_000)],
+            [
+                CycleFreshness::on_cadence(Some(1_000), 60_000),
+                CycleFreshness::on_cadence(Some(200_000), 60_000)
+            ],
             true,
             1_000,
             200_001,
@@ -123,13 +139,71 @@ fn runtime_stays_starting_only_for_the_bounded_cycle_warmup() {
     assert_eq!(
         startup_runtime_status(
             "ready",
-            [(Some(200_000), 60_000), (Some(200_002), 60_000)],
+            [
+                CycleFreshness::on_cadence(Some(200_000), 60_000),
+                CycleFreshness::on_cadence(Some(200_002), 60_000)
+            ],
             true,
             1_000,
             200_001,
         ),
         "degraded",
         "a future cycle timestamp is not fresh"
+    );
+}
+
+/// The daily decision roll: the carry lane cannot score the new boundary until
+/// its funding print is publishable, and the decision is not due until the
+/// kline lag, so a completion from before the boundary is not a stall until the
+/// window past that instant.
+#[test]
+fn a_carry_lane_waiting_for_a_boundarys_funding_print_is_not_stale() {
+    let boundary_ms = 1_788_912_000_000;
+    let last_completed_ms = boundary_ms - 6_000;
+    let not_before_ms = boundary_ms + 1_200_000;
+    let cycles = |now_ms: i64| {
+        [
+            CycleFreshness::on_cadence(Some(now_ms - 1_000), 60_000),
+            CycleFreshness::due_after(Some(last_completed_ms), 60_000, Some(not_before_ms)),
+        ]
+    };
+    for (stalled_ms, note) in [
+        (
+            boundary_ms + 290_000,
+            "the funded fleet paged at 00:05 UTC on a carry cycle that could not have completed",
+        ),
+        (
+            boundary_ms + 535_000,
+            "the longest observed roll sweep cleared at 00:08:55 UTC",
+        ),
+        (
+            not_before_ms + 180_000,
+            "the window still runs from the moment the lane is due",
+        ),
+    ] {
+        assert_eq!(
+            startup_runtime_status(
+                "ready",
+                cycles(stalled_ms),
+                true,
+                boundary_ms - STARTUP_MAX_MS,
+                stalled_ms,
+            ),
+            "ready",
+            "{note}"
+        );
+    }
+    let overdue_ms = not_before_ms + 180_001;
+    assert_eq!(
+        startup_runtime_status(
+            "ready",
+            cycles(overdue_ms),
+            true,
+            boundary_ms - STARTUP_MAX_MS,
+            overdue_ms,
+        ),
+        "degraded",
+        "a carry lane still silent past the window is a fault"
     );
 }
 
@@ -152,7 +226,10 @@ fn a_cold_start_still_filling_ticker_coverage_is_starting_not_degraded() {
         kline_topics_accepted: 2,
         ..StreamHealth::default()
     };
-    let cycles = [(None, 60_000), (None, 60_000)];
+    let cycles = [
+        CycleFreshness::on_cadence(None, 60_000),
+        CycleFreshness::on_cadence(None, 60_000),
+    ];
     let mut old_recovery = RecoveryState {
         transient_started_at_ms: Some(started_at_ms + 1),
         reached_ready: false,
@@ -236,8 +313,8 @@ fn a_cold_start_still_filling_ticker_coverage_is_starting_not_degraded() {
             &booting,
             false,
             [
-                (Some(now_ms - 1_000), 60_000),
-                (Some(now_ms - 1_000), 60_000)
+                CycleFreshness::on_cadence(Some(now_ms - 1_000), 60_000),
+                CycleFreshness::on_cadence(Some(now_ms - 1_000), 60_000)
             ],
             started_at_ms,
             now_ms,
@@ -271,8 +348,8 @@ fn a_cold_start_boot_repair_gap_is_recovering_until_its_own_bound() {
         ..StreamHealth::default()
     };
     let cycles = [
-        (Some(started_at_ms + 66_000), 60_000),
-        (Some(started_at_ms + 66_500), 60_000),
+        CycleFreshness::on_cadence(Some(started_at_ms + 66_000), 60_000),
+        CycleFreshness::on_cadence(Some(started_at_ms + 66_500), 60_000),
     ];
     let mut recovery = RecoveryState {
         transient_started_at_ms: Some(started_at_ms + 4_000),
@@ -302,8 +379,14 @@ fn a_cold_start_boot_repair_gap_is_recovering_until_its_own_bound() {
             &still_repairing,
             true,
             [
-                (Some(started_at_ms + BOOT_REPAIR_MAX_MS - 60_000), 60_000),
-                (Some(started_at_ms + BOOT_REPAIR_MAX_MS - 59_000), 60_000),
+                CycleFreshness::on_cadence(
+                    Some(started_at_ms + BOOT_REPAIR_MAX_MS - 60_000),
+                    60_000
+                ),
+                CycleFreshness::on_cadence(
+                    Some(started_at_ms + BOOT_REPAIR_MAX_MS - 59_000),
+                    60_000
+                ),
             ],
             started_at_ms,
             started_at_ms + BOOT_REPAIR_MAX_MS,
@@ -342,8 +425,8 @@ fn a_cold_start_boot_repair_gap_is_recovering_until_its_own_bound() {
         ..boot_repairing.clone()
     };
     let late_cycles = [
-        (Some(started_at_ms + 300_000), 60_000),
-        (Some(started_at_ms + 300_500), 60_000),
+        CycleFreshness::on_cadence(Some(started_at_ms + 300_000), 60_000),
+        CycleFreshness::on_cadence(Some(started_at_ms + 300_500), 60_000),
     ];
     assert_eq!(
         heartbeat_status(
@@ -366,11 +449,11 @@ fn a_cold_start_boot_repair_gap_is_recovering_until_its_own_bound() {
             &reconnect_expired,
             true,
             [
-                (
+                CycleFreshness::on_cadence(
                     Some(started_at_ms + 330_000 + TRANSIENT_RECOVERY_MAX_MS - 60_000),
                     60_000
                 ),
-                (
+                CycleFreshness::on_cadence(
                     Some(started_at_ms + 330_000 + TRANSIENT_RECOVERY_MAX_MS - 59_000),
                     60_000
                 ),
@@ -516,6 +599,46 @@ async fn the_heartbeat_publishes_the_frame_age_limit_it_judges_itself_by() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[tokio::test(start_paused = true)]
+async fn the_heartbeat_publishes_when_the_carry_cycle_is_first_due() {
+    // A reader that cannot see this instant reads a carry cycle frozen since
+    // the decision boundary as a stall, and pages every realm once a day.
+    let root = temporary_root("heartbeat-carry-due");
+    let _ = std::fs::remove_dir_all(&root);
+    let options = LiveRunOptions {
+        state_dir: root.join("state"),
+        spool_dir: root.join("spool"),
+        heartbeat: root.join("heartbeat.json"),
+    };
+    let config = checked_demo_config();
+    let runner = LiveRunner::new_with_universe(config.clone(), test_universe(), options).unwrap();
+    let boundary_ms = 1_788_912_000_000 + config.carry.decision_phase_ms;
+    let expected_ms = boundary_ms
+        + config.carry.decision_kline_lag_ms.max(
+            FUNDING_PUBLICATION_LAG_MS + i64::try_from(config.live.funding_cadence_ms).unwrap(),
+        );
+    assert_eq!(
+        runner.carry_cycle_not_before(boundary_ms + 1_000),
+        Some(expected_ms),
+        "the first carry cycle for a boundary waits for its funding print and its decision"
+    );
+    assert_eq!(
+        runner.carry_cycle_not_before(boundary_ms - 1_000),
+        Some(expected_ms - DAY_MS),
+        "before the boundary the standing one is the previous day's"
+    );
+
+    runner.write_heartbeat("ready", None).unwrap();
+    let payload: Value =
+        serde_json::from_slice(&std::fs::read(root.join("heartbeat.json")).unwrap()).unwrap();
+    assert!(
+        payload["carry_cycle_not_before_wall_ts_ms"].is_i64(),
+        "the heartbeat publishes the instant it judges the carry cycle by"
+    );
+    drop(runner);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn runtime_ready_requires_exact_live_ticker_and_kline_topics() {
     let now_ms = 1_000_000;
@@ -601,8 +724,8 @@ fn transient_recovery_is_bounded_and_transport_failures_are_immediate() {
     health.gap_open = true;
     health.last_frame_ts_ms = Some(started_at_ms + 59_999);
     let cycles = [
-        (Some(started_at_ms + 59_000), 60_000),
-        (Some(started_at_ms + 59_000), 60_000),
+        CycleFreshness::on_cadence(Some(started_at_ms + 59_000), 60_000),
+        CycleFreshness::on_cadence(Some(started_at_ms + 59_000), 60_000),
     ];
     let mut heartbeat_recovery = RecoveryState {
         transient_started_at_ms: None,

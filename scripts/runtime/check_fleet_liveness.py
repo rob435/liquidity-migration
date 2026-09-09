@@ -304,19 +304,31 @@ def _signal_worker_detail(payload: dict[str, object], *, now: float) -> str:
     if kline_quarantined is not None and kline_quarantined > 0:
         reasons.append(f"{kline_quarantined:g} kline topics quarantined")
     now_ms = now * 1000
-    for lane, completed_key, cadence_key in (
-        ("LONG", "last_long_cycle_completed_wall_ts_ms", "long_cycle_cadence_ms"),
-        ("carry", "last_carry_cycle_completed_wall_ts_ms", "carry_cycle_cadence_ms"),
+    for lane, completed_key, cadence_key, due_key in (
+        ("LONG", "last_long_cycle_completed_wall_ts_ms", "long_cycle_cadence_ms", None),
+        (
+            "carry",
+            "last_carry_cycle_completed_wall_ts_ms",
+            "carry_cycle_cadence_ms",
+            "carry_cycle_not_before_wall_ts_ms",
+        ),
     ):
         completed_ms = _number(payload.get(completed_key))
         cadence_ms = _number(payload.get(cadence_key))
+        # The carry lane scores a daily decision boundary and cannot complete
+        # for it before the boundary's own funding print is publishable, so the
+        # worker publishes that instant and the age runs from it.
+        due_ms = _number(payload.get(due_key)) if due_key else None
         if completed_ms is None:
             reasons.append(f"{lane} cycle has not completed")
-        elif completed_ms > now_ms:
+            continue
+        if completed_ms > now_ms:
             reasons.append(f"{lane} cycle timestamp is in the future")
-        elif cadence_ms is not None and now_ms - completed_ms > cadence_ms * 3:
+            continue
+        age_from_ms = max(completed_ms, due_ms) if due_ms is not None else completed_ms
+        if cadence_ms is not None and now_ms - age_from_ms > cadence_ms * 3:
             reasons.append(
-                f"{lane} cycle is {(now_ms - completed_ms) / 1000:.0f}s old (limit {cadence_ms * 3 / 1000:.0f}s)"
+                f"{lane} cycle is {(now_ms - age_from_ms) / 1000:.0f}s old (limit {cadence_ms * 3 / 1000:.0f}s)"
             )
     return "; ".join(reasons) or "worker self-check is degraded"
 

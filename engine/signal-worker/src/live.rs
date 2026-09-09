@@ -91,6 +91,11 @@ pub struct WorkerHeartbeat {
     pub last_carry_cycle_completed_wall_ts_ms: Option<i64>,
     pub long_cycle_cadence_ms: u64,
     pub carry_cycle_cadence_ms: u64,
+    /// Wall time before which a carry cycle stopped at the standing decision
+    /// boundary is not overdue: the boundary's own funding print is not
+    /// publishable, and its decision is not due, until then. Readers measure
+    /// carry staleness from the later of this and the last completion.
+    pub carry_cycle_not_before_wall_ts_ms: Option<i64>,
     pub rest_ticker_last_success_wall_ts_ms: Option<i64>,
     pub rest_ticker_last_failure_wall_ts_ms: Option<i64>,
     pub rest_ticker_success_count: u64,
@@ -877,13 +882,14 @@ impl LiveRunner {
                         &health,
                         lanes.repair,
                         [
-                            (
+                            CycleFreshness::on_cadence(
                                 self.last_long_cycle_completed_wall_ts_ms,
                                 self.config.live.kline_cadence_ms,
                             ),
-                            (
+                            CycleFreshness::due_after(
                                 self.last_carry_cycle_completed_wall_ts_ms,
                                 self.config.live.kline_cadence_ms,
+                                self.carry_cycle_not_before(now_ms),
                             ),
                         ],
                         run_started_at_ms,
@@ -2229,6 +2235,15 @@ impl LiveRunner {
             .unwrap_or(current_end_ms)
     }
 
+    fn carry_cycle_not_before(&self, now_ms: i64) -> Option<i64> {
+        carry_cycle_not_before(
+            now_ms,
+            self.config.carry.decision_phase_ms,
+            self.config.carry.decision_kline_lag_ms,
+            self.config.live.funding_cadence_ms,
+        )
+    }
+
     fn latest_carry_decision(&self, observed_ts_ms: i64) -> i64 {
         carry_decision_at(
             observed_ts_ms,
@@ -2382,6 +2397,7 @@ impl LiveRunner {
             last_carry_cycle_completed_wall_ts_ms: self.last_carry_cycle_completed_wall_ts_ms,
             long_cycle_cadence_ms: self.config.live.kline_cadence_ms,
             carry_cycle_cadence_ms: self.config.live.kline_cadence_ms,
+            carry_cycle_not_before_wall_ts_ms: self.carry_cycle_not_before(wall_ms()?),
             rest_ticker_last_success_wall_ts_ms: self.rest_ticker_last_success_wall_ts_ms,
             rest_ticker_last_failure_wall_ts_ms: self.rest_ticker_last_failure_wall_ts_ms,
             rest_ticker_success_count: self.rest_ticker_success_count,
@@ -2482,6 +2498,12 @@ fn write_provisional_heartbeat(
         last_carry_cycle_completed_wall_ts_ms: None,
         long_cycle_cadence_ms: config.live.kline_cadence_ms,
         carry_cycle_cadence_ms: config.live.kline_cadence_ms,
+        carry_cycle_not_before_wall_ts_ms: carry_cycle_not_before(
+            wall_ms()?,
+            config.carry.decision_phase_ms,
+            config.carry.decision_kline_lag_ms,
+            config.live.funding_cadence_ms,
+        ),
         rest_ticker_last_success_wall_ts_ms: None,
         rest_ticker_last_failure_wall_ts_ms: None,
         rest_ticker_success_count: 0,
@@ -2625,12 +2647,83 @@ struct RecoveryState {
     reached_ready: bool,
 }
 
+/// When the standing decision boundary's own carry cycle first becomes overdue.
+/// Two waits the worker guarantees itself, whichever is later: the boundary's
+/// funding settlement is not publishable until `FUNDING_PUBLICATION_LAG_MS`
+/// after it and `spawn_funding_lane` will not ask before then, and the day's
+/// decision is not due until `decision_kline_lag_ms` after it, so nothing is
+/// lost while the lane works the roll. Before this instant a carry cycle
+/// stopped at the boundary is arithmetic, not a fault.
+fn carry_cycle_not_before(
+    now_ms: i64,
+    decision_phase_ms: i64,
+    decision_kline_lag_ms: i64,
+    funding_cadence_ms: u64,
+) -> Option<i64> {
+    let funding_supply_ms =
+        FUNDING_PUBLICATION_LAG_MS.saturating_add(i64::try_from(funding_cadence_ms).unwrap_or(0));
+    carry_decision_at(now_ms, decision_phase_ms, 0)
+        .map(|boundary_ms| boundary_ms.saturating_add(decision_kline_lag_ms.max(funding_supply_ms)))
+}
+
+/// One lane's freshness contract: when it last completed, how often it should,
+/// and the wall time before which it cannot have completed for the boundary it
+/// is working on. `not_before_ms` is `None` for a lane whose completion waits
+/// on nothing but its own cadence.
+#[derive(Clone, Copy, Debug)]
+struct CycleFreshness {
+    completed_at_ms: Option<i64>,
+    cadence_ms: u64,
+    not_before_ms: Option<i64>,
+}
+
+impl CycleFreshness {
+    fn on_cadence(completed_at_ms: Option<i64>, cadence_ms: u64) -> Self {
+        Self {
+            completed_at_ms,
+            cadence_ms,
+            not_before_ms: None,
+        }
+    }
+
+    fn due_after(
+        completed_at_ms: Option<i64>,
+        cadence_ms: u64,
+        not_before_ms: Option<i64>,
+    ) -> Self {
+        Self {
+            completed_at_ms,
+            cadence_ms,
+            not_before_ms,
+        }
+    }
+
+    /// Three cadences cover one tick plus one pass. The window runs from the
+    /// later of the last completion and the moment the lane became due, so a
+    /// lane waiting for a boundary's inputs to exist is not a stall.
+    fn stale_at(&self, now_ms: i64) -> bool {
+        let window_ms = i64::try_from(self.cadence_ms)
+            .unwrap_or(i64::MAX / 3)
+            .saturating_mul(3);
+        let Some(completed_at_ms) = self.completed_at_ms else {
+            return true;
+        };
+        if completed_at_ms > now_ms {
+            return true;
+        }
+        let due_from_ms = self.not_before_ms.map_or(completed_at_ms, |not_before_ms| {
+            completed_at_ms.max(not_before_ms)
+        });
+        now_ms.saturating_sub(due_from_ms) > window_ms
+    }
+}
+
 /// One producer verdict: `starting` for bounded cold fill, `recovering` for a
 /// short repair on an otherwise sound transport, and `degraded` for a fault.
 fn heartbeat_status(
     health: &StreamHealth,
     repair_running: bool,
-    cycles: [(Option<i64>, u64); 2],
+    cycles: [CycleFreshness; 2],
     started_at_ms: i64,
     now_ms: i64,
     max_frame_age_ms: i64,
@@ -2671,26 +2764,17 @@ fn heartbeat_status(
 
 fn startup_runtime_status(
     base_status: &'static str,
-    cycles: [(Option<i64>, u64); 2],
+    cycles: [CycleFreshness; 2],
     startup_inputs_healthy: bool,
     started_at_ms: i64,
     now_ms: i64,
 ) -> &'static str {
-    if cycles
-        .iter()
-        .any(|(completed_at_ms, _)| completed_at_ms.is_none())
+    if cycles.iter().any(|cycle| cycle.completed_at_ms.is_none())
         && startup_inputs_healthy
         && now_ms.saturating_sub(started_at_ms) < STARTUP_MAX_MS
     {
         "starting"
-    } else if cycles.iter().any(|(completed_at_ms, cadence_ms)| {
-        let window_ms = i64::try_from(*cadence_ms)
-            .unwrap_or(i64::MAX / 3)
-            .saturating_mul(3);
-        !completed_at_ms.is_some_and(|completed_at_ms| {
-            completed_at_ms <= now_ms && now_ms.saturating_sub(completed_at_ms) <= window_ms
-        })
-    }) {
+    } else if cycles.iter().any(|cycle| cycle.stale_at(now_ms)) {
         "degraded"
     } else {
         base_status

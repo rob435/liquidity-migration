@@ -475,6 +475,61 @@ def test_signal_worker_startup_and_recovery_are_quiet_but_degraded_and_backpress
     assert [alert.key for alert in alerts] == ["worker-spool:worker"]
 
 
+def test_carry_cycle_age_runs_from_the_boundarys_publishable_funding_print(tmp_path: Path) -> None:
+    # At 00:00 UTC the carry lane's coverage target steps to the new boundary,
+    # whose funding settlement is not publishable for five minutes and whose
+    # decision is not due for twenty, so the last completion is pre-boundary by
+    # design and is not a stall yet.
+    heartbeat = tmp_path / "heartbeat.json"
+    boundary_ms = 1_788_912_000_000
+    base = {
+        "kind": "liquidity_migration_signal_worker_heartbeat",
+        "status": "degraded",
+        "bybit_ws_connected": True,
+        "bybit_ws_gap_open": False,
+        "bybit_ws_ticker_coverage_complete": True,
+        "bybit_ws_ticker_topics_quarantined": 0,
+        "bybit_ws_kline_topics_quarantined": 0,
+        "bybit_ws_last_frame_ts_ms": boundary_ms + 289_999,
+        "bybit_ws_max_frame_age_ms": 30_000,
+        "updated_at_ms": boundary_ms + 290_000,
+        "last_long_cycle_completed_wall_ts_ms": boundary_ms + 289_000,
+        "last_carry_cycle_completed_wall_ts_ms": boundary_ms - 6_000,
+        "long_cycle_cadence_ms": 60_000,
+        "carry_cycle_cadence_ms": 60_000,
+        "carry_cycle_not_before_wall_ts_ms": boundary_ms + 1_200_000,
+    }
+    heartbeat.write_text(json.dumps(base))
+    alerts = liveness.evaluate_engine_heartbeat(
+        "worker", heartbeat, now=(boundary_ms + 290_000) / 1000
+    )
+    assert [alert.key for alert in alerts] == ["worker-status:worker"]
+    assert alerts[0].message.endswith("worker self-check is degraded")
+
+    overdue_ms = boundary_ms + 1_380_001
+    heartbeat.write_text(
+        json.dumps(
+            dict(
+                base,
+                updated_at_ms=overdue_ms,
+                bybit_ws_last_frame_ts_ms=overdue_ms - 1,
+                last_long_cycle_completed_wall_ts_ms=overdue_ms - 1_000,
+            )
+        )
+    )
+    alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat, now=overdue_ms / 1000)
+    assert alerts[0].message.endswith("carry cycle is 180s old (limit 180s)")
+
+    # A heartbeat from a worker that publishes no such instant keeps the old rule.
+    heartbeat.write_text(
+        json.dumps({key: value for key, value in base.items() if key != "carry_cycle_not_before_wall_ts_ms"})
+    )
+    alerts = liveness.evaluate_engine_heartbeat(
+        "worker", heartbeat, now=(boundary_ms + 290_000) / 1000
+    )
+    assert "carry cycle is 296s old (limit 180s)" in alerts[0].message
+
+
 def test_incomplete_ticker_coverage_says_how_short_the_fill_is(tmp_path: Path) -> None:
     heartbeat = tmp_path / "heartbeat.json"
     payload = {
