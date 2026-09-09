@@ -80,9 +80,23 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     `current` file since about 07:04:5x. The settling reading is a listing of
     `/var/lib/liquidity-migration-signal-worker-mexc/spool` by kind — file
     count, bytes, and the oldest file's name and age — beside the engine's
-    signal-intake state. `mode=diagnose` does not take it today; the digest
-    prints the blocked-class field and no spool inventory. Whether to extend
-    the read-only diagnostic to take it is the owner's call.
+    signal-intake state. The worker already publishes the inventory half of
+    that reading and the digest threw it away, so the digest now selects it:
+    `spool_class_files`, `spool_class_file_caps`, `spool_class_bytes`,
+    `spool_class_byte_caps`, `spool_class_byte_soft_thresholds`,
+    `spool_files`, `spool_bytes` and `replaceable_outputs_coalesced` — which
+    says whether the block is files or bytes, how far past which cap, and
+    whether anything is coalescing — plus `long_cycle_cadence_ms` and
+    `carry_cycle_not_before_wall_ts_ms`, without which neither cycle verdict in
+    the page can be reproduced from the reading. This half is a workflow file
+    and acts on the next `mode=diagnose` with no deploy; it selects more keys
+    from the same heartbeat and adds no host command. Still open, and still the
+    owner's call: the spool directory listing itself — the oldest file's name
+    and age, which no heartbeat field carries — and the engine's signal-intake
+    state beside it. `test_the_worker_digest_carries_the_capped_spool_class_it_pages_on`
+    runs the shipped digest source against the 07:11:03 heartbeat and fails
+    `KeyError: 'spool_class_files'` without the change; 106 diagnose and
+    liveness tests pass, `ruff check` and mypy clean.
   - Also untaken, and the owner's call. The first page, at 07:08:08, read
     `ticker coverage incomplete (160/160 rows, 160/160 topics accepted)` — a
     line that contradicts itself. The counts come from the whole ticker store

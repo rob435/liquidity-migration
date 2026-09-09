@@ -32,16 +32,31 @@ def _digest_source() -> str:
     return diagnose[start:end].replace('\\"', '"')
 
 
-def _digest(heartbeat: dict[str, object], tmp_path: Path) -> dict[str, object]:
+def _worker_digest_source() -> str:
+    diagnose = _diagnose()
+    end = diagnose.index('" "/var/lib/liquidity-migration-signal-worker-$realm/heartbeat.json"')
+    start = diagnose.rindex('python3 -c "', 0, end) + len('python3 -c "')
+    return diagnose[start:end].replace('\\"', '"')
+
+
+def _run_digest(source: str, heartbeat: dict[str, object], tmp_path: Path) -> dict[str, object]:
     path = tmp_path / "heartbeat.json"
     path.write_text(json.dumps(heartbeat), encoding="utf-8")
     result = subprocess.run(
-        ["python3", "-c", _digest_source(), str(path)],
+        ["python3", "-c", source, str(path)],
         text=True,
         capture_output=True,
         check=True,
     )
     return json.loads(result.stdout)
+
+
+def _digest(heartbeat: dict[str, object], tmp_path: Path) -> dict[str, object]:
+    return _run_digest(_digest_source(), heartbeat, tmp_path)
+
+
+def _worker_digest(heartbeat: dict[str, object], tmp_path: Path) -> dict[str, object]:
+    return _run_digest(_worker_digest_source(), heartbeat, tmp_path)
 
 
 def _manifest_realms() -> list[str]:
@@ -141,6 +156,51 @@ def test_the_digest_bounds_the_long_rows(tmp_path: Path) -> None:
     assert digest["entry_blocker_reasons"] == ["engine latched", "stream not ready"]
     assert digest["working_entries"] == 1
     assert digest["positions"] == 2
+
+
+def test_the_worker_digest_carries_the_capped_spool_class_it_pages_on(tmp_path: Path) -> None:
+    # Incident `host-22826ce0bb838311`. A spool class at its cap refuses that
+    # class's new files, so the lane whose output lands in it stops advancing
+    # its cycle and the page names the class. The class name alone does not say
+    # whether the block is files or bytes, how far past which cap, or whether
+    # the engine is retiring anything — and this is the only host reading the
+    # incident routine may take. `long_cycle_cadence_ms` is the limit the LONG
+    # page thresholds on at three cadences, so without it the verdict in the
+    # page cannot be reproduced from the reading either.
+    digest = _worker_digest(
+        {
+            "status": "degraded",
+            "updated_at_ms": 1_788_937_863_247,
+            "last_long_cycle_completed_wall_ts_ms": 1_788_937_493_362,
+            "long_cycle_cadence_ms": 60_000,
+            "carry_cycle_not_before_wall_ts_ms": 1_788_913_200_000,
+            "spool_backpressured": False,
+            "spool_backpressured_classes": ["current"],
+            "spool_files": 11,
+            "spool_bytes": 52_118,
+            "spool_class_files": {"current": 8, "lifecycle": 1},
+            "spool_class_file_caps": {"current": 8, "lifecycle": 512},
+            "spool_class_bytes": {"current": 41_234},
+            "spool_class_byte_caps": {"current": 536_346_624},
+            "spool_class_byte_soft_thresholds": {"current": 536_215_552},
+            "replaceable_outputs_coalesced": 4_312,
+            "account_user_id": "1234567",
+        },
+        tmp_path,
+    )
+
+    assert digest["spool_backpressured_classes"] == ["current"]
+    assert digest["spool_class_files"] == {"current": 8, "lifecycle": 1}
+    assert digest["spool_class_file_caps"] == {"current": 8, "lifecycle": 512}
+    assert digest["spool_class_bytes"] == {"current": 41_234}
+    assert digest["spool_class_byte_caps"] == {"current": 536_346_624}
+    assert digest["spool_class_byte_soft_thresholds"] == {"current": 536_215_552}
+    assert digest["spool_files"] == 11
+    assert digest["spool_bytes"] == 52_118
+    assert digest["replaceable_outputs_coalesced"] == 4_312
+    assert digest["long_cycle_cadence_ms"] == 60_000
+    assert digest["carry_cycle_not_before_wall_ts_ms"] == 1_788_913_200_000
+    assert "account_user_id" not in digest
 
 
 def test_the_digest_never_prints_the_account_identity(tmp_path: Path) -> None:
