@@ -421,7 +421,7 @@ build_engine() {
     QUALIFIED_RELEASE_DIR="$(mktemp -d "$RELEASE_DIR/staged/.qualified.XXXXXX")" \
         || fail "cannot create a fresh release extraction directory"
     release_artifact unpack --commit "$EXPECTED_COMMIT" --artifact "$staged_tar" \
-        --output "$QUALIFIED_RELEASE_DIR" >/dev/null \
+        --require-candidate --output "$QUALIFIED_RELEASE_DIR" >/dev/null \
         || fail "release artifact verification failed for $EXPECTED_COMMIT"
     echo "deploy: release bytes verified for $EXPECTED_COMMIT"
 }

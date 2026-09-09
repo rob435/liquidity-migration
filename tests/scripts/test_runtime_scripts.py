@@ -460,8 +460,15 @@ def test_ci_checks_main_pushes_and_keeps_release_work_explicit() -> None:
 
     artifact = workflow[workflow.index("\n  rust-artifact:\n") : workflow.index("\n  rust-qualify:\n")]
     assert "inputs.mode == 'deploy'" in artifact
-    assert "cargo build --release --locked --workspace --bins" in artifact
-    assert "cargo test" not in artifact and "release_artifact.py qualify" not in artifact
+    # Deployment must qualify the exact candidate, not package a bare build.
+    # The modest optimized recovery/smoke workload is mandatory; the larger
+    # comparative latency study remains an explicit, separate operation.
+    assert "python3 scripts/release_artifact.py smoke" in artifact
+    assert '--commit "$GITHUB_SHA"' in artifact
+    assert '--output "$RUNNER_TEMP/engine-binaries-${GITHUB_SHA}.tar.gz"' in artifact
+    assert "release_artifact.py qualify" not in artifact
+    assert "continue-on-error: true" not in artifact
+    assert artifact.index("release_artifact.py smoke") < artifact.index("actions/upload-artifact@")
     assert "retention-days: 2" in artifact
 
     qualify = workflow[workflow.index("\n  rust-qualify:\n") : workflow.index("\n  disarm:\n")]
@@ -475,6 +482,7 @@ def test_ci_checks_main_pushes_and_keeps_release_work_explicit() -> None:
     assert "always()" in vps
     for result in ("needs.ci.result", "needs.rust.result", "needs.rust-artifact.result"):
         assert f"{result} == 'success'" in vps
+    assert 'release_artifact.py verify --require-candidate --commit "$GITHUB_SHA"' in vps
 
     concurrency = workflow[workflow.index("concurrency:") : workflow.index("\njobs:\n")]
     assert "format('liquidity-migration-pr-{0}', github.event.pull_request.number)" in concurrency

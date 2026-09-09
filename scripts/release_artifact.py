@@ -20,6 +20,7 @@ from typing import Any, TextIO
 
 BINARIES = ("engine", "engine-tools", "signal-worker")
 CHECKS = ("release-tests", "account-state-soak", "engine-bench", "binary-smoke")
+SMOKE_CHECKS = ("release-recovery-tests", "account-state-smoke", "candidate-engine-smoke", "binary-smoke")
 METADATA = ("binaries.sha256", "qualification.json", "qualification.log")
 LATENCY_RUNS = 4
 
@@ -126,6 +127,23 @@ def _binary_hashes(directory: Path) -> dict[str, str]:
     return {name: _sha256(directory / name) for name in BINARIES}
 
 
+def _build_contract(repo: Path, target: str) -> dict[str, Any]:
+    overrides = ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER")
+    if any(os.environ.get(key) for key in overrides) or any(
+        key.startswith("CARGO_PROFILE_RELEASE_") and value for key, value in os.environ.items()
+    ):
+        raise ValueError("candidate qualification requires the source-defined release profile and compiler flags")
+    return {
+        "cargo_lock_sha256": _sha256(repo / "engine" / "Cargo.lock"),
+        "toolchain_sha256": _sha256(repo / "rust-toolchain.toml"),
+        "feature_policy": "workspace-default-features-from-pinned-source",
+        "target": target,
+        "profile": "release",
+        "compiler_flag_overrides": False,
+        "build_arguments": ["cargo", "build", "--release", "--locked", "--workspace", "--bins", "--examples"],
+    }
+
+
 def _check_source(repo: Path, commit: str) -> None:
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     status = subprocess.check_output(
@@ -214,6 +232,9 @@ def _qualify_latency(
         result.update(reference_measured_ns=reference_measured, relative_limits_ns=relative_limits,
                       reference_absolute_passed=not reference_failures, reference_absolute_failures=reference_failures,
                       relative_passed=not relative_failures, relative_failures=relative_failures, images=images)
+    candidate_misses = [cell for cell in runs if cell["image"] == "B" and not cell["budget_passed"]]
+    result["candidate_runs_passed"] = not candidate_misses
+    result["qualified"] = not absolute_failures and not relative_failures and not candidate_misses
     line = "latency budget: " + json.dumps(result, sort_keys=True) + "\n"
     print(line, end="", flush=True)
     log.write(line)
@@ -221,16 +242,25 @@ def _qualify_latency(
         raise ValueError("latency budget failed: " + "; ".join(absolute_failures))
     if relative_failures:
         raise ValueError("relative latency budget failed: " + "; ".join(relative_failures))
+    # Run medians are descriptive, not permission to discard a bad candidate
+    # run. Keep every cell, including a slow reference, without retry-shopping.
+    if candidate_misses:
+        raise ValueError("candidate run latency budget failed: " + "; ".join(
+            f"run {cell['run']}: {failure}" for cell in candidate_misses for failure in cell["budget_failures"]
+        ))
     return result
 
 
-def qualify(repo: Path, commit: str, output: Path, target: Path, runner_class: str | None = None) -> None:
+def qualify(
+    repo: Path, commit: str, output: Path, target: Path, runner_class: str | None = None,
+    *, smoke: bool = False,
+) -> None:
     import tomllib
 
     _check_source(repo, _commit(commit))
     if output.exists():
         raise ValueError(f"output already exists: {output}")
-    budget = _latency_budget(repo, runner_class)
+    budget = {"contract": "not_measured"} if smoke else _latency_budget(repo, runner_class)
     pinned = tomllib.loads((repo / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
     compiler = subprocess.check_output(
         [os.environ.get("RUSTC", "rustc"), "--version", "--verbose"], cwd=repo, text=True
@@ -241,6 +271,7 @@ def qualify(repo: Path, commit: str, output: Path, target: Path, runner_class: s
     if host is None:
         raise ValueError("cannot read the Rust compiler host target")
     native_target = host.group(1)
+    build_contract = _build_contract(repo, native_target)
     release = target / native_target / "release"
     build = ["cargo", "build", "--release", "--locked", "--workspace", "--bins", "--examples",
              "--target-dir", str(target), "--target", native_target]
@@ -281,36 +312,27 @@ def qualify(repo: Path, commit: str, output: Path, target: Path, runner_class: s
             _run(build, repo / "engine", log, commit)
             hashes = _binary_hashes(release)
             images["B"] = {"commit": commit, "binaries": hashes, "source": "candidate_qualification_build"}
-            _run(
-                [
-                    "cargo",
-                    "test",
-                    "--workspace",
-                    "--all-targets",
-                    "--release",
-                    "--locked",
-                    "--target-dir",
-                    str(target),
-                    "--target",
-                    native_target,
-                ],
-                repo / "engine",
-                log,
-                commit,
-            )
+            tests = ["cargo", "test", "--release", "--locked", "--target-dir", str(target), "--target", native_target]
+            if smoke:
+                tests += ["--lib", "--tests"]
+                for package in ("engine-core", "engine-risk", "engine-wal", "engine-types", "engine-public", "engine-venue"):
+                    tests += ["-p", package]
+            else:
+                tests += ["--workspace", "--all-targets"]
+            _run(tests, repo / "engine", log, commit)
             _run(
                 [
                     str(release / "examples" / "account_state_soak"),
                     "--operations",
-                    "2000000",
+                    "100000" if smoke else "2000000",
                     "--live-ids",
-                    "65536",
+                    "1024" if smoke else "65536",
                     "--sample-ops",
                     "4096",
                     "--history-rows",
-                    "0,1000,10000,100000",
+                    "0,1000" if smoke else "0,1000,10000,100000",
                     "--repeats",
-                    "3",
+                    "1" if smoke else "3",
                     "--json",
                 ],
                 repo,
@@ -331,21 +353,30 @@ def qualify(repo: Path, commit: str, output: Path, target: Path, runner_class: s
                 line = "latency images: " + json.dumps({"rustc": compiler, "target": native_target, "images": images}, sort_keys=True) + "\n"
                 print(line, end="", flush=True)
                 log.write(line)
-            latency = _qualify_latency(repo, release, evidence, log, commit, budget, reference, images)
+            if smoke:
+                _run([str(release / "engine"), "bench", "--events", "200", "--rate", "100", "--every", "20",
+                      "--symbols", "BTCUSDT", "--wal", str(evidence / "candidate-smoke.wal")], repo, log, commit)
+                latency = {"contract": "not_measured", "scope": "functional synthetic smoke, not economic or latency qualification"}
+            else:
+                latency = _qualify_latency(repo, release, evidence, log, commit, budget, reference, images)
             if reference is not None and _binary_hashes(reference) != images["A"]["binaries"]:
                 raise ValueError("latency reference binary bytes changed during qualification")
         _check_source(repo, commit)
+        if _build_contract(repo, native_target) != build_contract:
+            raise ValueError("candidate compilation contract changed during qualification")
         if _binary_hashes(release) != hashes:
             raise ValueError("release binary bytes changed during qualification")
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
+            "qualification_kind": "candidate-smoke" if smoke else "full",
+            "build_contract": build_contract,
             "commit": commit,
             "profile": "release",
             "rustc": compiler,
             "target": native_target,
             "platform": [platform.system(), platform.machine()],
             "wal_compatibility": "not_assessed",
-            "checks": list(CHECKS),
+            "checks": list(SMOKE_CHECKS if smoke else CHECKS),
             "binaries": hashes,
             "log_sha256": _sha256(evidence / "qualification.log"),
             "latency_budget": latency,
@@ -366,7 +397,8 @@ def qualify(repo: Path, commit: str, output: Path, target: Path, runner_class: s
 
 
 def verify(
-    artifact: Path, commit: str, output: Path | None = None, *, require_platform: bool = False
+    artifact: Path, commit: str, output: Path | None = None, *, require_platform: bool = False,
+    require_candidate: bool = False,
 ) -> dict[str, object]:
     _commit(commit)
     if output is not None:
@@ -414,6 +446,8 @@ def verify(
         if metadata["binaries.sha256"] != checksums:
             raise ValueError("release binary checksum mismatch")
         if "qualification.json" not in seen:
+            if require_candidate:
+                raise ValueError("release artifact lacks exact-candidate qualification")
             # An archive from before qualification metadata: binaries and their checksums only.
             if output is not None:
                 (output / "binaries.sha256").write_bytes(metadata["binaries.sha256"])
@@ -421,12 +455,27 @@ def verify(
         if "qualification.log" not in seen:
             raise ValueError("release artifact lacks the qualification log")
         manifest = json.loads(metadata["qualification.json"])
-        if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+        if not isinstance(manifest, dict) or manifest.get("schema_version") not in (1, 2):
             raise ValueError("unsupported release qualification schema")
+        if require_candidate and manifest.get("schema_version") != 2:
+            raise ValueError("release artifact lacks exact-candidate compilation identity")
         if manifest.get("commit") != commit or manifest.get("profile") != "release":
             raise ValueError("release qualification commit/profile mismatch")
-        if manifest.get("checks") != list(CHECKS) or not manifest.get("rustc") or not manifest.get("target"):
+        expected_checks = list(SMOKE_CHECKS if manifest.get("qualification_kind") == "candidate-smoke" else CHECKS)
+        if manifest.get("checks") != expected_checks or not manifest.get("rustc") or not manifest.get("target"):
             raise ValueError("release qualification checks are incomplete")
+        if manifest["schema_version"] == 2:
+            contract = manifest.get("build_contract")
+            if manifest.get("qualification_kind") not in ("candidate-smoke", "full") or not isinstance(contract, dict):
+                raise ValueError("release qualification build contract is missing")
+            if any(not isinstance(contract.get(key), str) or re.fullmatch(r"[0-9a-f]{64}", contract[key]) is None
+                   for key in ("cargo_lock_sha256", "toolchain_sha256")):
+                raise ValueError("release qualification lockfile/toolchain identity is missing")
+            if (contract.get("target") != manifest["target"] or contract.get("profile") != "release"
+                or contract.get("feature_policy") != "workspace-default-features-from-pinned-source"
+                or contract.get("compiler_flag_overrides") is not False
+                or contract.get("build_arguments") != ["cargo", "build", "--release", "--locked", "--workspace", "--bins", "--examples"]):
+                raise ValueError("release qualification compilation/features mismatch")
         if manifest.get("wal_compatibility") != "not_assessed":
             raise ValueError("release qualification must state its WAL compatibility limit")
         qualified_platform = manifest.get("platform")
@@ -451,29 +500,32 @@ def verify(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    qualify_parser = commands.add_parser("qualify", help="local optimized tests, workloads, and packaging")
     default_repo = Path.cwd() if __file__ == "<stdin>" else Path(__file__).resolve().parents[1]
-    qualify_parser.add_argument("--repo", type=Path, default=default_repo)
-    qualify_parser.add_argument("--commit", required=True)
-    qualify_parser.add_argument("--output", type=Path, required=True)
-    qualify_parser.add_argument("--target-dir", type=Path)
-    qualify_parser.add_argument("--runner-class", help="latency baseline class; defaults to the native OS and architecture")
+    for name in ("qualify", "smoke"):
+        qualify_parser = commands.add_parser(name, help="optimized qualification and packaging; smoke omits the performance study")
+        qualify_parser.add_argument("--repo", type=Path, default=default_repo)
+        qualify_parser.add_argument("--commit", required=True)
+        qualify_parser.add_argument("--output", type=Path, required=True)
+        qualify_parser.add_argument("--target-dir", type=Path)
+        qualify_parser.add_argument("--runner-class", help="latency baseline class; defaults to the native OS and architecture")
     for name in ("verify", "unpack"):
         command = commands.add_parser(name)
         command.add_argument("--artifact", type=Path, required=True)
         command.add_argument("--commit", required=True)
         command.add_argument("--require-platform", action="store_true")
+        command.add_argument("--require-candidate", action="store_true", help="refuse legacy or unqualified artifacts for a new deployment")
         if name == "unpack":
             command.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
-        if args.command == "qualify":
+        if args.command in ("qualify", "smoke"):
             repo = args.repo.resolve()
             target = args.target_dir.resolve() if args.target_dir else repo / "engine" / "target"
-            qualify(repo, args.commit, args.output.resolve(), target, args.runner_class)
+            qualify(repo, args.commit, args.output.resolve(), target, args.runner_class, smoke=args.command == "smoke")
         else:
             manifest = verify(
-                args.artifact, args.commit, getattr(args, "output", None), require_platform=args.require_platform
+                args.artifact, args.commit, getattr(args, "output", None), require_platform=args.require_platform,
+                require_candidate=args.require_candidate,
             )
             print(json.dumps(manifest, sort_keys=True))
     except (OSError, ValueError, tarfile.TarError, subprocess.SubprocessError) as error:

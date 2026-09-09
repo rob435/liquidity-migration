@@ -102,7 +102,15 @@ def _qualified_files(commit: str = COMMIT) -> dict[str, bytes]:
     files["qualification.log"] = b"optimized suite and local workloads passed\n"
     files["qualification.json"] = json.dumps(
         {
-            "schema_version": 1,
+            "schema_version": 2,
+            "qualification_kind": "full",
+            "build_contract": {
+                "cargo_lock_sha256": "1" * 64,
+                "toolchain_sha256": "2" * 64,
+                "feature_policy": "workspace-default-features-from-pinned-source",
+                "target": "test-host", "profile": "release", "compiler_flag_overrides": False,
+                "build_arguments": ["cargo", "build", "--release", "--locked", "--workspace", "--bins", "--examples"],
+            },
             "commit": commit,
             "profile": "release",
             "rustc": "rustc 1.90.0 (test)",
@@ -126,6 +134,7 @@ def qualification_workspace(
     (repo / "engine").mkdir(parents=True)
     (repo / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.90.0"\n')
     (repo / "engine" / "Cargo.toml").write_text("# fixture source\n")
+    (repo / "engine" / "Cargo.lock").write_text("# fixture dependency lock\n")
     (repo / "docs").mkdir()
     (repo / "docs" / "execution-latency-budgets.toml").write_text(f'''schema_version = 1
 maximum_baseline_ratio = 1.5
@@ -357,7 +366,7 @@ def test_paired_source_keeps_a_slow_reference_and_packages_a_passing_candidate(
 ) -> None:
     repo, commit, target, calls, behavior = qualification_workspace
     behavior["bench-A"] = _latency_cell(30000, 1090000)
-    for index, (decision, submit) in enumerate(zip((14300, 8600, 9400, 8000), (1090000, 1040000, 1030000, 1070000)), 1):
+    for index, (decision, submit) in enumerate(zip((13900, 8600, 9400, 8000), (1090000, 1040000, 1030000, 1070000)), 1):
         behavior[f"bench-B-{index}"] = _latency_cell(decision, submit)
     output = tmp_path / "qualified.tar.gz"
     artifact_module.qualify(repo, commit, output, target, runner_class="linux-x86_64")
@@ -373,7 +382,7 @@ def test_paired_source_keeps_a_slow_reference_and_packages_a_passing_candidate(
     assert latency["reference_absolute_passed"] is False
     assert latency["aggregation"] == "median_of_run_metrics" and "samples" not in latency
     assert [cell["image"] for cell in latency["runs"]] == list("ABBABAAB")
-    assert [cell["budget_passed"] for cell in latency["runs"]] == [False, False, True, False, True, False, False, True]
+    assert [cell["budget_passed"] for cell in latency["runs"]] == [False, True, True, False, True, False, False, True]
     benches = [command for command in calls if len(command) > 1 and command[1] == "bench"]
     assert len(benches) == len({command[command.index("--wal") + 1] for command in benches}) == 8
     assert calls[-8:] == benches
@@ -525,12 +534,12 @@ def test_registered_linux_source_and_absolute_darwin_contracts(
 
 
 @pytest.mark.parametrize("qualification_workspace", [(9300, 1090000)], indirect=True)
-def test_four_fixed_latency_cells_keep_high_first_verdict_and_qualify_by_run_medians(
+def test_four_fixed_latency_cells_keep_every_passing_cell_and_report_run_medians(
     tmp_path: Path, artifact_module: ModuleType,
     qualification_workspace: tuple[Path, str, Path, list[list[str]], dict[str, str]],
 ) -> None:
     repo, commit, target, calls, behavior = qualification_workspace
-    decisions = (14300, 8600, 9400, 8000)
+    decisions = (13900, 8600, 9400, 8000)
     submits = (1160000, 1230000, 1330000, 1280000)
     for index, (decision, submit) in enumerate(zip(decisions, submits), 1):
         behavior[f"bench-{index}"] = _latency_cell(decision, submit)
@@ -543,7 +552,7 @@ def test_four_fixed_latency_cells_keep_high_first_verdict_and_qualify_by_run_med
     assert "samples" not in latency
     assert latency["measured_ns"] == {"decision_p99_ns": 9000, "submit_p50_ns": 1255000}
     assert latency["limits_ns"] == {"decision_p99_ns": 13950, "submit_p50_ns": 1635000}
-    assert [cell["budget_passed"] for cell in latency["runs"]] == [False, True, True, True]
+    assert [cell["budget_passed"] for cell in latency["runs"]] == [True, True, True, True]
     assert [cell["measured_ns"]["decision_p99_ns"] for cell in latency["runs"]] == list(decisions)
     assert all(cell["samples"] == {"decision_p99_ns": 100, "submit_p50_ns": 100} for cell in latency["runs"])
     benches = [command for command in calls if len(command) > 1 and command[1] == "bench"]
@@ -551,8 +560,7 @@ def test_four_fixed_latency_cells_keep_high_first_verdict_and_qualify_by_run_med
     assert len({command[command.index("--wal") + 1] for command in benches}) == 4
     log = (extracted / "qualification.log").read_text()
     assert all(behavior[f"bench-{index}"] in log for index in range(1, 5))
-    assert '"budget_passed": false' in log
-    assert "decision_p99_ns=14300 exceeds 13950 ns" in log
+    assert '"budget_passed": false' not in log
     assert "not pooled quantiles" in log
 
 
@@ -687,6 +695,10 @@ def test_qualification_runs_on_demand_and_uploads_only_after_it_passes() -> None
     deploy = workflow["jobs"]["rust-artifact"]
     assert "inputs.mode == 'deploy'" in deploy["if"]
     assert not any("release_artifact.py qualify" in step.get("run", "") for step in deploy["steps"])
+    smoke = next(i for i, step in enumerate(deploy["steps"]) if "release_artifact.py smoke" in step.get("run", ""))
+    upload_smoke = next(i for i, step in enumerate(deploy["steps"]) if "actions/upload-artifact@" in step.get("uses", ""))
+    assert smoke < upload_smoke
+    assert not deploy["steps"][smoke].get("continue-on-error", False)
     job = workflow["jobs"]["rust-qualify"]
     assert "inputs.mode == 'qualify'" in job["if"]
     steps = job["steps"]
@@ -707,7 +719,7 @@ def test_deploy_missing_qualified_artifact_never_compiles_on_host(tmp_path: Path
     assert "release artifact" in result.stderr
 
 
-def test_deploy_unpacks_a_checksummed_archive_without_qualification_metadata(tmp_path: Path) -> None:
+def test_new_deploy_refuses_a_checksummed_archive_without_candidate_qualification(tmp_path: Path) -> None:
     files = {name: f"old {name}\n".encode() for name in BINARIES}
     files["binaries.sha256"] = "".join(
         f"{hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in files.items()
@@ -715,10 +727,65 @@ def test_deploy_unpacks_a_checksummed_archive_without_qualification_metadata(tmp
     release = tmp_path / "release"
     _write_tar(release / "staged" / f"{COMMIT}.tar.gz", files)
     result = _prepare_release(tmp_path)
-    assert result.returncode == 0, result.stderr
-    extracted = list((release / "staged").glob(".qualified.*"))
-    assert len(extracted) == 1
-    assert (extracted[0] / "engine").read_bytes() == files["engine"]
+    assert result.returncode != 0
+    assert "qualification" in result.stderr
+    assert not (tmp_path / "cargo-called").exists()
+    assert not list((release / "staged").glob(".qualified.*"))
+
+
+@pytest.mark.parametrize("qualification_workspace", [(9300, 1090000), (9300, 1090000, True)], indirect=True)
+def test_a_single_bad_candidate_tail_cannot_hide_behind_good_run_medians(
+    tmp_path: Path, artifact_module: ModuleType,
+    qualification_workspace: tuple[Path, str, Path, list[list[str]], dict[str, str]],
+) -> None:
+    repo, commit, target, _, behavior = qualification_workspace
+    behavior["bench"] = _latency_cell(9000, 1090000)
+    behavior["bench-B-1"] = _latency_cell(20000, 1090000)
+    with pytest.raises(ValueError, match="candidate run latency budget failed"):
+        artifact_module.qualify(repo, commit, tmp_path / "bad-tail.tar.gz", target,
+                                runner_class="linux-x86_64" if behavior["reference_commit"] else None)
+    assert not (tmp_path / "bad-tail.tar.gz").exists()
+
+
+def test_candidate_smoke_runs_optimized_recovery_and_the_packaged_engine_without_a_latency_claim(
+    tmp_path: Path, artifact_module: ModuleType,
+    qualification_workspace: tuple[Path, str, Path, list[list[str]], dict[str, str]],
+) -> None:
+    repo, commit, target, calls, _ = qualification_workspace
+    output = tmp_path / "candidate.tar.gz"
+    artifact_module.qualify(repo, commit, output, target, smoke=True)
+    receipt = artifact_module.verify(output, commit, require_candidate=True)
+    assert receipt["checks"] == list(artifact_module.SMOKE_CHECKS)
+    assert receipt["latency_budget"]["contract"] == "not_measured"
+    assert receipt["build_contract"]["cargo_lock_sha256"] == hashlib.sha256((repo / "engine/Cargo.lock").read_bytes()).hexdigest()
+    tests = next(command for command in calls if command[:2] == ["cargo", "test"])
+    assert "--release" in tests and "--locked" in tests and "engine-core" in tests and "engine-venue" in tests
+    bench = [command for command in calls if len(command) > 1 and command[1] == "bench"]
+    assert len(bench) == 1 and bench[0][0] == str(target / "fixture-host/release/engine")
+    assert len([command for command in calls if command[:2] == ["cargo", "build"]]) == 1
+
+
+@pytest.mark.parametrize("change", ["legacy", "lockfile", "features", "target", "flags"])
+def test_candidate_verification_refuses_a_different_or_missing_compilation_contract(
+    tmp_path: Path, artifact_module: ModuleType, change: str,
+) -> None:
+    files = _qualified_files()
+    receipt = json.loads(files["qualification.json"])
+    if change == "legacy":
+        receipt["schema_version"] = 1
+    elif change == "lockfile":
+        receipt["build_contract"].pop("cargo_lock_sha256")
+    elif change == "features":
+        receipt["build_contract"]["feature_policy"] = "different-features"
+    elif change == "flags":
+        receipt["build_contract"]["compiler_flag_overrides"] = True
+    else:
+        receipt["build_contract"]["target"] = "different-target"
+    files["qualification.json"] = json.dumps(receipt).encode()
+    bundle = tmp_path / "candidate.tar.gz"
+    _write_tar(bundle, files)
+    with pytest.raises(ValueError):
+        artifact_module.verify(bundle, COMMIT, require_candidate=True)
 
 
 def test_verified_unpack_preserves_exact_qualified_bytes(tmp_path: Path, artifact_module: ModuleType) -> None:

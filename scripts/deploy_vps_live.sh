@@ -96,7 +96,7 @@ stage_release_binaries() {
     if gh run download "$run_id" --repo rob435/liquidity-migration -n "$artifact_name" -D "$tmp_dir" >/dev/null 2>&1; then
         local tarball="$tmp_dir/$artifact_name.tar.gz"
         if python3 "$LOCAL_REPOSITORY/scripts/release_artifact.py" verify \
-            --commit "$commit" --artifact "$tarball" >/dev/null; then
+            --require-candidate --commit "$commit" --artifact "$tarball" >/dev/null; then
             echo "deploy: staging release binaries onto VPS ($target:$stage_target)..." >&2
             if ssh "${SSH_ARGS[@]}" "$target" "mkdir -p /opt/liquidity-migration-engine/staged" \
                 && scp "${SSH_ARGS[@]}" "$tarball" "$target:$stage_target.partial" \
