@@ -93,7 +93,7 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     costs a genuinely stuck stream one extra tick. Each changes when the funded
     realm pages, so the choice is the owner's.
 
-- **2026-09-09 — Incidents `demo-0922e9f30da3bf98`, `mainnet-014ec4a90a2fde5f` and `mexc-d62940e951288d4c`: every signal worker's CARRY cycle stopped completing at the UTC decision roll for five to eight minutes and paged CRITICAL on every realm including the funded one, because the freshness verdict judged the lane by 180 s while the worker's own funding supply frontier guarantees a longer wait. The lanes were working; the verdict was wrong, and is now measured from the instant the roll's cycle is actually due.**
+- **2026-09-09 — Incidents `demo-0922e9f30da3bf98`, `mainnet-014ec4a90a2fde5f` and `mexc-d62940e951288d4c`: every signal worker's CARRY cycle stopped completing at the UTC decision roll for five to eight minutes and paged CRITICAL on every realm including the funded one, because the freshness verdict judged the lane by 180 s while the worker's own funding supply frontier guarantees a longer wait. The lanes were working; the verdict was wrong, is now measured from the instant the roll's cycle is actually due, and is deployed as `beef5bc5` with a healthy receipt.**
   - Scope. All three running realms stall at the same boundary, not demo alone,
     and all three watchdogs page. Last CARRY completion before the stall:
     mainnet 00:00:33.728, mexc 00:00:54.261, demo 00:00:56.980 UTC. The funded
@@ -221,9 +221,23 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     freshness (`fresh_mark_coverage`,
     `engine/signal-worker/src/bybit_ws.rs:239`). Both clear by the next sample
     and no page names either alone.
-  - Host action. The fix reaches the fleet only through a deploy; until then
-    every realm pages once a day between roughly 00:03 and 00:07 UTC on a lane
-    that is working.
+  - Deployed. [Deploy run `34298443063`](https://github.com/rob435/liquidity-migration/actions/runs/34298443063)
+    installs `beef5bc5` (the fix `7e7f1f0a` plus a documentation commit), CI and
+    the release build green, `vps` handover 01:24:30–01:32:14 UTC.
+    [Diagnose run `34299689880`](https://github.com/rob435/liquidity-migration/actions/runs/34299689880)
+    at 01:34:03 is the post-deploy receipt: all three engines
+    `engine_commit=beef5bc5`, `may_open=true`, `strategy_errors=[]`,
+    `orders_sent=0`, zero restarts, Bybit positions four each and mexc none;
+    workers mainnet and mexc `ready` and demo `recovering` on the ticker-mark
+    transient; `ok scope=mexc units-and-heartbeats-healthy` at 01:32:44, 01:33:14
+    and 01:33:45, `ok scope=demo` and `ok scope=mainnet
+    warnings-present-no-critical`, `ok scope=host units-and-heartbeats-healthy`,
+    and no `worker-status:` page in any of them.
+  - Unexercised. The verdict's own behaviour shows only at a decision roll, so
+    the first live test is 2026-09-10 00:00 UTC. If a realm pages
+    `worker-status:` on the carry clause in that window the fix is wrong, and the
+    reading that settles it is the worker heartbeat's
+    `carry_cycle_not_before_wall_ts_ms` beside its last completion.
 
 - **2026-09-08 — Incident `mexc-a361f5d18861421a`: a rowless execution-history sweep reported no progress, so the mexc engine abandoned every recovery pass and could never open.**
   - Start. The mexc engine boots at 22:38:15 UTC on `62234c95`, logs `mexc
