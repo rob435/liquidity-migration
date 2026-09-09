@@ -488,6 +488,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             &names,
             &market.table,
             initial_global_checkpoints,
+            catalog_checkpoint.is_some().then_some(&catalog),
         )?;
         for (symbol, destination, subscription) in routes {
             routing.add(symbol, subscription.feed, destination);

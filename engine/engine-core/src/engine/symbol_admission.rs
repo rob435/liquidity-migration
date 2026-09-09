@@ -104,6 +104,14 @@ impl SymbolAdmission {
         self.checkpoint.is_none() || self.listed.contains(name)
     }
 
+    /// A name the venue's table does not carry and the catalog has no rule
+    /// for. Nothing can be priced or ordered in it, and a delisted name keeps
+    /// its rule through `retain_previous`, so this is a name the venue never
+    /// listed.
+    pub(super) fn unfollowable(&self, name: &str) -> bool {
+        !self.listed(name) && !self.catalog.rules.iter().any(|(listed, _)| listed == name)
+    }
+
     fn refuse(&mut self, failure: AdmissionFailure) {
         if self.failure.as_ref().map(ToString::to_string) != Some(failure.to_string()) {
             tracing::warn!(%failure, "symbol admission retained; existing symbols remain usable");
@@ -120,7 +128,7 @@ impl Drop for SymbolAdmission {
     }
 }
 
-pub(super) fn replay_catalog(
+pub(crate) fn replay_catalog(
     records: &[WalRecord],
 ) -> Result<Option<Box<InstrumentCatalogCheckpoint>>, EngineError> {
     let mut checkpoint = None;
@@ -479,27 +487,31 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .iter()
                 .any(|(name, _)| name == &wanted.name);
             // A name the venue's own table does not carry is not missing
-            // metadata: another fetch of the same table cannot supply it. The
-            // signal waits, said once, and nothing is asked of the venue.
-            // Observed live on 2026-09-08: seven Bybit names MEXC does not list
-            // drove a catalog refetch every second.
-            if !known
-                && self.symbol_admission.checkpoint.is_some()
-                && !self.symbol_admission.listed(&wanted.name)
-            {
+            // metadata: another fetch of the same table cannot supply it, so
+            // nothing is asked of the venue either way. With no rule anywhere
+            // the name is unfollowable and its subscription is dropped, said
+            // once. A delisted name whose rule the catalog retained keeps its
+            // subscription: an open position in it still has to exit.
+            if self.symbol_admission.unfollowable(&wanted.name) {
                 if self.symbol_admission.unlisted.insert(wanted.name.clone()) {
                     tracing::warn!(
                         symbol = %wanted.name,
-                        "the venue does not list this instrument; its signals wait and nothing is sent"
+                        "the venue does not list this instrument; its subscription is dropped and nothing is sent for it"
+                    );
+                }
+                continue;
+            }
+            if !known && !self.symbol_admission.listed(&wanted.name) {
+                if self.symbol_admission.unlisted.insert(wanted.name.clone()) {
+                    tracing::warn!(
+                        symbol = %wanted.name,
+                        "the venue no longer lists this instrument; its subscription waits on the rule the catalog retained"
                     );
                 }
                 self.wanted_symbols.push(wanted);
                 continue;
             }
-            if (!known && !self.symbol_admission.listed(&wanted.name))
-                || !rule
-                || (self.require_exact_instruments && !spec)
-            {
+            if !rule || (self.require_exact_instruments && !spec) {
                 self.symbol_admission.refuse(AdmissionFailure::Identity(
                     IdentityError::UnresolvedInstrument(wanted.name.clone()),
                 ));

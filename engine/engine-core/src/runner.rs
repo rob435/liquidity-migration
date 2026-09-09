@@ -77,7 +77,8 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         .flat_map(|strategy| strategy.subscriptions())
         .collect();
     let risk = assembly::risk(&loaded.config.risk)?;
-    for subscription in crate::signals::active_subscriptions(&replayed) {
+    let catalog = crate::engine::symbol_admission::replay_catalog(&replayed)?;
+    for subscription in crate::signals::active_subscriptions_listed(&replayed, catalog.as_deref()) {
         if !wanted.contains(&subscription) {
             wanted.push(subscription);
         }

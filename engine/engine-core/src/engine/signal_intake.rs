@@ -425,6 +425,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 continue;
             }
             for subscription in &observation.subscriptions {
+                // `admit_wanted` drops a name the venue never listed. The
+                // payload still reaches the reducer, which can act on no
+                // symbol it cannot price.
+                if self.symbol_admission.unfollowable(&subscription.symbol) {
+                    continue;
+                }
                 let Some(symbol) = self.books.market.table.get(&subscription.symbol) else {
                     return Err(EngineError::State(format!(
                         "signal {} #{} symbol {} was not admitted",

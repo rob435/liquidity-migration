@@ -1907,3 +1907,140 @@ async fn rewound_producer_refusal_keeps_the_engine_running_and_growth_blocked() 
     assert!(note_saying(&harness.records, "producer readiness refused")
         .contains("rewound to 0 behind durable cursor 9"));
 }
+
+/// A venue table that lists BTCUSDT and nothing else.
+struct BtcOnlyCatalog;
+#[engine_types::async_trait]
+impl engine_types::orders::InstrumentCatalogClient for BtcOnlyCatalog {
+    async fn fetch(&self) -> Result<engine_types::orders::InstrumentCatalog, VenueError> {
+        Ok(test_instrument_catalog(&["BTCUSDT"]))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unlisted_head_of_line_row_retires_and_the_next_row_is_read() {
+    crate::test_clock::with_engine_clock(async {
+        // Observed live on 2026-09-08: the mexc engine's first CARRY batch
+        // named symbols MEXC does not list, and no signal file was retired
+        // after it — the whole spool stopped behind one row.
+        let directory = temp_path("signal-unlisted-head");
+        std::fs::create_dir_all(directory.path()).unwrap();
+        let source = "carry-worker.g1";
+        let mut first = source_row(source, 1, 0);
+        first.subscriptions = vec![Subscription {
+            symbol: "ETHUSDT".into(),
+            feed: Feed::Quote,
+        }];
+        first.content_sha256 = crate::signals::content_sha256(&first);
+        let second = source_row(source, 2, 0);
+        let mut spool = crate::signals::SpoolSignalFeed::new(directory.path())
+            .with_poll_interval(Duration::from_millis(1));
+        let first_path = spool.path_for(&first);
+        let second_path = spool.path_for(&second);
+        std::fs::write(&first_path, serde_json::to_vec(&first).unwrap()).unwrap();
+        std::fs::write(&second_path, serde_json::to_vec(&second).unwrap()).unwrap();
+
+        let delivered = Rc::new(RefCell::new(Vec::new()));
+        let prior = vec![WalRecord::InstrumentCatalogCheckpoint {
+            wall_ts_ms: recent_replay_ms(),
+            checkpoint: Box::new(test_instrument_catalog(&["BTCUSDT"]).checkpoint().unwrap()),
+        }];
+        let (mut engine, harness) = build_with_catalog(
+            vec![Box::new(SequenceRecorder {
+                name: "one",
+                delivered: delivered.clone(),
+            })],
+            &["BTCUSDT"],
+            &prior,
+            Arc::new(BtcOnlyCatalog),
+        )
+        .await;
+        let records = harness.records.clone();
+        let (retired_first, retired_second) = (first_path.clone(), second_path.clone());
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            engine.run_with_signals(
+                &mut ScriptFeed::quotes(SymbolId(0), 0, false),
+                &mut ScriptOrderFeed::empty(),
+                &mut spool,
+                async move {
+                    loop {
+                        let journaled = records
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .filter(|row| matches!(row, WalRecord::SignalObservation { .. }))
+                            .count();
+                        if journaled == 2 && !retired_first.exists() && !retired_second.exists() {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                },
+            ),
+        )
+        .await
+        .expect("the spool never drained")
+        .unwrap();
+
+        assert!(!first_path.exists(), "the unlisted row was never retired");
+        assert!(!second_path.exists(), "the row behind it was never read");
+        assert_eq!(
+            *delivered.lock().unwrap(),
+            [(0, source.into(), 1), (0, source.into(), 2)]
+        );
+        let records = harness.records.lock().unwrap();
+        let journaled = records
+            .iter()
+            .filter_map(|row| match row {
+                WalRecord::SignalObservation { observation, .. } => Some(observation),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(journaled, [&first, &second]);
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restored_route_for_an_unlisted_name_does_not_hold_up_boot() {
+    let mut accepted = source_row("carry-worker.g1", 1, 0);
+    accepted.subscriptions = vec![Subscription {
+        symbol: "ETHUSDT".into(),
+        feed: Feed::Quote,
+    }];
+    accepted.content_sha256 = crate::signals::content_sha256(&accepted);
+    let prior = vec![
+        WalRecord::InstrumentCatalogCheckpoint {
+            wall_ts_ms: recent_replay_ms(),
+            checkpoint: Box::new(test_instrument_catalog(&["BTCUSDT"]).checkpoint().unwrap()),
+        },
+        WalRecord::SignalObservation {
+            wall_ts_ms: recent_replay_ms(),
+            observation: accepted.clone(),
+        },
+    ];
+    let delivered = Rc::new(RefCell::new(Vec::new()));
+    let (engine, _harness) = build_with_catalog(
+        vec![Box::new(SequenceRecorder {
+            name: "one",
+            delivered: delivered.clone(),
+        })],
+        &["BTCUSDT"],
+        &prior,
+        Arc::new(BtcOnlyCatalog),
+    )
+    .await;
+    assert!(engine.market().table.get("ETHUSDT").is_none());
+    assert!(!engine.subscriptions().contains(&accepted.subscriptions[0]));
+    assert_eq!(
+        crate::signals::active_subscriptions_listed(&prior, None),
+        accepted.subscriptions,
+        "without the durable table every restored name is followed"
+    );
+    assert!(crate::signals::active_subscriptions_listed(
+        &prior,
+        Some(&test_instrument_catalog(&["BTCUSDT"]).checkpoint().unwrap()),
+    )
+    .is_empty());
+}

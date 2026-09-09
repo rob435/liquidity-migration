@@ -481,10 +481,9 @@ impl InstrumentCatalogClient for BtcOnlyCatalog {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_name_the_venue_does_not_list_waits_without_refetching_the_table() {
-    // Observed live on 2026-09-08: seven Bybit names MEXC does not list kept
-    // the catalog refetching every second. The table is fresh and authoritative;
-    // asking for it again cannot list them. The signal simply waits.
+async fn a_name_the_venue_does_not_list_is_dropped_without_refetching_the_table() {
+    // The table is fresh and authoritative; asking for it again cannot list
+    // the name, and nothing can be priced or ordered in it.
     let calls = Arc::new(AtomicUsize::new(0));
     let (mut engine, _records, _sends) = crate::tests::catalog_restart_test_fixture(
         Box::new(Consumer),
@@ -522,15 +521,151 @@ async fn a_name_the_venue_does_not_list_waits_without_refetching_the_table() {
         fetched_once,
         "an unlisted name refetched the venue table"
     );
-    assert!(engine
-        .wanted_symbols
-        .iter()
-        .any(|wanted| wanted.name == "ETHUSDT"));
+    assert!(
+        !engine
+            .wanted_symbols
+            .iter()
+            .any(|wanted| wanted.name == "ETHUSDT"),
+        "an unlisted name still holds the symbol admission queue"
+    );
     assert!(
         engine.symbol_admission.failure.is_none(),
         "an unlisted name was reported as a metadata failure: {:?}",
         engine.symbol_admission.failure
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unlisted_subscription_is_dropped_and_its_batch_is_delivered() {
+    // Observed live on 2026-09-08: the mexc engine's head-of-line CARRY batch
+    // named symbols MEXC does not list, so the row was re-queued forever and
+    // no signal file behind it was ever read.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (mut engine, records, _sends) = crate::tests::catalog_restart_test_fixture(
+        Box::new(Consumer),
+        None,
+        Arc::new(BtcOnlyCatalog(calls.clone())),
+    )
+    .await;
+    let (mut market, mut orders) = (Feeds::btc(), Feeds::btc());
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while engine.symbol_admission.busy() {
+            engine.symbol_admission.retry_after_ns = 0;
+            engine.admit_wanted(&mut market, &mut orders).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let fetched = calls.load(Ordering::SeqCst);
+
+    let mut input = row();
+    input.subscriptions = ["BTCUSDT", "ETHUSDT"]
+        .map(|symbol| Subscription {
+            symbol: symbol.into(),
+            feed: Feed::Quote,
+        })
+        .to_vec();
+    input.content_sha256 = crate::signals::content_sha256(&input);
+    let mut signals = Signals::default();
+    engine
+        .queue_signal_observation(input.clone(), &mut signals)
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            engine.symbol_admission.retry_after_ns = 0;
+            engine.admit_wanted(&mut market, &mut orders).await.unwrap();
+            engine.accept_pending_signals(&mut signals).unwrap();
+            if signals.acknowledged == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the batch never reached its destination");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        fetched,
+        "an unlisted subscription refetched the venue table"
+    );
+    assert!(
+        !engine
+            .wanted_symbols
+            .iter()
+            .any(|wanted| wanted.name == "ETHUSDT"),
+        "the unlisted subscription still holds the symbol admission queue"
+    );
+    assert!(engine.pending_signal_deliveries.is_empty());
+    assert!(engine.symbol_admission.failure.is_none());
+    assert!(engine
+        .routing
+        .quote_listeners(SymbolId(0))
+        .contains(&StrategyId(0)));
+    assert!(engine.books.market.table.get("ETHUSDT").is_none());
+    assert_eq!(
+        records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|record| matches!(record, WalRecord::SignalObservation { observation, .. } if observation == &input))
+            .count(),
+        1,
+        "the observation is journaled once, byte for byte"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_delisted_name_with_a_retained_rule_keeps_its_market_subscription() {
+    // The fresh table drops BTCUSDT; `retain_previous` keeps its rule so an
+    // open position can exit, and the subscription must follow the price.
+    let (mut engine, _records, sends) = crate::tests::catalog_restart_test_fixture(
+        Box::new(Consumer),
+        None,
+        Arc::new(DelistedCatalog),
+    )
+    .await;
+    let (mut market, mut orders) = (Feeds::btc(), Feeds::btc());
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while engine.symbol_admission.busy() {
+            engine.symbol_admission.retry_after_ns = 0;
+            engine.admit_wanted(&mut market, &mut orders).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!engine.symbol_admission.listed("BTCUSDT"));
+
+    let mut input = row();
+    input.subscriptions = vec![Subscription {
+        symbol: "BTCUSDT".into(),
+        feed: Feed::Ticker,
+    }];
+    input.content_sha256 = crate::signals::content_sha256(&input);
+    let mut signals = Signals::default();
+    engine
+        .queue_signal_observation(input.clone(), &mut signals)
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            engine.symbol_admission.retry_after_ns = 0;
+            engine.admit_wanted(&mut market, &mut orders).await.unwrap();
+            engine.accept_pending_signals(&mut signals).unwrap();
+            if signals.acknowledged == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("a delisted name's subscription was never installed");
+    assert!(engine
+        .routing
+        .ticker_listeners(SymbolId(0))
+        .contains(&StrategyId(0)));
+    assert!(engine.subscriptions.contains(&input.subscriptions[0]));
+    owned_exit(&mut engine, &sends).await;
 }
 
 #[tokio::test(start_paused = true)]

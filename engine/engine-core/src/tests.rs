@@ -1627,6 +1627,30 @@ struct BuildOptions {
     amend_verdict: Option<RiskVerdict>,
     /// The venue answers status reads from `Harness::lookups`.
     lookups: bool,
+    /// The venue's instrument table, so a test can restrict what it lists.
+    catalog: Option<Arc<dyn engine_types::orders::InstrumentCatalogClient>>,
+}
+
+/// A venue whose instrument table the test owns.
+async fn build_with_catalog(
+    strategies: Vec<Box<dyn Strategy>>,
+    symbols: &[&str],
+    replayed: &[WalRecord],
+    catalog: Arc<dyn engine_types::orders::InstrumentCatalogClient>,
+) -> (Engine<MockWal, MockRisk, MockVenue>, Harness) {
+    build_inner(
+        &settings(),
+        allow_all(),
+        strategies,
+        symbols,
+        replayed,
+        Vec::new(),
+        BuildOptions {
+            catalog: Some(catalog),
+            ..BuildOptions::default()
+        },
+    )
+    .await
 }
 
 /// A venue that answers status reads from a script, for the orders whose
@@ -1664,6 +1688,7 @@ async fn build_inner(
     let (mut venue, sends) = MockVenue::new(tape.clone(), symbols);
     venue.working = working;
     venue.lookup_scripted = options.lookups;
+    venue.catalog_client = options.catalog;
     let cancels = venue.cancels.clone();
     let amends = venue.amends.clone();
     let stops = venue.stops.clone();

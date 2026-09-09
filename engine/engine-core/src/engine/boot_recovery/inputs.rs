@@ -22,6 +22,7 @@ pub(super) fn restore_strategy_inputs(
         StrategyId,
         StrategyGlobalCheckpointState,
     >,
+    catalog: Option<&engine_types::orders::InstrumentCatalog>,
 ) -> Result<RecoveredStrategyInputs, EngineError> {
     let mut strategy_checkpoints = replay_strategy_checkpoints(effective);
     strategy_checkpoints.retain(|(strategy, symbol), _| {
@@ -84,6 +85,17 @@ pub(super) fn restore_strategy_inputs(
         }
         for subscription in subscriptions {
             let Some(symbol) = table.get(&subscription.symbol) else {
+                // Admission dropped this name because the venue does not list
+                // it and the catalog has no rule for it, so no id was ever
+                // reserved and the route has nothing to follow.
+                if catalog.is_some_and(|catalog| {
+                    !catalog
+                        .rules
+                        .iter()
+                        .any(|(listed, _)| listed == &subscription.symbol)
+                }) {
+                    continue;
+                }
                 return Err(EngineError::Boot(format!(
                     "durable signal source {} names {} outside the restored symbol table",
                     source, subscription.symbol

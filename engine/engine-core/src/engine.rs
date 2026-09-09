@@ -639,7 +639,7 @@ mod signal_routes;
 pub(crate) mod stop_runtime;
 mod strategy_callbacks;
 mod strategy_effects;
-mod symbol_admission;
+pub(crate) mod symbol_admission;
 mod telemetry;
 mod venue_completion;
 

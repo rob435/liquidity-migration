@@ -322,6 +322,26 @@ pub fn active_subscriptions(replayed: &[WalRecord]) -> Vec<Subscription> {
     subscriptions
 }
 
+/// The same union, without the names the durable instrument catalog does not
+/// carry. A signal names its own subscriptions, and symbol admission drops a
+/// name this venue never listed: seeding one at boot would spend a dense id,
+/// reserve an identity, and open a topic the venue rejects.
+pub fn active_subscriptions_listed(
+    replayed: &[WalRecord],
+    catalog: Option<&engine_types::orders::InstrumentCatalogCheckpoint>,
+) -> Vec<Subscription> {
+    let mut subscriptions = active_subscriptions(replayed);
+    if let Some(catalog) = catalog {
+        subscriptions.retain(|row| {
+            catalog
+                .rules
+                .iter()
+                .any(|(listed, _)| listed == &row.symbol)
+        });
+    }
+    subscriptions
+}
+
 /// A source that never produces. Keeps the ordinary `Engine::run` API while
 /// `run_with_signals` owns the real injection seam.
 pub struct NoSignals;
