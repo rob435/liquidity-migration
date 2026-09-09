@@ -10,6 +10,78 @@ edit STATE.md to match.
 Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
 [August 2026](docs/history/CHANGELOG-2026-08.md).
 
+- **2026-09-09 — Incident id `mexc-a361f5d18861421a` fires again at 00:44:29 UTC on a healthy mexc engine: MEXC's designed 600 s private-stream resync publishes `may_open=false` for the length of its history sweep, and the 30 s watchdog read one of those windows. Cause named, nothing impaired, no code changed; the fix is the owner's call.**
+  - Not the incident that id names. `incident_id` is `sha256(scope + the newly
+    due alert keys)[:16]` (`scripts/runtime/check_fleet_liveness.py:1158`), so
+    every `may-open:liquidity-migration-engine-mexc.service` page carries
+    `mexc-a361f5d18861421a` whatever caused it. The 2026-09-08 entry below is
+    the history-progress fault, fixed and deployed as `c6adead4`; this is a
+    different cause reusing its id.
+  - The page. `liquidity-migration-mexc-liveness` logs `CRITICAL
+    may-open:liquidity-migration-engine-mexc.service:
+    liquidity-migration-engine-mexc.service cannot open positions` at 00:44:29
+    and fires this session. The next two firings, 00:44:58 and 00:45:29, read
+    `ok scope=mexc units-and-heartbeats-healthy`
+    ([run `34296363193`](https://github.com/rob435/liquidity-migration/actions/runs/34296363193),
+    `mode=diagnose`, 00:45:44–00:45:58). One page, self-cleared inside 30 s.
+  - The latch never fired. `record_latch` writes `tracing::error!("this engine
+    will not open new positions until an operator clears it: …")` for every
+    finding (`engine/engine-core/src/engine.rs:126-131`), and the mexc engine
+    journal from its 23:54:07 start through 00:45:34 holds no such line — only
+    the one-per-minute latency counters. pid `3491854`, `NRestarts=0` and
+    `ActiveEnterTimestamp=23:54:29` are unchanged across the page, and the
+    heartbeat reads `may_open=true`, `strategy_errors=[]`, `entry_blockers=0`,
+    `positions=0` at both 00:33:52
+    ([run `34295521898`](https://github.com/rob435/liquidity-migration/actions/runs/34295521898))
+    and 00:45:53. Nothing in the engine can restore a latch without an operator,
+    so a `may_open` that reads true after the page is proof none was set.
+  - Cause. The heartbeat's `may_open` is not the latch:
+    `engine/engine-core/src/engine/telemetry.rs:160` publishes
+    `may_open && private_stream_ready`.
+    `engine/engine-core/src/engine/venue_completion.rs:1355-1356` clears
+    `private_stream_ready` on every `OrderUpdate::StreamReset`, and
+    `engine/engine-core/src/engine/account_recovery.rs:430` restores it only
+    once that generation's account view and execution-history sweep have both
+    completed. MEXC emits `StreamReset` every `CONNECTED_RESYNC` 600 s **while
+    the socket is up and healthy**
+    (`engine/engine-venue/src/venues/mexc/ws.rs:66`, `:228`), because the
+    venue's execution history and not its socket is the authority there. So a
+    healthy mexc engine publishes `may_open=false` once every ten minutes for
+    the length of its sweep, and `check_fleet_liveness.py:385` pages CRITICAL on
+    `may_open is not True` with no dwell — the condition exactly as
+    [notifications](docs/notifications.md) §Realm/Admission documents it.
+  - The grid fits to the second. Heartbeat `stream_resets` reads 1 at 00:09:27,
+    3 at 00:33:52 and 5 at 00:45:53: five resets 600 s apart from the 23:54:29
+    socket, at 00:04:29, 00:14:29, 00:24:29, 00:34:29 and 00:44:29. The page is
+    on the fifth. Both Bybit engines read `stream_resets=0` over the same
+    window and neither paged; this is MEXC's paced re-read, not a lost socket.
+  - Why once and not five times. The heartbeat is rewritten every 5 s
+    (`engine/engine-core/src/heartbeat.rs:50`) and the watchdog reads it once
+    per 30 s, so the page needs a heartbeat write to land inside the sweep and
+    the watchdog's read to land inside the 5 s that beat is current. It is a
+    race, not a certainty — one page in five resyncs here — and it re-arms every
+    time: `select_incidents_to_fire` drops a key that is not currently alerting
+    (`:1024`), so the next catch is again "not in state" and fires a fresh
+    routine.
+  - Impaired: nothing. mexc holds no positions, `orders_sent=0` since the
+    23:54:07 start, and its USDT futures wallet reads `equity 0`, so no entry
+    could size during the window in any case. The window itself is the engine
+    correctly refusing entries while its account snapshot is untrusted
+    (`engine/engine-core/src/engine/intent_admission.rs:142`,
+    `OpeningRefusal::PrivateStreamUnready`) — right behaviour, wrongly reported
+    as a CRITICAL that wakes an engineer.
+  - Owner's call. Three fixes, none taken unattended. (1) Stop overloading
+    `StreamReset`: give MEXC's paced re-read its own venue signal so a socket
+    that never dropped does not invalidate the account view — the root fix, and
+    it changes when the funded engine admits entries. (2) Publish the latch and
+    the readiness bit as separate heartbeat fields and page CRITICAL only on the
+    latch — loses the page for a private stream that never recovers unless a
+    dwell replaces it. (3) Give the `may-open:` alert a dwell of two consecutive
+    firings — smallest change, delays a real latch page by 30 s. Recommendation:
+    (2) with (3), which keeps every real latch paging on the first reading and
+    costs a genuinely stuck stream one extra tick. Each changes when the funded
+    realm pages, so the choice is the owner's.
+
 - **2026-09-09 — Incidents `demo-0922e9f30da3bf98` and `mainnet-014ec4a90a2fde5f`: every signal worker's CARRY cycle stopped completing at the UTC decision roll for five to eight minutes, paged CRITICAL on every realm including the funded one, and cleared itself. Root cause open; no code changed.**
   - Scope. All three running realms stall at the same boundary, not demo alone,
     and all three watchdogs page. Last CARRY completion before the stall:
