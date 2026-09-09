@@ -124,9 +124,11 @@ class CapitalReferenceSettings:
         is linear in the reference, but the load-time proof is still re-run at
         each rebase because ``max_leverage`` and ``quantity_tolerance`` are not.
 
-    ``floor_usdt`` bounds the reference from below so an unreadable or near-zero
-    balance cannot produce a degenerate envelope. The dead band applies to
-    expansion only: contraction follows equity down immediately.
+    ``floor_usdt`` is the minimum viable reference for new exposure, not a
+    lower bound on the economic reference. Below it, entries stop while the
+    reference and loss budget continue contracting with verified equity.
+    Unreadable balances do not authorize expansion. The dead band applies
+    only to expansion; contraction follows equity down immediately.
     """
 
     mode: str = CAPITAL_REFERENCE_FIXED

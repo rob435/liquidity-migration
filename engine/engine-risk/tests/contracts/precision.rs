@@ -212,8 +212,8 @@ fn malformed_canonical_account_cannot_release_a_held_reservation() {
             canonical_entry("0.5").decided_ns
         ),
         RiskVerdict::Deny {
-            reason: DenyReason::AvailableMarginExhausted { .. }
-        }
+            reason: DenyReason::UnknownState { ref detail }
+        } if detail.contains("predates the latest observed")
     ));
     assert!(matches!(
         kernel.assess(
@@ -333,6 +333,13 @@ fn canonical_equity_crosses_the_expansion_deadband_before_projection() {
     account.exact_amounts.as_mut().unwrap().equity_usdt = number("1050.000000000000001");
     let mut kernel = Kernel::new(config).unwrap();
     kernel.observe_account_view(&account);
+    assert_eq!(
+        kernel.capital_reference_usdt(),
+        1000.0,
+        "an unassessed callback must not expand economic permission"
+    );
+    let intent = canonical_entry("1");
+    kernel.assess(&intent, &account, intent.decided_ns);
     assert_eq!(kernel.capital_reference_usdt(), 1050.0);
 }
 

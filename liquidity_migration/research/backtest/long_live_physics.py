@@ -567,7 +567,8 @@ def capital_reference_after_equity(
     equity = float(equity_usdt)
     if not config.tracks_equity or not math.isfinite(equity) or equity <= 0.0:
         return current
-    target = max(equity * config.equity_fraction, config.floor_usdt)
+    # The minimum viable reference is an admission threshold, not capital.
+    target = equity * config.equity_fraction
     if math.isclose(
         target,
         current,
@@ -2114,6 +2115,16 @@ def _risk_admits_target(
         or target_leverage <= 0.0
     ):
         return False
+    if capital_reference.tracks_equity and current_reference_usdt < capital_reference.floor_usdt:
+        held = positions.get(symbol)
+        mark = _finite(marks.get(symbol), 0.0)
+        standing = (
+            abs(held.quantity * mark) if held is not None and mark > 0.0
+            else abs(held.target_notional_usdt) if held is not None
+            else 0.0
+        )
+        if abs(float(target_notional_usdt)) > standing:
+            return False
     gross = 0.0
     margin = 0.0
     for held_symbol, position in positions.items():

@@ -127,6 +127,16 @@ def test_capital_reference_contracts_immediately_outside_close_tolerance() -> No
     assert capital_reference_after_equity(1_000.0, 999.0, config=capital) == 999.0
 
 
+def test_audit_viability_floor_does_not_invent_equity_or_admit_new_exposure() -> None:
+    capital = _capital_reference()
+    assert capital_reference_after_equity(100.0, 50.0, config=capital) == 50.0
+    assert not long_live_physics._risk_admits_target(
+        positions={}, marks={}, symbol="AAAUSDT", target_notional_usdt=5.0,
+        target_leverage=5.0, account_equity_usdt=50.0,
+        capital_reference=capital, current_reference_usdt=50.0,
+    )
+
+
 def test_risk_caps_use_the_held_reference_not_sub_band_raw_equity() -> None:
     signal_ts = date_ms("2027-01-04")
     first_check = signal_ts + exact_duration_ms(hours=1)

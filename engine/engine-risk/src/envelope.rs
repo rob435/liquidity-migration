@@ -39,20 +39,30 @@ impl Envelope {
     pub(crate) fn allowance_usdt(&self) -> Exact {
         &self.reference_usdt * &self.gross_notional_multiple * &self.disaster_stop_fraction
     }
-    pub(crate) fn observe_equity(&mut self, equity: &Exact) -> bool {
+    pub(crate) fn observe_equity_with_permission(
+        &mut self,
+        equity: &Exact,
+        allow_expansion: bool,
+    ) -> bool {
         if !self.tracks_equity || !equity.is_positive() {
             return false;
         }
-        let target = (equity * &self.equity_fraction).max(self.floor_usdt.clone());
+        // `floor_usdt` is a viability threshold, not invented economic capital.
+        // A shrinking account must keep shrinking its loss/margin allowances.
+        let target = equity * &self.equity_fraction;
         let current = &self.reference_usdt;
         if close_enough(&target, current) {
             return false;
         }
-        if target >= *current && target <= current * &self.expansion_multiple {
+        if target >= *current && (!allow_expansion || target <= current * &self.expansion_multiple)
+        {
             return false;
         }
         self.reference_usdt = target;
         true
+    }
+    pub(crate) fn viable_for_new_exposure(&self) -> bool {
+        !self.tracks_equity || self.reference_usdt >= self.floor_usdt
     }
     pub(crate) fn position_worst_case_usdt(&self, notional: &Exact, stop: &Exact) -> Exact {
         notional * stop.max(&self.disaster_stop_fraction)

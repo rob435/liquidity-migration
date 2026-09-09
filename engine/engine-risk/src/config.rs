@@ -40,7 +40,9 @@ pub struct EnvelopeConfig {
     pub reference_usdt: f64,
     /// Share of equity the reference tracks. In (0, 1].
     pub equity_fraction: f64,
-    /// The reference never falls below this.
+    /// Minimum viable reference for new exposure when tracking equity.
+    /// Kept under the existing configuration spelling for compatibility; this
+    /// threshold never inflates the economic reference or loss allowance.
     pub floor_usdt: f64,
     /// Expansion needs a move larger than this; contraction is immediate.
     pub expand_dead_band_fraction: f64,

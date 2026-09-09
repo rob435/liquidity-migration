@@ -21,6 +21,7 @@ pub struct Kernel {
     loss_window: LossWindow,
     open_pnl_usdt: Option<Exact>,
     margin: MarginBook,
+    latest_account_observed_ns: u64,
 }
 fn unknown(detail: impl Into<String>) -> DenyReason {
     DenyReason::UnknownState {
@@ -74,10 +75,25 @@ impl Kernel {
             loss_window: LossWindow::default(),
             open_pnl_usdt: Some(Exact::zero()),
             margin: MarginBook::default(),
+            latest_account_observed_ns: 0,
         })
     }
     pub fn observe_price(&mut self, symbol: SymbolId, px: f64) {
         self.book.observe_px(symbol, px);
+    }
+    fn observe_reference(&mut self, view: &ViewFacts, allow_expansion: bool) {
+        let ordered = view.observed_ns >= self.latest_account_observed_ns;
+        self.envelope
+            .observe_equity_with_permission(&view.equity_usdt, allow_expansion && ordered);
+        self.latest_account_observed_ns = self.latest_account_observed_ns.max(view.observed_ns);
+    }
+
+    fn require_viable_reference(&self) -> Result<(), DenyReason> {
+        if self.envelope.viable_for_new_exposure() {
+            Ok(())
+        } else {
+            Err(unknown("verified equity is below the minimum viable capital reference; new physical exposure is refused"))
+        }
     }
     pub fn register_order(&mut self, id: &str, intent: &Intent, qty: f64) {
         let px = match intent.kind {
@@ -324,6 +340,8 @@ impl Kernel {
             policy(self.cfg.qty_tolerance)
         };
         let view = ViewFacts::read(account, &tolerance)?;
+        // Reductions also contract budgets, but do not need an expanding budget.
+        self.observe_reference(&view, false);
         if intent.exact_prices.is_some() {
             intent
                 .validate_price_projection()
@@ -381,7 +399,13 @@ impl Kernel {
                 max_age_ns: self.cfg.max_account_view_age_ns,
             });
         }
-        self.envelope.observe_equity(&view.equity_usdt);
+        if account.observed_ns < self.latest_account_observed_ns {
+            return Err(unknown(
+                "account view predates the latest observed account state",
+            ));
+        }
+        self.observe_reference(&view, true);
+        self.require_viable_reference()?;
         if !self.loss_window.valid() {
             return Err(unknown(
                 "closed-trade account-unit valuation is unavailable or invalid",
@@ -833,11 +857,23 @@ impl RiskKernel for Kernel {
         Kernel::observe_price(self, symbol, px);
     }
     fn observe_account_view(&mut self, account: &AccountView) {
+        if account.observed_ns < self.latest_account_observed_ns {
+            if let Ok(view) = ViewFacts::read(account, &Exact::zero()) {
+                self.observe_reference(&view, false);
+            }
+            return;
+        }
+        self.latest_account_observed_ns = self.latest_account_observed_ns.max(account.observed_ns);
         self.open_pnl_usdt = account_open_pnl(account).ok();
         if let Ok(view) = ViewFacts::read(account, &Exact::zero()) {
             self.book.prune_through(account.observed_ns);
             self.margin.observe(account.observed_ns);
-            self.envelope.observe_equity(&view.equity_usdt);
+            // This callback supplies no admission clock. Only a later fresh
+            // assessment can enlarge permission; observing may only contract.
+            self.observe_reference(&view, false);
+        } else {
+            // A missing/invalid balance is not evidence of zero account loss.
+            self.open_pnl_usdt = None;
         }
     }
     fn observe_closed_trade(&mut self, row: ClosedTradeRow) {

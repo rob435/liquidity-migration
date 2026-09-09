@@ -17,6 +17,51 @@ fn observe(kernel: &mut Kernel, equity: f64) -> RiskVerdict {
 }
 
 #[test]
+fn audit_equity_below_viability_never_inflates_the_rolling_loss_reference() {
+    let mut cfg = equity_tracking_config();
+    cfg.envelope.floor_usdt = 100.0;
+    cfg.max_rolling_loss_fraction = 0.1;
+    let mut kernel = Kernel::new(cfg).unwrap();
+    let verdict = observe(&mut kernel, 50.0);
+    assert_eq!(kernel.capital_reference_usdt(), 50.0);
+    assert_eq!(kernel.rolling_loss().limit_usdt, 5.0);
+    assert!(matches!(verdict, RiskVerdict::Deny {
+        reason: DenyReason::UnknownState { ref detail }
+    } if detail.contains("minimum viable")));
+    let held = view(50.0, vec![position(BUSDT, Side::Buy, 1.0, 10.0, true)], SEC);
+    assert_eq!(
+        kernel.assess(&exit(CARRY, BUSDT, Side::Sell, 1.0, 10.0, SEC), &held, SEC),
+        RiskVerdict::Allow { qty: 1.0 }
+    );
+}
+
+#[test]
+fn audit_out_of_order_or_unassessed_equity_observations_cannot_expand_the_budget() {
+    let mut kernel = Kernel::new(equity_tracking_config()).unwrap();
+    kernel.observe_account_view(&flat(500.0, 2 * SEC));
+    assert_eq!(kernel.capital_reference_usdt(), 500.0);
+    kernel.observe_account_view(&flat(10_000.0, SEC));
+    assert_eq!(kernel.capital_reference_usdt(), 500.0);
+    kernel.observe_account_view(&flat(20_000.0, 3 * SEC));
+    assert_eq!(
+        kernel.capital_reference_usdt(),
+        500.0,
+        "a callback without a freshness check enlarged risk"
+    );
+    let now = 3 * SEC;
+    kernel.assess(
+        &entry(CARRY, BUSDT, Side::Buy, 1.0, 10.0, 9.0, now),
+        &flat(20_000.0, now),
+        now,
+    );
+    assert_eq!(
+        kernel.capital_reference_usdt(),
+        20_000.0,
+        "a fresh assessed observation did not permit deliberate expansion"
+    );
+}
+
+#[test]
 // A fill lands, the account view has not caught up, and the reservation
 // already drained — for that window the filled position must still count
 // against the envelope, or a second order is judged against a book the
@@ -125,13 +170,15 @@ fn unknown_equity_moves_nothing_and_refuses() {
 }
 
 #[test]
-// test_the_floor_bounds_the_envelope_rather_than_collapsing_it
-fn the_floor_bounds_the_envelope_rather_than_collapsing_it() {
+fn the_viability_threshold_never_floors_the_economic_reference() {
     let mut cfg = equity_tracking_config();
     cfg.envelope.floor_usdt = 500.0;
     let mut kernel = Kernel::new(cfg).expect("config");
-    observe(&mut kernel, 1.0);
-    assert_eq!(kernel.capital_reference_usdt(), 500.0);
+    assert!(matches!(
+        observe(&mut kernel, 1.0),
+        RiskVerdict::Deny { .. }
+    ));
+    assert_eq!(kernel.capital_reference_usdt(), 1.0);
 }
 
 #[test]
