@@ -89,6 +89,13 @@ engine — the execution loop
       Point --wal at the real state directory and again at a memory-backed
       one to bound what faster storage would buy.
 
+  engine wal-retention --wal PATH [--json]
+      The lowest segment of this log family the engine may still open: the
+      newest segment boot trusts, the trusted segment it falls back to, and
+      the oldest segment any retained callback cursor in that restatement
+      names. Reads one frame per segment, never a whole segment. Everything
+      below the floor is an archive.
+
   engine venues
       List every compiled venue/realm and its live-evidence gate.
 

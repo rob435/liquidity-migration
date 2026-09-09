@@ -1005,6 +1005,64 @@ pub fn segments(family: &Path) -> Result<Vec<(u64, PathBuf)>, WalError> {
     Ok(found)
 }
 
+/// The oldest segment of the unbroken run ending at `current`: walk down
+/// while the segment below still exists. With nothing missing this is 1.
+///
+/// Retention deletes old sealed segments from the front of a family, so a
+/// pruned family is segment 1, a hole, then a contiguous run up to the
+/// current segment. Every [`WalRecord::SegmentBase`] restates what the
+/// segments before it left open, so the run ending at `current` holds
+/// everything a reader of live state needs.
+pub fn retention_floor(family: &Path, current: u64) -> u64 {
+    let mut floor = current;
+    while floor > 1 && segment_path(family, floor - 1).exists() {
+        floor -= 1;
+    }
+    floor
+}
+
+/// The first record of `path` alone: one header, one frame, nothing paged in
+/// behind it. A restatement is a few megabytes where its segment is hundreds,
+/// so this is how a reader decides whether a segment is trusted without
+/// [`replay_current`]'s memory.
+///
+/// `None` where a rotation left nothing complete to read: an empty file, a
+/// header or first frame a crash cut off, or bytes that are not an engine
+/// log — the tolerance a numbered segment gets from the trust decision.
+/// Corruption past a complete frame header is refused, as it is there.
+pub fn first_record(path: &Path) -> Result<Option<WalRecord>, WalError> {
+    let mut file = File::open(path)?;
+    let len = file.metadata()?.len();
+    if len < HEADER_LEN + FRAME_HEADER_LEN as u64 {
+        return Ok(None);
+    }
+    let mut head = [0u8; HEADER_LEN as usize + FRAME_HEADER_LEN];
+    file.read_exact(&mut head)?;
+    let (magic, frame) = head.split_at(HEADER_LEN as usize);
+    if magic != MAGIC.as_slice() {
+        return Ok(None);
+    }
+    let payload_len = u32::from_le_bytes(frame[..4].try_into().expect("four-byte length")) as u64;
+    let want_crc = u32::from_le_bytes(frame[4..].try_into().expect("four-byte checksum"));
+    if payload_len == 0 || len - HEADER_LEN - (FRAME_HEADER_LEN as u64) < payload_len {
+        return Ok(None);
+    }
+    let mut payload = vec![0u8; payload_len as usize];
+    file.read_exact(&mut payload)?;
+    let corrupt = |detail: String| WalError::Corrupt {
+        offset: HEADER_LEN,
+        detail,
+    };
+    if crc32c::crc32c(&payload) != want_crc {
+        return Err(corrupt("frame checksum does not match".to_string()));
+    }
+    read_record(&payload).map(Some).map_err(|e| {
+        corrupt(format!(
+            "frame passed its checksum but is not a readable record: {e}"
+        ))
+    })
+}
+
 /// Whether boot may replay this segment alone.
 ///
 /// Segment 1 always: it is the whole history up to the first rotation, so
@@ -1453,6 +1511,70 @@ mod tests {
             .map(|(index, _)| index)
             .collect();
         assert_eq!(ordinals, [2, 999_999, 1_000_000, u64::MAX]);
+    }
+
+    #[test]
+    fn the_retention_floor_is_the_run_that_ends_at_the_current_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let family = dir.path().join("engine.wal");
+        for index in 1..=5 {
+            std::fs::write(segment_path(&family, index), []).unwrap();
+        }
+        assert_eq!(retention_floor(&family, 5), 1, "nothing is missing");
+        for index in [2, 3] {
+            std::fs::remove_file(segment_path(&family, index)).unwrap();
+        }
+        assert_eq!(retention_floor(&family, 5), 4);
+        std::fs::write(segment_path(&family, 2), []).unwrap();
+        assert_eq!(
+            retention_floor(&family, 5),
+            4,
+            "a segment stranded below the hole is not in the run"
+        );
+        assert_eq!(retention_floor(&family, 1), 1);
+    }
+
+    #[test]
+    fn the_first_record_reads_one_frame_and_tolerates_what_a_rotation_abandons() {
+        let dir = tempfile::tempdir().unwrap();
+        let family = dir.path().join("engine.wal");
+        let (mut wal, _) = open_current(&family).unwrap();
+        wal.append(&sample_record()).unwrap();
+        wal.barrier().unwrap();
+        let base = ordinal_test_base();
+        wal.rotate(&base).unwrap();
+        drop(wal);
+        let second = segment_path(&family, 2);
+        assert_eq!(first_record(&second).unwrap(), Some(base));
+        assert_eq!(
+            first_record(&family).unwrap(),
+            Some(sample_record()),
+            "the family file's first frame is a record like any other"
+        );
+
+        // Segment 2 holds the restatement and nothing else, so every cut here
+        // lands inside the first frame.
+        let whole = std::fs::read(&second).unwrap();
+        for cut in [0, 4, 8, 12, 16, whole.len() / 2, whole.len() - 1] {
+            std::fs::write(&second, &whole[..cut]).unwrap();
+            assert_eq!(
+                first_record(&second).unwrap(),
+                None,
+                "a first frame cut at byte {cut} is not a record yet"
+            );
+        }
+        std::fs::write(&second, b"not an engine log at all").unwrap();
+        assert_eq!(first_record(&second).unwrap(), None);
+
+        // Past a complete frame header the bytes are real and are refused.
+        let mut corrupt = whole;
+        let end = corrupt.len() - 1;
+        corrupt[end] ^= 1;
+        std::fs::write(&second, &corrupt).unwrap();
+        assert!(matches!(
+            first_record(&second),
+            Err(WalError::Corrupt { offset: 8, .. })
+        ));
     }
 
     #[test]

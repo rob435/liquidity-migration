@@ -13,6 +13,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
         "record-equity" => runtime()?.block_on(engine_tools::equity_recorder::run(&args[1..])),
         "execution-study" => engine_tools::execution_study::run(&args[1..]),
         "wal-cost" => wal_cost(args),
+        "wal-retention" => wal_retention(args),
         "wal-convert-v5" => wal_convert_v5(args),
         "venue-key" => venue_key(args),
         "venues" => venues(args),
@@ -98,6 +99,22 @@ fn wal_cost(args: &[String]) -> Result<(), Box<dyn Error>> {
     println!("{costs}");
     println!("  the barrier measures synchronous fsync; engine bench separates callback, queued-dispatch and attempted-send barriers.");
     println!("  compare against a memory-backed path to bound what faster storage buys.");
+    Ok(())
+}
+
+fn wal_retention(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let path = PathBuf::from(value(args, "--wal").ok_or("wal-retention needs --wal PATH")?);
+    let report = engine_tools::wal_retention::read(&path)?;
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    println!("wal-retention family={}", path.display());
+    print!("{}", report.table());
+    println!(
+        "\n  a segment below retention_floor_segment is an archive; the engine may still \
+         open every segment at or above it."
+    );
     Ok(())
 }
 
@@ -578,6 +595,7 @@ mod tests {
         for (command, expected) in [
             ("backtest", "engine backtest needs --config PATH"),
             ("wal-cost", "wal-cost needs --wal PATH"),
+            ("wal-retention", "wal-retention needs --wal PATH"),
             ("replay", "replay needs --wal PATH"),
             ("fills", "fills needs --wal PATH"),
             ("latency", "latency needs --wal PATH"),

@@ -332,6 +332,9 @@ impl Reader {
             )));
         }
         let last_offset = pinned.metadata()?.len();
+        // Retention prunes old sealed segments, and the base of the oldest
+        // segment still on disk restates every order open at that rotation.
+        let floor = crate::retention_floor(&family, segment);
         Ok(Self {
             source: crate::callback_reader::Reader {
                 file: pinned.try_clone()?,
@@ -344,7 +347,7 @@ impl Reader {
             last_segment: segment,
             last_offset,
             cursor: CallbackWalCursor {
-                segment: 1,
+                segment: floor,
                 sequence: 1,
                 offset: crate::HEADER_LEN,
             },
@@ -562,6 +565,37 @@ mod tests {
             "strategies":["owner"], "symbols":["BTCUSDT"], "may_open":false, "control_anchors":[],
             "attribution":[], "logged_exposure":[], "intended_stops":[], "portfolio":engine_types::portfolio::PortfolioState::default(), "open_trade_lots":[], "open_orders":orders })).unwrap()
     }
+    fn base_with_epoch(epoch_ms: i64, orders: Vec<OpenOrderState>) -> WalRecord {
+        let mut record = base(orders);
+        let WalRecord::SegmentBase {
+            order_id_epoch_ms, ..
+        } = &mut record
+        else {
+            unreachable!()
+        };
+        *order_id_epoch_ms = Some(epoch_ms);
+        record
+    }
+    fn open_order(id: &str) -> OpenOrderState {
+        let WalRecord::OrderSent { request, .. } = sent(id) else {
+            unreachable!()
+        };
+        OpenOrderState {
+            entry_work: None,
+            request,
+            wire_ns: 1,
+            arrival_mid: 100.0,
+            acked: true,
+            filled_qty: 0.25,
+            fill_quantity: Some(engine_types::wal::OrderFillQuantity::LegacyBinary64 {
+                quantity: 0.25,
+            }),
+            reservation_low_px: 0.0,
+            reservation_high_px: 0.0,
+            exact_price_range: None,
+            terminal: None,
+        }
+    }
     fn root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "order-lineage-{name}-{}-{}",
@@ -614,14 +648,131 @@ mod tests {
         assert_eq!(reader.next().unwrap(), Some(rejected));
         assert_eq!(reader.next().unwrap(), Some(cancelled));
         assert_eq!(reader.next().unwrap(), None);
-        std::fs::remove_file(&path).unwrap();
+        // A segment that disappears under a reader that already pinned its
+        // floor is a fault, not a pruned front.
         let mut unavailable = wal.order_lineage_reader("kept").unwrap().unwrap();
+        std::fs::remove_file(&path).unwrap();
         assert!(unavailable
             .next()
             .unwrap_err()
             .to_string()
             .contains("source segment 1 unavailable"));
         drop(wal);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Five segments. The order's only lineage record is in segment 1, and
+    /// every rotation after it restates the order as still open and the order
+    /// ID epoch with it — which is what lets the front of the family go.
+    fn restated_family(name: &str) -> (PathBuf, PathBuf) {
+        let root = root(name);
+        let path = root.join("engine.wal");
+        let (mut wal, _) = crate::WalWriter::open(&path).unwrap();
+        wal.append(&sent("eng-1800000000000-1")).unwrap();
+        wal.append(&WalRecord::OrderIdEpoch {
+            epoch_ms: 1900000000000,
+        })
+        .unwrap();
+        for _ in 0..4 {
+            wal.rotate(&base_with_epoch(
+                1900000000000,
+                vec![open_order("eng-1800000000000-1")],
+            ))
+            .unwrap();
+        }
+        wal.barrier().unwrap();
+        drop(wal);
+        assert_eq!(crate::segments(&path).unwrap().len(), 5);
+        (root, path)
+    }
+    fn lineage(path: &std::path::Path) -> Vec<WalRecord> {
+        let (mut wal, _) = crate::open_current(path).unwrap();
+        let mut reader = wal
+            .order_lineage_reader("eng-1800000000000-1")
+            .unwrap()
+            .unwrap();
+        let mut read = Vec::new();
+        while let Some(record) = reader.next().unwrap() {
+            read.push(record);
+        }
+        read
+    }
+    fn restatements_only(read: &[WalRecord]) {
+        assert_eq!(
+            read.len(),
+            2,
+            "the restatements in segments 4 and 5, and nothing below the floor"
+        );
+        for record in read {
+            let WalRecord::SegmentBase { open_orders, .. } = record else {
+                panic!("a segment below the retention floor was read: {record:?}");
+            };
+            assert_eq!(open_orders, &[open_order("eng-1800000000000-1")]);
+        }
+    }
+
+    #[test]
+    fn a_whole_family_starts_the_lineage_read_at_segment_one() {
+        let (root, path) = restated_family("floor-whole");
+        let read = lineage(&path);
+        assert_eq!(
+            read.first(),
+            Some(&sent("eng-1800000000000-1")),
+            "nothing is missing, so the read starts where it always did"
+        );
+        assert_eq!(
+            read.len(),
+            5,
+            "segment 1, then one restatement per rotation"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_pruned_family_front_starts_the_lineage_read_at_the_retention_floor() {
+        let (root, path) = restated_family("floor-pruned");
+        for index in [2, 3] {
+            std::fs::remove_file(crate::segment_path(&path, index)).unwrap();
+        }
+        assert_eq!(crate::retention_floor(&path, 5), 4);
+        restatements_only(&lineage(&path));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_segment_stranded_below_a_hole_is_not_read() {
+        let (root, path) = restated_family("floor-island");
+        std::fs::remove_file(crate::segment_path(&path, 3)).unwrap();
+        assert_eq!(
+            crate::retention_floor(&path, 5),
+            4,
+            "segment 2 is an island: the run ending at 5 starts at 4"
+        );
+        restatements_only(&lineage(&path));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_order_epoch_read_survives_a_pruned_family_front() {
+        let (root, path) = restated_family("floor-epoch");
+        let epoch = |path: &std::path::Path| {
+            let (mut wal, _) = crate::open_current(path).unwrap();
+            wal.order_epoch_reader()
+                .unwrap()
+                .unwrap()
+                .max_order_epoch_ms()
+                .unwrap()
+        };
+        let whole = epoch(&path);
+        assert_eq!(whole, Some(1900000000000));
+        for index in [2, 3] {
+            std::fs::remove_file(crate::segment_path(&path, index)).unwrap();
+        }
+        assert_eq!(
+            epoch(&path),
+            whole,
+            "every base restates order_id_epoch_ms, so the front is expendable"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

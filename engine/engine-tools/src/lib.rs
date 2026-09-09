@@ -12,6 +12,7 @@ pub mod execution_study;
 pub mod sim;
 pub mod timing;
 pub mod wal_conversion;
+pub mod wal_retention;
 
 #[cfg(test)]
 mod testpath;
