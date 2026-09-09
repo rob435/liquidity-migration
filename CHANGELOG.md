@@ -91,6 +91,19 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     (`--keep-hours 24`, 20 GB; 6 h would return ~15 GB); a host-liveness
     row for the reclaim receipt's age; linking segment 1 into the stage
     (0.5 GB of duplicate blocks); `checkpoint-configs` (616 KB, left alone).
+  - First run, timer-driven, 15:41:00–15:45:59 UTC on `42dd7446`: `staged`
+    34 tarballs 0.43 GiB, `apt` 0.40 GiB, `archive` 11 quarantine files
+    1.94 GiB uploaded to `sealed/` and verified by size and md5 before each
+    unlink (5.4 GB pending at 2 GiB a run), `release` 0 (every directory is
+    under 3 days old), `wal` 0 by design: 52 demo and 51 mainnet segments
+    below floors 54 and 53 all verified against `latest/`, `backlog=0`, and
+    free 28.0 GiB sits above the 20.0 GiB low-water mark. It exited 1:
+    `wal-retention …-engine-hyperliquid/engine.wal: exit 1 engine: no log
+    segment` — the hyperliquid realm has never run, so its family has no
+    file, and the reclaimer treated the tool's refusal as a fault; no receipt
+    was written. Fixed the same hour: a family with no log yet is nothing to
+    reclaim (`wal … no log yet` note, no error), with a test. The receipt of
+    the first clean run follows below.
 
 - **2026-09-09 — Render the fleet's realm plumbing from one table, and hold mexc and hyperliquid provisioned but stopped.**
   - Owner direction: collapse the realm plumbing into a manifest-driven form
@@ -152,6 +165,17 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     the posture branch); the full Python suite 1,825 passed; Ruff, mypy and
     ShellCheck clean. Docs: `docs/operations.md` §Realm table,
     `deploy/systemd/README.md`, `scripts/README.md`, `docs/architecture.md`.
+  - Deploy receipt. `42dd7446` by [deploy run `34368381679`](https://github.com/rob435/liquidity-migration/actions/runs/34368381679): `vps` 15:20:54–15:27:45 UTC,
+    demo handover 15:21:3x (worker `3728921`, engine `3728981`), 300 s soak
+    15:22:06–15:27:06, `atomic mainnet handover` 15:27:08 (worker `3730794`,
+    engine `3730852`), then `mexc posture=stopped in deploy/realms.tsv: units
+    stay stopped` at 15:27:44 and `hyperliquid armed but the installed engine
+    reports hyperliquid_mainnet readiness=live-canary: units stay stopped`;
+    `deploy-ok`, rollback target `7f0214f7`. Host at 15:30: `engine-mexc`,
+    `signal-worker-mexc`, `mexc-liveness.timer`, `engine-hyperliquid` and
+    `hyperliquid-liveness.timer` all `disabled inactive`; both Bybit engines on
+    `42dd7446`, `may_open=true`, `strategy_errors=[]`. End state as directed:
+    both funded alt realms provisioned and stopped.
 
 - **2026-09-09 — Hyperliquid canary run 1, 09:10 UTC: the create was refused before the wire, the cleanup looped on `unknownOid`, and the refusal never reached the operator. Fixed; the rerun is the owner's.**
   - The owner moved the account's 52.4 USDC from the `xyz` HIP-3 dex to Spot
@@ -200,6 +224,8 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     workspace 2,338, fmt and strict Clippy clean on Rust 1.90.
   - Evidence boundary: no Hyperliquid order lifecycle has been observed yet;
     `hyperliquid_mainnet` stays `live-canary` until the owner's rerun passes.
+  - The fix is installed on the host in `42dd7446` (`engine-tools` from
+    [deploy run `34368381679`](https://github.com/rob435/liquidity-migration/actions/runs/34368381679)). Rerun pending; no order lifecycle observed yet.
 
 - **2026-09-09 — Incident `mexc-signal-intake`, open since 2026-09-08 21:07 UTC: one signal batch naming seven instruments MEXC never listed froze the mexc engine's whole signal lane for twelve hours, with a healthy heartbeat. Fixed in the engine.**
   - The reading. The mexc engine retired no spool file after 21:07:04 UTC on
@@ -268,6 +294,10 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     a name with no symbol id, so a flatten naming an unfollowable symbol could
     never read flat; durable routes keep unfollowable names for a source's
     life (cap 4,096).
+  - Deployed in `42dd7446`; drain deferred. The realm is stopped by posture
+    from this deploy, so the spool still holds 172 files at 15:31 UTC (161
+    `funding_update`, the frozen CARRY batch, five gate rows). The engine
+    delivers and retires them on the realm's next start.
 
 - **2026-09-09 — The signal worker's public data is a venue module: Bybit, MEXC or Hyperliquid, selected per realm. mexc and hyperliquid now read their own venues; demo and mainnet are unchanged to the byte.**
   - Owner direction: funding, settlement clock, klines, tickers and instruments
@@ -350,6 +380,11 @@ Older history: [September 1-5](docs/history/CHANGELOG-2026-09-01-through-05.md),
     worker's settle-coin test
     (`the_worker_judges_instruments_by_its_venues_settle_coin`), workspace
     2,408, fmt and strict Clippy clean on Rust 1.90.
+  - Deployed in `42dd7446` (receipt under the realm-table entry). The demo
+    and mainnet workers restarted on the Bybit module and read `ready`; the
+    MEXC and Hyperliquid modules have not run on the host, because both
+    realms are stopped by posture and readiness. Their first live hour is the
+    reading to take when either realm is started.
 
 - **2026-09-09 — The MEXC market feed's funding clock is the contract's own, not eight hours from the epoch.**
   - `engine-marketdata/src/mexc.rs` declared every MEXC contract eight-hourly
