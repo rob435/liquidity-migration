@@ -156,8 +156,23 @@ impl HyperliquidPublicVenue {
         self.info.post_json("/info", body).await
     }
 
-    /// The venue's spelling of a symbol the last `meta` carried.
-    fn coin_of(&self, symbol: &str) -> Result<String, WorkerError> {
+    /// The venue's spelling of a symbol the last `meta` carried. Every `meta`
+    /// read fills the table; a process that restored its universe from the
+    /// checkpoint has made none yet, so the first lookup reads `meta` itself.
+    async fn coin_of(&self, symbol: &str) -> Result<String, WorkerError> {
+        let empty = self
+            .coins
+            .lock()
+            .expect("Hyperliquid coin table lock poisoned")
+            .is_empty();
+        if empty {
+            let (payload, _) = self.read(&json!({"type": "meta"})).await?;
+            let coins = meta_universe(&payload)?
+                .iter()
+                .map(coin_names)
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
+            self.remember_coins(coins);
+        }
         self.coins
             .lock()
             .expect("Hyperliquid coin table lock poisoned")
@@ -295,7 +310,7 @@ impl HyperliquidPublicVenue {
         end: i64,
         page_limit: usize,
     ) -> Result<FetchedKlineRows, WorkerError> {
-        let coin = self.coin_of(symbol)?;
+        let coin = self.coin_of(symbol).await?;
         let page_row_cap = page_limit.min(MAX_CANDLE_ROWS);
         let retained_row_cap = source_grid_slots(start, end, HOUR_MS, false)?;
         let limit = i64::try_from(page_row_cap)
@@ -362,7 +377,7 @@ impl HyperliquidPublicVenue {
         page_limit: usize,
         interval_hours: Option<i64>,
     ) -> Result<FetchedFundingRows, WorkerError> {
-        let coin = self.coin_of(symbol)?;
+        let coin = self.coin_of(symbol).await?;
         let page_row_cap = page_limit.min(MAX_FUNDING_ROWS);
         let retained_row_cap = source_grid_slots(start, end, HOUR_MS, true)?;
         let interval = interval_hours.map(Value::from);
@@ -453,6 +468,21 @@ impl HyperliquidPublicVenue {
 impl PublicVenue for HyperliquidPublicVenue {
     fn kind(&self) -> PublicVenueKind {
         PublicVenueKind::Hyperliquid
+    }
+
+    fn seed_listing_history(&self, launch_times_ms: BTreeMap<String, i64>) {
+        let mut state = self
+            .listings
+            .lock()
+            .expect("Hyperliquid listing history lock poisoned");
+        for (symbol, open_ts_ms) in launch_times_ms {
+            if open_ts_ms > 0 {
+                state
+                    .first_bar_ms
+                    .entry(default_coin(&symbol))
+                    .or_insert(open_ts_ms);
+            }
+        }
     }
 
     fn settle_coin(&self) -> &'static str {

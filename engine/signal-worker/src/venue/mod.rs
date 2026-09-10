@@ -134,6 +134,12 @@ pub trait PublicVenue: Send + Sync {
         self.kind().settle_coin()
     }
 
+    /// Launch times a checkpoint already carries, by engine symbol. A venue
+    /// that reads listing history one coin at a time starts from them instead
+    /// of reading every coin again on each boot; a venue whose instrument
+    /// table states launch time ignores them.
+    fn seed_listing_history(&self, _launch_times_ms: BTreeMap<String, i64>) {}
+
     /// Every listed instrument of every status, so a name that left the venue
     /// still has a trading interval.
     fn instruments(

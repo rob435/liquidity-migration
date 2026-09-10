@@ -433,13 +433,21 @@ pub struct VenueOrder {
 }
 
 /// One nonzero position from an account-wide inventory, before symbol
-/// interning. `product` names the venue category that was scanned.
+/// interning. `product` names the venue category that was scanned; a
+/// `wallet_dust` or `asset_account_dust:*` product is a holding the venue
+/// values under one dollar, which no order can close.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AccountPosition {
     pub product: String,
     pub symbol: String,
     pub side: Side,
     pub qty: f64,
+}
+
+impl AccountPosition {
+    pub fn is_dust(&self) -> bool {
+        self.product == "wallet_dust" || self.product.starts_with("asset_account_dust:")
+    }
 }
 
 /// One working order from an account-wide inventory.
@@ -461,8 +469,9 @@ pub struct AccountInventory {
 }
 
 impl AccountInventory {
+    /// Flat means no position, no working order, and nothing held beyond dust.
     pub fn is_flat(&self) -> bool {
-        self.positions.is_empty() && self.open_orders.is_empty()
+        self.positions.iter().all(AccountPosition::is_dust) && self.open_orders.is_empty()
     }
 }
 
@@ -997,5 +1006,45 @@ impl InstrumentCatalog {
         };
         checkpoint.validate_bounds()?;
         Ok(checkpoint)
+    }
+}
+
+#[cfg(test)]
+mod inventory_flatness_tests {
+    use super::*;
+
+    fn row(product: &str, symbol: &str) -> AccountPosition {
+        AccountPosition {
+            product: product.into(),
+            symbol: symbol.into(),
+            side: Side::Buy,
+            qty: 0.0001,
+        }
+    }
+
+    #[test]
+    fn dust_alone_reads_flat_and_anything_else_does_not() {
+        let mut inventory = AccountInventory {
+            scope: "test".into(),
+            positions: vec![
+                row("wallet_dust", "MNT"),
+                row("asset_account_dust:UnifiedTradingAccount:CRYPTO", "MNT"),
+            ],
+            open_orders: Vec::new(),
+            observed_ms: 1,
+        };
+        assert!(inventory.is_flat());
+        inventory.positions.push(row("wallet_asset", "SOL"));
+        assert!(!inventory.is_flat());
+        inventory.positions.pop();
+        inventory.positions.push(row("linear", "INJUSDT"));
+        assert!(!inventory.is_flat());
+        inventory.positions.pop();
+        inventory.open_orders.push(AccountOrder {
+            product: "linear".into(),
+            symbol: "INJUSDT".into(),
+            client_order_id: String::new(),
+        });
+        assert!(!inventory.is_flat());
     }
 }

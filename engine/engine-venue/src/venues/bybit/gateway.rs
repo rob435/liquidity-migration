@@ -24,8 +24,8 @@ use engine_types::{AccountIdentity, VenueCaps, VenueError, VenueGateway, VenueMu
 use serde_json::{Map, Value};
 
 use super::parse::{
-    parse_active_strategies, parse_asset_overview, parse_cancel_batch, parse_instruments,
-    parse_inventory_orders, parse_inventory_positions, parse_inventory_wallet,
+    label_dust_holdings, parse_active_strategies, parse_asset_overview, parse_cancel_batch,
+    parse_instruments, parse_inventory_orders, parse_inventory_positions, parse_inventory_wallet,
     parse_linear_settle_coins, parse_order_ack, parse_positions, parse_rfq_quotes,
     parse_rfq_requests, parse_spread_orders, parse_wallet, parse_working_orders, venue_result,
     verify_attestation_key, verify_funded_key, verify_one_way_position,
@@ -1769,8 +1769,9 @@ impl VenueGateway for BybitGateway {
             )
         };
         let account_assets = async {
-            let (wallet_positions, (overview_positions, overview_orders)) =
+            let ((wallet_positions, dust_coins), (mut overview_positions, overview_orders)) =
                 futures_util::future::try_join(wallet, asset_overview).await?;
+            label_dust_holdings(&mut overview_positions, &dust_coins);
             Ok::<_, VenueError>((wallet_positions, overview_positions, overview_orders))
         };
         let ((wallet_positions, overview_positions, overview_orders), (positions, mut open_orders)) =

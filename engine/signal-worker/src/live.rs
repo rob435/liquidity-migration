@@ -482,6 +482,7 @@ impl LiveRunner {
         let request_budget = Arc::new(Semaphore::new(config.live.max_parallel_requests));
         let venue =
             open_public_venue(config.public_venue()?, &config, Arc::clone(&request_budget))?;
+        venue.seed_listing_history(listing_history_seed(durable.worker().state()));
         let listing_source = open_listing_source(&config, Arc::clone(&request_budget))?;
         let binance = PublicHttpClient::new(
             &config.sources.binance_host,
@@ -542,6 +543,7 @@ impl LiveRunner {
             options.state_dir,
             options.spool_dir,
         )?;
+        venue.seed_listing_history(listing_history_seed(durable.worker().state()));
         Ok(Self {
             shutdown: None,
             config,
@@ -2500,6 +2502,15 @@ fn transient_recovery_acceptable(
 /// The cold-start repair on a sound transport: a gap or repair on a process
 /// that has never reported `ready`, with coverage already full. It outlives the
 /// cycle warmup the `starting` grace keys on, so it needs its own bound.
+/// The launch times a restored checkpoint already knows, for the venue.
+fn listing_history_seed(state: &crate::worker::WorkerState) -> BTreeMap<String, i64> {
+    state
+        .instruments
+        .iter()
+        .filter_map(|(symbol, row)| row.launch_time_ms.map(|ms| (symbol.clone(), ms)))
+        .collect()
+}
+
 fn boot_repair_acceptable(
     health: &StreamHealth,
     repair_running: bool,

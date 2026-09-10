@@ -92,6 +92,12 @@ fn validate_sample(
         .into());
     }
     if inventory.is_flat() {
+        for position in &inventory.positions {
+            eprintln!(
+                "flat-dust sample={} product={} symbol={} qty={}",
+                sample, position.product, position.symbol, position.qty
+            );
+        }
         return Ok(());
     }
     for position in &inventory.positions {

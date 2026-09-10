@@ -599,7 +599,7 @@ fn require_derivative_flat(inventory: &AccountInventory, when: &str) -> Result<(
     let non_wallet: Vec<_> = inventory
         .positions
         .iter()
-        .filter(|position| position.product != "wallet_asset")
+        .filter(|position| position.product != "wallet_asset" && !position.is_dust())
         .collect();
     if !non_wallet.is_empty() || !inventory.open_orders.is_empty() {
         return Err(format!(
@@ -1051,7 +1051,7 @@ impl<'a> CleanupInventory<'a> {
         let mut our_positions = Vec::new();
         let mut unexpected_positions = Vec::new();
         for position in &inventory.positions {
-            if position.product == "wallet_asset" {
+            if position.product == "wallet_asset" || position.is_dust() {
                 continue;
             }
             if position.product == "linear"

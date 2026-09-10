@@ -321,6 +321,57 @@ fn a_funding_print_is_floored_to_the_hour_it_settled() {
     );
 }
 
+/// A process that restored its universe from the checkpoint has read no `meta`
+/// yet; the first lane read fills the coin table itself, once.
+#[tokio::test(start_paused = true)]
+async fn the_first_lane_read_fills_the_coin_table_from_meta() {
+    let _io = crate::test_io::IoProgress::new();
+    let (venue, mut requests, server) = info_source(|body| match body["type"].as_str() {
+        Some("meta") => json!({"universe": [{"name": "BTC", "szDecimals": 5, "maxLeverage": 40}]}),
+        Some("candleSnapshot") | Some("fundingHistory") => Value::from(Vec::<Value>::new()),
+        other => panic!("unexpected request {other:?}"),
+    })
+    .await;
+    venue.klines("BTCUSDT", 0, HOUR_MS, 10).await.unwrap();
+    assert_eq!(requests.recv().await.unwrap()["type"], "meta");
+    let candles = requests.recv().await.unwrap();
+    assert_eq!(candles["type"], "candleSnapshot");
+    assert_eq!(candles["req"]["coin"], "BTC");
+    venue
+        .funding("BTCUSDT", 0, HOUR_MS, 10, Some(1))
+        .await
+        .unwrap();
+    while let Ok(body) = requests.try_recv() {
+        assert_ne!(body["type"], "meta", "the table is read once");
+    }
+    server.abort();
+}
+
+/// Launch times the checkpoint already carries are not read again on boot.
+#[tokio::test(start_paused = true)]
+async fn a_seeded_listing_history_is_not_read_again() {
+    let _io = crate::test_io::IoProgress::new();
+    let (venue, mut requests, server) = info_source(|body| match body["type"].as_str() {
+        Some("meta") => json!({"universe": [{"name": "BTC", "szDecimals": 5, "maxLeverage": 40}]}),
+        other => panic!("unexpected request {other:?}"),
+    })
+    .await;
+    venue.seed_listing_history(BTreeMap::from([(
+        "BTCUSDT".to_owned(),
+        1_597_795_200_000_i64,
+    )]));
+    let fetched = venue.instruments(1).await.unwrap();
+    assert_eq!(
+        fetched.rows[0].launch_time,
+        Some(Value::from(1_597_795_200_000_i64))
+    );
+    tokio::task::yield_now().await;
+    while let Ok(body) = requests.try_recv() {
+        assert_eq!(body["type"], "meta", "a seeded coin is never read");
+    }
+    server.abort();
+}
+
 /// The listing history is read beside the instrument table, once a coin, and
 /// never for a coin the venue delisted.
 #[tokio::test(start_paused = true)]
@@ -523,6 +574,8 @@ async fn every_window_asks_the_venue_for_the_grid_the_caller_asked_for() {
 async fn a_coin_the_venue_stopped_listing_fails_only_its_own_lane() {
     let _io = crate::test_io::IoProgress::new();
     let (venue, _requests, server) = info_source(|_| Value::from(Vec::<Value>::new())).await;
+    // The table has been read; the name is simply not in it.
+    venue.remember_coins(BTreeMap::from([("BTCUSDT".to_owned(), "BTC".to_owned())]));
     for error in [
         venue.klines("GONEUSDT", 0, HOUR_MS, 10).await.unwrap_err(),
         venue

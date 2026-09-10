@@ -14,6 +14,7 @@ use engine_types::{ForcedClose, VenueExecution};
 use engine_types::{Side, VenueError};
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 use crate::json::{int_field, kind_of, num_field, opt_num_field, str_field};
 
@@ -707,11 +708,18 @@ pub(crate) fn parse_active_strategies(
     Ok((out, cursor))
 }
 
-/// Non-cash wallet assets and every explicit spot liability. Positive USDT
-/// and USDC are the account's cash, not exposure; a negative cash balance or
-/// borrow is still a blocker. Unknown assets are kept by name rather than
-/// being filtered through the engine's symbol table.
-pub(crate) fn parse_inventory_wallet(result: &Value) -> Result<Vec<AccountPosition>, VenueError> {
+/// Under the venue's smallest sellable value: no order can close a holding
+/// this small, so it is dust, not exposure.
+const DUST_USD_VALUE: f64 = 1.0;
+
+/// Non-cash wallet assets and every explicit spot liability, with the set of
+/// coins the venue values under [`DUST_USD_VALUE`]. Positive USDT and USDC are
+/// the account's cash, not exposure; a negative cash balance or borrow is
+/// still a blocker. Unknown assets are kept by name rather than being filtered
+/// through the engine's symbol table.
+pub(crate) fn parse_inventory_wallet(
+    result: &Value,
+) -> Result<(Vec<AccountPosition>, BTreeSet<String>), VenueError> {
     let rows = list_field(result)?;
     if rows.len() != 1 {
         return Err(VenueError::BadReply(format!(
@@ -730,6 +738,7 @@ pub(crate) fn parse_inventory_wallet(result: &Value) -> Result<Vec<AccountPositi
         .and_then(Value::as_array)
         .ok_or_else(|| VenueError::BadReply("wallet inventory has no coin array".to_string()))?;
     let mut out = Vec::new();
+    let mut dust = BTreeSet::new();
     for row in coins {
         let coin = str_field(row, "coin")?;
         if coin.is_empty() {
@@ -746,8 +755,27 @@ pub(crate) fn parse_inventory_wallet(result: &Value) -> Result<Vec<AccountPositi
         }
         let is_cash = matches!(coin.as_str(), "USDT" | "USDC");
         if wallet != 0.0 && (!is_cash || wallet < 0.0) {
+            // The venue's own valuation; absent, the holding counts in full.
+            let usd_value = row
+                .get("usdValue")
+                .and_then(|value| match value {
+                    Value::String(text) => text.trim().parse::<f64>().ok(),
+                    Value::Number(number) => number.as_f64(),
+                    _ => None,
+                })
+                .filter(|value| value.is_finite());
+            let is_dust =
+                wallet > 0.0 && usd_value.is_some_and(|value| value.abs() < DUST_USD_VALUE);
+            if is_dust {
+                dust.insert(coin.clone());
+            }
             out.push(AccountPosition {
-                product: "wallet_asset".to_string(),
+                product: if is_dust {
+                    "wallet_dust"
+                } else {
+                    "wallet_asset"
+                }
+                .to_string(),
                 symbol: coin.clone(),
                 side: if wallet > 0.0 { Side::Buy } else { Side::Sell },
                 qty: wallet.abs(),
@@ -762,7 +790,7 @@ pub(crate) fn parse_inventory_wallet(result: &Value) -> Result<Vec<AccountPositi
             });
         }
     }
-    Ok(out)
+    Ok((out, dust))
 }
 
 /// Holdings outside the unified trading wallet, including the separate
@@ -818,16 +846,12 @@ pub(crate) fn parse_asset_overview(
         }
 
         let blocks = matches!(account_type.as_str(), "TradingBot" | "CopyTrading");
-        // Positive USDT/USDC in the ordinary funding or unified wallet is
-        // deployable cash, just as it is in `parse_inventory_wallet`. In every
-        // product account (Earn, loans, Alpha, staking, bots, copy trading,
-        // and any future account type), a non-zero coin row is inventory and
-        // must survive into the flatness proof. Negative cash is a liability
-        // everywhere and is never exempted.
-        let cash_account = matches!(
-            account_type.as_str(),
-            "FundingAccount" | "UnifiedTradingAccount"
-        );
+        // Positive USDT/USDC is cash wherever it sits, wallet, loan, earn or
+        // staking alike, just as in `parse_inventory_wallet`. Inside a bot or
+        // copy-trading product it is deployed capital and stays inventory.
+        // Every other non-zero coin row is inventory, and negative cash is a
+        // liability everywhere.
+        let cash_counts = !blocks;
         let mut account_has_explicit_positive_cash = false;
         let account_position_start = positions.len();
         let direct_coins = row.get("coinDetail").and_then(Value::as_array);
@@ -840,12 +864,12 @@ pub(crate) fn parse_asset_overview(
 
         if let Some(coins) = direct_coins {
             account_has_explicit_positive_cash |=
-                cash_account && asset_rows_have_positive_cash(coins)?;
+                cash_counts && asset_rows_have_positive_cash(coins)?;
             parse_asset_holding_rows(
                 coins,
                 &account_type,
                 &account_type,
-                cash_account,
+                cash_counts,
                 &mut positions,
             )?;
         }
@@ -869,23 +893,17 @@ pub(crate) fn parse_asset_overview(
                         ))
                     })?;
                 let category_has_explicit_positive_cash =
-                    cash_account && asset_rows_have_positive_cash(coins)?;
+                    cash_counts && asset_rows_have_positive_cash(coins)?;
                 account_has_explicit_positive_cash |= category_has_explicit_positive_cash;
                 let category_position_start = positions.len();
-                parse_asset_holding_rows(
-                    coins,
-                    &account_type,
-                    &name,
-                    cash_account,
-                    &mut positions,
-                )?;
+                parse_asset_holding_rows(coins, &account_type, &name, cash_counts, &mut positions)?;
                 // Some product accounts report only an aggregate valuation
                 // and an empty detail array. The aggregate is not a tradable
                 // quantity, but a synthetic row is enough for the boolean
                 // flatness proof and is safer than attesting the value away.
                 if category_equity != 0.0
                     && positions.len() == category_position_start
-                    && (!cash_account
+                    && (!cash_counts
                         || category_equity < 0.0
                         || !category_has_explicit_positive_cash)
                 {
@@ -922,7 +940,7 @@ pub(crate) fn parse_asset_overview(
         }
         if account_equity != 0.0
             && positions.len() == account_position_start
-            && (!cash_account || account_equity < 0.0 || !account_has_explicit_positive_cash)
+            && (!cash_counts || account_equity < 0.0 || !account_has_explicit_positive_cash)
         {
             positions.push(AccountPosition {
                 product: format!("asset_account_equity:{account_type}"),
@@ -956,6 +974,18 @@ pub(crate) fn parse_asset_overview(
     Ok((positions, latent))
 }
 
+/// A coin the wallet scan valued under [`DUST_USD_VALUE`] is dust on every
+/// other surface that lists the same holding.
+pub(crate) fn label_dust_holdings(positions: &mut [AccountPosition], dust: &BTreeSet<String>) {
+    for position in positions {
+        if dust.contains(&position.symbol) {
+            if let Some(rest) = position.product.strip_prefix("asset_account_holding:") {
+                position.product = format!("asset_account_dust:{rest}");
+            }
+        }
+    }
+}
+
 fn asset_rows_have_positive_cash(rows: &[Value]) -> Result<bool, VenueError> {
     let mut found = false;
     for row in rows {
@@ -970,7 +1000,7 @@ fn parse_asset_holding_rows(
     rows: &[Value],
     account_type: &str,
     category: &str,
-    cash_account: bool,
+    cash_counts: bool,
     out: &mut Vec<AccountPosition>,
 ) -> Result<(), VenueError> {
     for row in rows {
@@ -982,7 +1012,7 @@ fn parse_asset_holding_rows(
         }
         let equity = num_field(row, "equity")?;
         let ordinary_positive_cash =
-            cash_account && equity > 0.0 && matches!(coin.as_str(), "USDT" | "USDC");
+            cash_counts && equity > 0.0 && matches!(coin.as_str(), "USDT" | "USDC");
         if equity != 0.0 && !ordinary_positive_cash {
             out.push(AccountPosition {
                 product: format!("asset_account_holding:{account_type}:{category}"),
@@ -1212,11 +1242,20 @@ mod tests {
                 {"coin": "USDT", "walletBalance": "125", "borrowAmount": "0"},
                 {"coin": "USDC", "walletBalance": "10", "borrowAmount": "2"},
                 {"coin": "BTC", "walletBalance": "0.25", "borrowAmount": "0.01"},
-                {"coin": "ETH", "walletBalance": "0", "borrowAmount": "0"}
+                {"coin": "ETH", "walletBalance": "0", "borrowAmount": "0"},
+                {"coin": "MNT", "walletBalance": "0.00012169", "borrowAmount": "0", "usdValue": "0.00009"},
+                {"coin": "SOL", "walletBalance": "0.4", "borrowAmount": "0", "usdValue": "60.2"}
             ]
         }]});
-        let rows = parse_inventory_wallet(&result).unwrap();
-        assert_eq!(rows.len(), 3);
+        let (rows, dust) = parse_inventory_wallet(&result).unwrap();
+        assert_eq!(rows.len(), 5);
+        assert_eq!(dust, BTreeSet::from(["MNT".to_owned()]));
+        assert!(rows.iter().any(|row| {
+            row.product == "wallet_dust" && row.symbol == "MNT" && row.side == Side::Buy
+        }));
+        assert!(rows.iter().any(|row| {
+            row.product == "wallet_asset" && row.symbol == "SOL" && row.side == Side::Buy
+        }));
         assert!(rows.iter().any(|row| {
             row.product == "wallet_asset" && row.symbol == "BTC" && row.side == Side::Buy
         }));
@@ -1356,19 +1395,14 @@ mod tests {
 
         let (positions, latent) = parse_asset_overview(&result, now_ms).unwrap();
         assert!(latent.is_empty());
-        assert_eq!(positions.len(), 6);
-        assert!(positions.iter().any(|row| {
-            row.product == "asset_account_holding:CryptoLoans:CryptoLoans"
-                && row.symbol == "USDT"
-                && row.side == Side::Buy
-                && row.qty == 200.0
+        assert_eq!(positions.len(), 4);
+        // Positive settle cash is cash in a loan or earn product too.
+        assert!(!positions.iter().any(|row| {
+            row.product == "asset_account_holding:CryptoLoans:CryptoLoans" && row.symbol == "USDT"
         }));
-        assert!(positions.iter().any(|row| {
-            row.product == "asset_account_holding:Earn:Easy Earn"
-                && row.symbol == "USDT"
-                && row.side == Side::Buy
-                && row.qty == 50.0
-        }));
+        assert!(!positions
+            .iter()
+            .any(|row| row.product == "asset_account_holding:Earn:Easy Earn"));
         assert!(positions.iter().any(|row| {
             row.product == "asset_account_holding:UnifiedTradingAccount:crypto"
                 && row.symbol == "USDC"
@@ -1382,6 +1416,41 @@ mod tests {
         assert!(!positions
             .iter()
             .any(|row| row.symbol == "USDC" && row.qty == 10.0));
+    }
+
+    #[test]
+    fn a_dust_coin_is_dust_on_every_surface_that_lists_it() {
+        let mut positions = vec![
+            AccountPosition {
+                product: "asset_account_holding:UnifiedTradingAccount:CRYPTO".into(),
+                symbol: "MNT".into(),
+                side: Side::Buy,
+                qty: 0.00012169,
+            },
+            AccountPosition {
+                product: "asset_account_holding:UnifiedTradingAccount:CRYPTO".into(),
+                symbol: "SOL".into(),
+                side: Side::Buy,
+                qty: 0.4,
+            },
+            AccountPosition {
+                product: "linear".into(),
+                symbol: "MNTUSDT".into(),
+                side: Side::Buy,
+                qty: 100.0,
+            },
+        ];
+        label_dust_holdings(&mut positions, &BTreeSet::from(["MNT".to_owned()]));
+        assert_eq!(
+            positions[0].product,
+            "asset_account_dust:UnifiedTradingAccount:CRYPTO"
+        );
+        assert!(positions[0].is_dust());
+        assert_eq!(
+            positions[1].product,
+            "asset_account_holding:UnifiedTradingAccount:CRYPTO"
+        );
+        assert_eq!(positions[2].product, "linear");
     }
 
     #[test]
