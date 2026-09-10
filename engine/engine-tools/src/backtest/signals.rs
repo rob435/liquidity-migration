@@ -9,13 +9,54 @@
 
 use std::path::Path;
 
-use engine_types::{SignalError, SignalFeed, SignalGapRequest, SignalObservation, StrategyId};
+use engine_types::identity::{SignalSourceSleeve, SleeveKey};
+use engine_types::{
+    SignalError, SignalFeed, SignalGapRequest, SignalLane, SignalLifecycleResponse,
+    SignalObservation, SignalProducerLifecycle, SignalProducerReport, SignalSourceFrontier,
+    StrategyId, SIGNAL_LIFECYCLE_SCHEMA_VERSION,
+};
 
 use super::scheduler::{Scheduler, WaiterKind};
 use crate::signals::{
     ordered_blocked_destinations, ordered_gap_requests, signal_eligible, signal_requested,
     SpoolSignalFeed,
 };
+
+/// The producer whose lifecycle handshake this feed answers on its behalf.
+///
+/// An engine booted with exact instruments refuses to let a legacy source make
+/// a dependent sleeve ready (`engine/signal_intake.rs`
+/// `accept_signal_frontiers`), so a replayed producer has to hold the same
+/// two-round conversation the signal worker holds through the spool: present a
+/// sealed legacy generation, take the epoch the engine mints for it, then
+/// report the granted managed sources. The engine grants epoch 1 under the
+/// generation the producer named, so the managed source names are known before
+/// the first boot.
+#[derive(Clone, Debug)]
+pub struct ReplayLifecycle {
+    pub producer: String,
+    /// 32 lowercase hex characters.
+    pub generation: String,
+    pub routes: Vec<(SignalLane, StrategyId)>,
+}
+
+impl ReplayLifecycle {
+    /// The source name the engine grants for one lane at `epoch`.
+    pub fn managed_source(&self, lane: SignalLane, epoch: u64) -> Result<String, SignalError> {
+        engine_types::ManagedSignalSource {
+            producer: &self.producer,
+            epoch,
+            generation: &self.generation,
+            lane,
+        }
+        .encode()
+        .map_err(|error| SignalError::Source(error.to_owned()))
+    }
+
+    fn legacy_source(&self, lane: SignalLane) -> String {
+        format!("{}.g{}.{}", self.producer, self.generation, lane.name())
+    }
+}
 
 pub struct SignalReplayFeed {
     observations: Vec<Option<SignalObservation>>,
@@ -25,6 +66,12 @@ pub struct SignalReplayFeed {
     gaps: Vec<SignalGapRequest>,
     blocked_destinations: Vec<StrategyId>,
     scheduler: Scheduler,
+    lifecycle: Option<ReplayLifecycle>,
+    /// Every row this feed holds, by source, with the clock each became
+    /// available: the producer's own publication frontier.
+    roster: std::collections::BTreeMap<String, Vec<(u64, i64)>>,
+    sleeve_keys: Vec<SleeveKey>,
+    answer: Option<SignalLifecycleResponse>,
 }
 
 impl SignalReplayFeed {
@@ -37,6 +84,10 @@ impl SignalReplayFeed {
             gaps: Vec::new(),
             blocked_destinations: Vec::new(),
             scheduler,
+            lifecycle: None,
+            roster: std::collections::BTreeMap::new(),
+            sleeve_keys: Vec::new(),
+            answer: None,
         }
     }
 
@@ -78,6 +129,7 @@ impl SignalReplayFeed {
         }
         observations.sort_by_key(|o| (o.available_wall_ts_ms, o.sequence));
         Ok(SignalReplayFeed {
+            roster: roster(&observations),
             observations: observations.into_iter().map(Some).collect(),
             outstanding: None,
             ready_observation: None,
@@ -85,7 +137,133 @@ impl SignalReplayFeed {
             gaps: Vec::new(),
             blocked_destinations: Vec::new(),
             scheduler,
+            lifecycle: None,
+            sleeve_keys: Vec::new(),
+            answer: None,
         })
+    }
+
+    /// Rows the caller minted rather than read off a spool, ordered the same
+    /// way `from_directory` orders a spool.
+    pub fn from_observations(observations: Vec<SignalObservation>, scheduler: Scheduler) -> Self {
+        let mut observations = observations;
+        observations.sort_by_key(|o| (o.available_wall_ts_ms, o.sequence));
+        SignalReplayFeed {
+            roster: roster(&observations),
+            observations: observations.into_iter().map(Some).collect(),
+            outstanding: None,
+            ready_observation: None,
+            producer_frontiers: std::collections::BTreeMap::new(),
+            gaps: Vec::new(),
+            blocked_destinations: Vec::new(),
+            scheduler,
+            lifecycle: None,
+            sleeve_keys: Vec::new(),
+            answer: None,
+        }
+    }
+
+    /// Answer the engine's producer handshake as this producer.
+    pub fn with_lifecycle(mut self, lifecycle: ReplayLifecycle) -> Self {
+        self.lifecycle = Some(lifecycle);
+        self
+    }
+
+    /// The highest sequence of `source` the producer had published by now.
+    fn published_through(&self, source: &str) -> u64 {
+        let now_ms = (self.scheduler.now_ns() / 1_000_000) as i64;
+        self.roster
+            .get(source)
+            .into_iter()
+            .flatten()
+            .filter(|(_, available)| *available <= now_ms)
+            .map(|(sequence, _)| *sequence)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Which round of the handshake the engine's own record puts us in: it
+    /// mints the epoch grant only after a legacy generation is sealed.
+    fn compose_answer(&mut self, producers: &[SignalProducerLifecycle]) -> Result<(), SignalError> {
+        let Some(plan) = self.lifecycle.clone() else {
+            return Ok(());
+        };
+        let granted = producers
+            .iter()
+            .find(|known| known.producer == plan.producer)
+            .filter(|known| known.legacy.is_empty())
+            .and_then(|known| known.active.as_ref())
+            .filter(|active| active.generation == plan.generation)
+            .cloned();
+        let (epoch, sealed, sources) = match granted {
+            Some(active) => {
+                let sources: Vec<SignalSourceFrontier> = active
+                    .sources
+                    .iter()
+                    .map(|row| SignalSourceFrontier {
+                        published_through: self.published_through(&row.source),
+                        source: row.source.clone(),
+                        destination: row.destination,
+                    })
+                    .collect();
+                (Some(active.epoch), false, sources)
+            }
+            None => {
+                let sources: Vec<SignalSourceFrontier> = plan
+                    .routes
+                    .iter()
+                    .map(|(lane, destination)| SignalSourceFrontier {
+                        source: plan.legacy_source(*lane),
+                        destination: *destination,
+                        published_through: 0,
+                    })
+                    .collect();
+                (None, true, sources)
+            }
+        };
+        let mut source_sleeves = Vec::with_capacity(sources.len());
+        for source in &sources {
+            let sleeve = self
+                .sleeve_keys
+                .get(source.destination.0 as usize)
+                .cloned()
+                .ok_or_else(|| {
+                    SignalError::Source(format!(
+                        "the engine named no sleeve for strategy {}",
+                        source.destination.0
+                    ))
+                })?;
+            source_sleeves.push(SignalSourceSleeve {
+                source: source.source.clone(),
+                sleeve,
+            });
+        }
+        self.answer = Some(SignalLifecycleResponse {
+            source_sleeves,
+            schema_version: SIGNAL_LIFECYCLE_SCHEMA_VERSION,
+            boot_nonce: "sim".into(),
+            producer: SignalProducerReport {
+                producer: plan.producer,
+                epoch,
+                generation: plan.generation,
+                sealed,
+                sources,
+            },
+        });
+        Ok(())
+    }
+
+    /// The reader is a spool that outlives the process reading it: an
+    /// acknowledged row is gone, a row delivered but not acknowledged when the
+    /// process died is offered again, and the frontiers the dead engine was
+    /// told about have to be advertised to the new one.
+    pub fn rebooted(&mut self) {
+        self.producer_frontiers.clear();
+        self.ready_observation = None;
+        self.outstanding = None;
+        self.gaps.clear();
+        self.blocked_destinations.clear();
+        self.answer = None;
     }
 
     pub fn len(&self) -> usize {
@@ -97,13 +275,46 @@ impl SignalReplayFeed {
     }
 }
 
+fn roster(
+    observations: &[SignalObservation],
+) -> std::collections::BTreeMap<String, Vec<(u64, i64)>> {
+    let mut out: std::collections::BTreeMap<String, Vec<(u64, i64)>> =
+        std::collections::BTreeMap::new();
+    for row in observations {
+        out.entry(row.source.clone())
+            .or_default()
+            .push((row.sequence, row.available_wall_ts_ms));
+    }
+    out
+}
+
 impl SignalFeed for SignalReplayFeed {
+    fn set_sleeve_keys(&mut self, keys: Vec<SleeveKey>) -> Result<(), SignalError> {
+        self.sleeve_keys = keys;
+        Ok(())
+    }
+
+    fn request_readiness(&mut self) -> Result<(), SignalError> {
+        self.compose_answer(&[])
+    }
+
+    fn request_lifecycle(
+        &mut self,
+        producers: Vec<SignalProducerLifecycle>,
+        _legacy_sources: Vec<engine_types::SignalSourceFrontier>,
+    ) -> Result<(), SignalError> {
+        self.compose_answer(&producers)
+    }
+
     async fn next_event(&mut self) -> Result<engine_types::SignalFeedEvent, SignalError> {
+        if let Some(answer) = self.answer.take() {
+            return Ok(engine_types::SignalFeedEvent::LifecycleReady(answer));
+        }
         if let Some(observation) = self.ready_observation.take() {
             return Ok(engine_types::SignalFeedEvent::Observation(observation));
         }
         let observation = self.next_observation().await?;
-        if self.producer_frontiers.contains_key(&observation.source) {
+        if self.lifecycle.is_some() || self.producer_frontiers.contains_key(&observation.source) {
             return Ok(engine_types::SignalFeedEvent::Observation(observation));
         }
         // Replay advertises only the row which has reached its availability
@@ -249,6 +460,7 @@ mod tests {
             gaps: Vec::new(),
             blocked_destinations: Vec::new(),
             scheduler: scheduler.clone(),
+            ..SignalReplayFeed::empty(scheduler.clone())
         };
         let (sender, mut live) = crate::signals::signal_channel();
         sender.try_send(missing.clone()).unwrap();
@@ -303,6 +515,7 @@ mod tests {
             gaps: Vec::new(),
             blocked_destinations: Vec::new(),
             scheduler: scheduler.clone(),
+            ..SignalReplayFeed::empty(scheduler.clone())
         };
         let delivered = feed.next_observation().await.unwrap();
         assert_eq!(delivered, future);
@@ -367,7 +580,8 @@ mod tests {
                 next_sequence: 1,
             }],
             blocked_destinations: Vec::new(),
-            scheduler,
+            scheduler: scheduler.clone(),
+            ..SignalReplayFeed::empty(scheduler)
         };
         assert_eq!(feed.next_observation().await.unwrap(), missing);
         feed.acknowledge_last().unwrap();
@@ -394,7 +608,8 @@ mod tests {
             producer_frontiers: std::collections::BTreeMap::new(),
             gaps: Vec::new(),
             blocked_destinations: Vec::new(),
-            scheduler,
+            scheduler: scheduler.clone(),
+            ..SignalReplayFeed::empty(scheduler)
         };
         feed.set_gap_requests(
             &[SignalGapRequest {

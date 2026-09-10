@@ -14,12 +14,13 @@ use engine_wal::WalWriter;
 use sha2::{Digest, Sha256};
 
 use super::faults::{
-    shared_rng, FaultLog, FaultRates, FaultyGateway, FaultyMarketFeed, FaultyOrderFeed,
-    SharedFaultLog, SharedRng,
+    shared_parked_signals, shared_rng, FaultLog, FaultRates, FaultyGateway, FaultyMarketFeed,
+    FaultyOrderFeed, FaultySignalFeed, SharedFaultLog, SharedParkedSignals, SharedRng,
 };
 use super::invariants::{self, Check, Evidence};
-use super::market::{self, MarketPlan};
+use super::market::{self, MarketPlan, Realm, Shock, SimStrategies, TapeSummary};
 use super::rng::Rng;
+use super::signals::{self, Producer};
 use crate::assembly;
 use crate::backtest::feed::{pump, Cursor, SharedCursor, TapeFeed};
 use crate::backtest::instruments::read_instruments;
@@ -39,12 +40,17 @@ use crate::trades::Trades;
 /// market to trade and the last one has time to catch up.
 const DEATH_WINDOW: (f64, f64) = (0.1, 0.9);
 
+/// The shock starts after this many seconds: the first hour boundary carries
+/// the day the tape opened in, whose entry deadline has long passed, so a
+/// position is already held by then.
+const SHOCK_START_S: u64 = 5_400;
+
 #[derive(Clone, Debug)]
 pub struct SimOptions {
     pub seed: u64,
     /// Length of the synthetic tape.
     pub seconds: u64,
-    /// How many of the catalogue's symbols the quoter trades (1 to 3).
+    /// How many of the catalogue's symbols trade (1 to 3).
     pub symbols: usize,
     /// Process deaths to inject.
     pub crashes: u32,
@@ -52,6 +58,20 @@ pub struct SimOptions {
     /// Where this seed's files go. Removed afterwards unless `keep`.
     pub dir: PathBuf,
     pub keep: bool,
+    /// Whose strategy blocks run: the quoter, or a deployed realm's own.
+    pub strategies: SimStrategies,
+    /// Seconds between tape rows. Must stay inside the config's
+    /// `max_quote_age_ms`, or every entry is refused on a stale quote.
+    pub tape_step_s: u64,
+    /// The venue's starting cash, which is the account's whole equity.
+    pub capital: f64,
+    /// One symbol falls 20 % and holds there, so a native stop triggers.
+    pub shock: bool,
+    /// Publish one LLM gate candidature as well as the feature batches.
+    pub gate: bool,
+    /// Chance per symbol and UTC day that the producer's features carry an
+    /// entry trigger.
+    pub pump_probability: f64,
 }
 
 impl SimOptions {
@@ -64,7 +84,33 @@ impl SimOptions {
             faults: FaultRates::LIGHT,
             dir,
             keep: false,
+            strategies: SimStrategies::Quoter,
+            tape_step_s: 1,
+            capital: BacktestOptions::default().initial_capital_usdt,
+            shock: false,
+            gate: false,
+            pump_probability: 0.5,
         }
+    }
+
+    /// A deployed realm's own blocks, on the horizon and the tape density the
+    /// producer's daily and hourly grids need, and at a capital where the
+    /// LONG target clears every catalogue minimum and the profile's
+    /// per-symbol cap.
+    pub fn realm(seed: u64, dir: PathBuf, realm: Realm) -> Self {
+        SimOptions {
+            strategies: SimStrategies::Realm(realm),
+            symbols: 3,
+            seconds: 12 * 3_600,
+            tape_step_s: 10,
+            capital: 500.0,
+            shock: true,
+            ..SimOptions::new(seed, dir)
+        }
+    }
+
+    pub fn hours(&mut self, hours: u64) {
+        self.seconds = hours.saturating_mul(3_600);
     }
 }
 
@@ -74,6 +120,7 @@ pub struct SimReport {
     pub seed: u64,
     pub seconds: u64,
     pub symbols: usize,
+    pub strategies: &'static str,
     pub crashes_injected: u32,
     /// Times the engine exited on its own for its supervisor to boot it again.
     pub restarts: u32,
@@ -91,6 +138,18 @@ pub struct SimReport {
     pub notes: Vec<String>,
     pub wal_records: usize,
     pub wal_sha256: String,
+    pub signals_published: u64,
+    pub signals_consumed: u64,
+    pub signals_rejected: u64,
+    /// Every sleeve reporting a health error when the loop stopped.
+    pub strategy_errors: Vec<(String, String)>,
+    pub orders_by_sleeve: BTreeMap<String, u64>,
+    pub fills_by_sleeve: BTreeMap<String, u64>,
+    /// The authenticated fee snapshot the run priced its fills with. It comes
+    /// from `configs/bybit_fee_rates.json`, outside `engine/`, and moves
+    /// `wal_sha256` without changing a single record: a pinned log hash is
+    /// only pinned against this snapshot.
+    pub fee_snapshot_sha256: Option<String>,
 }
 
 impl SimReport {
@@ -125,6 +184,7 @@ struct Paths {
     tape: PathBuf,
     instruments: PathBuf,
     config: PathBuf,
+    profile: PathBuf,
     wal: PathBuf,
     trades: PathBuf,
 }
@@ -138,6 +198,7 @@ impl Paths {
             tape: dir.join("tape.jsonl"),
             instruments: dir.join("instruments.json"),
             config: dir.join("engine.toml"),
+            profile: dir.join("operational-profile.json"),
             wal: dir.join("run.wal"),
             trades: dir.join("trades.jsonl"),
         })
@@ -172,19 +233,33 @@ struct World {
     venue_rng: SharedRng,
     private_rng: SharedRng,
     market_rng: SharedRng,
+    signal_rng: SharedRng,
     log: SharedFaultLog,
     deaths: Vec<u64>,
     rtt: Duration,
     private_latency: Duration,
+    fee_snapshot_sha256: Option<String>,
+    /// The spool: durable rows, read across every boot of this seed.
+    signal_feed: SignalReplayFeed,
+    /// Rows the fault wrapper took and owes the engine; they survive a death
+    /// exactly as the spool's bytes do.
+    parked_signals: SharedParkedSignals,
+    published: Vec<engine_types::SignalObservation>,
+    producer: Producer,
+    tape_end_ms: i64,
+}
+
+/// What the engine had to say when its loop stopped.
+struct StoppedEngine {
+    outcome: RunOutcome,
+    in_flight: Vec<String>,
+    account: AccountView,
+    strategy_health: Vec<(String, String)>,
 }
 
 /// How one boot of the engine ended.
 enum SegmentEnd {
-    Stopped {
-        outcome: RunOutcome,
-        in_flight: Vec<String>,
-        account: AccountView,
-    },
+    Stopped(Box<StoppedEngine>),
     /// The seeded death.
     Died,
     /// The engine exited with an error, which is what the live unit does
@@ -201,13 +276,27 @@ impl World {
         opts: SimOptions,
     ) -> Result<(Self, engine_types::clock::VirtualClockGuard), EngineError> {
         let paths = Paths::create(&opts.dir)?;
-        let plan = MarketPlan::new(opts.symbols, opts.seconds);
+        let mut plan = MarketPlan::new(opts.symbols, opts.seconds);
+        plan.step_s = opts.tape_step_s.max(1);
+        // An independent stream: drawing the shock from the seed's own chain
+        // would move every fork after it and no quoter log would replay.
+        plan.shock = opts.shock.then(|| Shock {
+            symbol_index: Rng::new(opts.seed)
+                .fork(0x5348_4f43)
+                .below(plan.symbols.len() as u64) as usize,
+            start_s: SHOCK_START_S,
+            fall_fraction: 0.20,
+            fall_over_s: 60,
+            hold_s: 3_600,
+        });
         let mut seed = Rng::new(opts.seed);
         let market_walk = seed.fork(0x4d41_524b);
         let io = |e: std::io::Error| boot(format!("writing the world: {e}"));
-        market::write_tape(&paths.tape, &plan, market_walk).map_err(io)?;
+        let tape: TapeSummary = market::write_tape(&paths.tape, &plan, market_walk).map_err(io)?;
         market::write_instruments(&paths.instruments, &plan).map_err(io)?;
-        market::write_engine_config(&paths.config, &plan).map_err(io)?;
+        std::fs::write(&paths.profile, market::OPERATIONAL_PROFILE).map_err(io)?;
+        market::write_engine_config(&paths.config, &plan, opts.strategies, &paths.profile)
+            .map_err(io)?;
 
         let loaded = config::load(&paths.config).map_err(|e| boot(format!("config: {e}")))?;
         let mut settings = loaded.config.engine.clone();
@@ -228,8 +317,15 @@ impl World {
         drop(probe);
         let catalog =
             read_instruments(&paths.instruments).map_err(|e| boot(format!("instruments: {e}")))?;
-        let symbols: Vec<Symbol> = assembly::symbol_order(&[], &wanted)
-            .map_err(|error| boot(format!("symbol order: {error}")))?;
+        // A native sleeve declares no subscriptions of its own: it learns its
+        // symbols from the durable observations that name them. The venue has
+        // to list its whole catalogue, as a real one does, or runtime symbol
+        // admission finds no instrument rule and refuses every name.
+        let symbols: Vec<Symbol> = match opts.strategies {
+            SimStrategies::Quoter => assembly::symbol_order(&[], &wanted)
+                .map_err(|error| boot(format!("symbol order: {error}")))?,
+            SimStrategies::Realm(_) => plan.names(),
+        };
 
         let defaults = BacktestOptions::default();
         let fees =
@@ -240,7 +336,7 @@ impl World {
         let scheduler = Scheduler::default();
         let venue = Arc::new(Mutex::new(SimulatedVenue::new(
             VenueParams {
-                initial_cash_usdt: defaults.initial_capital_usdt,
+                initial_cash_usdt: opts.capital,
                 taker_fee_rate: fees.taker,
                 maker_fee_rate: fees.maker,
                 order_rtt_ns: rtt.as_nanos() as u64,
@@ -258,7 +354,14 @@ impl World {
             scheduler.clone(),
         )));
         let reader = TapeReader::open(&paths.tape).map_err(|e| boot(format!("tape: {e}")))?;
-        let subscriptions = assembly::boot_subscriptions(&symbols, &wanted);
+        // In realm mode the cursor interns every catalogue name so runtime
+        // admission can resolve one, and follows none until the engine asks:
+        // an event for a symbol the engine has not admitted indexes past its
+        // market table.
+        let subscriptions = match opts.strategies {
+            SimStrategies::Quoter => assembly::boot_subscriptions(&symbols, &wanted),
+            SimStrategies::Realm(_) => Vec::new(),
+        };
         let cursor: SharedCursor = Arc::new(Mutex::new(Cursor::new(
             reader,
             venue.clone(),
@@ -280,12 +383,37 @@ impl World {
             .collect();
         deaths.sort_unstable();
 
+        // Every fork below is drawn after the three the quoter already used,
+        // so adding the producer left every quoter log where it was.
+        let venue_rng = shared_rng(seed.fork(0x5645_4e55));
+        let private_rng = shared_rng(seed.fork(0x5052_4956));
+        let market_rng = shared_rng(seed.fork(0x4645_4544));
+        let signal_rng = shared_rng(seed.fork(0x5349_474e));
+        let mut producer = Producer::bind(&loaded.config.strategies)
+            .map_err(|e| boot(format!("producer: {e}")))?;
+        producer.pump_probability = opts.pump_probability;
+        producer.gate = opts.gate;
+        let published = signals::publish(seed.fork(0x5052_4f44), &plan, &tape, &producer);
+
         Ok((
             World {
-                venue_rng: shared_rng(seed.fork(0x5645_4e55)),
-                private_rng: shared_rng(seed.fork(0x5052_4956)),
-                market_rng: shared_rng(seed.fork(0x4645_4544)),
+                venue_rng,
+                private_rng,
+                market_rng,
+                signal_rng,
                 log: FaultLog::shared(),
+                signal_feed: {
+                    let feed =
+                        SignalReplayFeed::from_observations(published.clone(), scheduler.clone());
+                    match signals::lifecycle(&producer) {
+                        Some(lifecycle) => feed.with_lifecycle(lifecycle),
+                        None => feed,
+                    }
+                },
+                parked_signals: shared_parked_signals(),
+                published,
+                producer,
+                tape_end_ms: plan.end_ms(),
                 opts,
                 paths,
                 loaded,
@@ -297,6 +425,7 @@ impl World {
                 deaths,
                 rtt,
                 private_latency,
+                fee_snapshot_sha256: fees.snapshot_sha256,
             },
             clock,
         ))
@@ -304,7 +433,7 @@ impl World {
 
     /// One boot of the engine, to a clean stop or to the seeded death.
     async fn run_segment(
-        &self,
+        &mut self,
         death_at: Option<u64>,
         reconnecting: bool,
     ) -> Result<SegmentEnd, EngineError> {
@@ -343,7 +472,16 @@ impl World {
             self.scheduler.clone(),
             self.log.clone(),
         );
-        let mut signal_feed = SignalReplayFeed::empty(self.scheduler.clone());
+        self.signal_feed.rebooted();
+        let mut signal_feed = FaultySignalFeed::new(
+            &mut self.signal_feed,
+            self.opts.faults,
+            self.signal_rng.clone(),
+            self.scheduler.clone(),
+            self.log.clone(),
+            self.parked_signals.clone(),
+            Duration::from_secs(60),
+        );
         let mut controls = NoControls;
 
         // The pump runs before boot: after a death the clock is already
@@ -387,7 +525,7 @@ impl World {
         };
         pump_task.abort();
         match outcome {
-            Some(Ok(outcome)) => Ok(SegmentEnd::Stopped {
+            Some(Ok(outcome)) => Ok(SegmentEnd::Stopped(Box::new(StoppedEngine {
                 outcome,
                 in_flight: engine
                     .in_flight_ids()
@@ -395,7 +533,8 @@ impl World {
                     .map(|s| (*s).to_string())
                     .collect(),
                 account: engine.account().clone(),
-            }),
+                strategy_health: engine.strategy_health(),
+            }))),
             Some(Err(error)) => {
                 // A non-zero exit, whatever the reason: the supervisor boots
                 // the unit again. Persistent reasons show up as a restart
@@ -441,24 +580,20 @@ fn sha256_of(path: &Path) -> Result<String, EngineError> {
 /// Run one seed to its verdict.
 pub async fn run_seed(opts: SimOptions) -> Result<SimReport, EngineError> {
     let keep = opts.keep;
-    let (world, _clock) = World::build(opts)?;
+    let (mut world, _clock) = World::build(opts)?;
 
     let mut deaths_done = 0usize;
     let mut restarts = 0u32;
     let mut restart_reasons: Vec<String> = Vec::new();
     let mut segments = 0u32;
-    let mut stopped: Option<(RunOutcome, Vec<String>, AccountView)> = None;
+    let mut stopped: Option<Box<StoppedEngine>> = None;
     let mut engine_error: Option<String> = None;
     loop {
         segments += 1;
         let death_at = world.deaths.get(deaths_done).copied();
         match world.run_segment(death_at, segments > 1).await {
-            Ok(SegmentEnd::Stopped {
-                outcome,
-                in_flight,
-                account,
-            }) => {
-                stopped = Some((outcome, in_flight, account));
+            Ok(SegmentEnd::Stopped(end)) => {
+                stopped = Some(end);
                 break;
             }
             Ok(SegmentEnd::Died) => {
@@ -529,24 +664,47 @@ pub async fn run_seed(opts: SimOptions) -> Result<SimReport, EngineError> {
     };
     let stopped_by = stopped
         .as_ref()
-        .map(|(o, _, _)| format!("{:?}", o.stopped_by));
+        .map(|end| format!("{:?}", end.outcome.stopped_by));
+    // Rebuilt from the same config the run booted with, so `validate_checkpoint`
+    // is the reducer's own answer about its own durable state.
+    let judged = assembly::strategies(&world.loaded.config.strategies)
+        .map_err(|e| state(e.to_string()))?
+        .into_iter()
+        .enumerate()
+        .map(|(index, strategy)| {
+            (
+                engine_types::StrategyId(u16::try_from(index).unwrap_or(u16::MAX)),
+                world.sleeves.get(index).cloned().unwrap_or_default(),
+                strategy,
+            )
+        })
+        .collect::<Vec<_>>();
+    let counts = invariants::signal_counts(&records);
+    let by_sleeve = invariants::by_sleeve(&records, &world.sleeves);
     let checks = invariants::all(&Evidence {
         records: &records,
         venue_view: &venue_view,
         venue_orders: &venue_orders,
         venue_executions: &venue_executions,
         venue_accounting: &venue_accounting,
-        engine_in_flight: stopped.as_ref().map(|(_, ids, _)| ids.as_slice()),
-        engine_account: stopped.as_ref().map(|(_, _, account)| account),
+        engine_in_flight: stopped.as_ref().map(|end| end.in_flight.as_slice()),
+        engine_account: stopped.as_ref().map(|end| &end.account),
         stopped_by: stopped_by.as_deref(),
         engine_error: engine_error.as_deref(),
         ledger_net_usdt,
+        published: &world.published,
+        strategy_health: stopped.as_ref().map(|end| end.strategy_health.as_slice()),
+        judged: &judged,
+        long: world.producer.long.as_ref().map(|b| b.id),
+        carry: world.producer.carry.as_ref().map(|b| b.id),
+        tape_end_ms: world.tape_end_ms,
     });
     let report = SimReport {
         callback_execution: "embedded",
         seed: world.opts.seed,
         seconds: world.opts.seconds,
         symbols: world.opts.symbols,
+        strategies: world.opts.strategies.as_str(),
         crashes_injected: deaths_done as u32,
         restarts,
         restart_reasons,
@@ -560,6 +718,16 @@ pub async fn run_seed(opts: SimOptions) -> Result<SimReport, EngineError> {
         notes,
         wal_records: records.len(),
         wal_sha256,
+        signals_published: world.published.len() as u64,
+        signals_consumed: counts.consumed,
+        signals_rejected: counts.rejected,
+        strategy_errors: stopped
+            .as_ref()
+            .map(|end| end.strategy_health.clone())
+            .unwrap_or_default(),
+        orders_by_sleeve: by_sleeve.orders,
+        fills_by_sleeve: by_sleeve.fills,
+        fee_snapshot_sha256: world.fee_snapshot_sha256.clone(),
     };
     if !keep {
         let _ = std::fs::remove_dir_all(&world.paths.dir);
@@ -613,6 +781,27 @@ impl SweepReport {
                 let faults: Vec<String> =
                     run.faults.iter().map(|(k, v)| format!("{k}={v}")).collect();
                 let _ = writeln!(out, "    injected: {}", faults.join(" "));
+            }
+            if run.signals_published > 0 {
+                let sleeves: Vec<String> = run
+                    .orders_by_sleeve
+                    .iter()
+                    .map(|(name, orders)| {
+                        format!(
+                            "{name} orders={orders} fills={}",
+                            run.fills_by_sleeve.get(name).copied().unwrap_or(0)
+                        )
+                    })
+                    .collect();
+                let _ = writeln!(
+                    out,
+                    "    {}: signals published={} consumed={} rejected={}  {}",
+                    run.strategies,
+                    run.signals_published,
+                    run.signals_consumed,
+                    run.signals_rejected,
+                    sleeves.join("  ")
+                );
             }
         }
         for replay in &self.replays {

@@ -432,7 +432,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     "leverage {want} was not confirmed ({error}); account refresh required"
                 ))
             }
-            Ok(()) if self.books.account != account => {
+            Ok(()) if account_reading_changed(&account, &self.books.account) => {
                 Some("account state changed during leverage administration".into())
             }
             Ok(()) if held_needs_readback => {

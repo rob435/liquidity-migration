@@ -297,6 +297,17 @@ pub(crate) fn named_strategy_errors(
 ///
 /// A symbol still open keeps its entry: its leverage cannot be changed at the
 /// venue while a position is on it.
+/// Whether two readings say different things about the account.
+///
+/// `observed_ns` is when the reading was taken, not part of what it says: a
+/// refresh that re-reads the same state moves only that stamp. An opening
+/// whose leverage was being administered must not be refused for it.
+pub(crate) fn account_reading_changed(before: &AccountView, now: &AccountView) -> bool {
+    let mut before = before.clone();
+    before.observed_ns = now.observed_ns;
+    &before != now
+}
+
 pub(crate) fn forget_leverage_where_flat(
     leverage_at: &mut BTreeMap<SymbolId, f64>,
     positions: &[engine_types::risk::PositionView],
@@ -431,4 +442,44 @@ pub(super) fn validate_strategy_checkpoint(
         }
     }
     strategy.validate_checkpoint(checkpoint)
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+
+    fn view(equity: f64, observed_ns: u64) -> AccountView {
+        AccountView {
+            exact_amounts: None,
+            equity_usdt: equity,
+            available_usdt: equity,
+            positions: Vec::new(),
+            observed_ns,
+        }
+    }
+
+    #[test]
+    fn a_refresh_of_the_same_state_is_not_an_account_change() {
+        assert!(!account_reading_changed(
+            &view(500.0, 1_000),
+            &view(500.0, 2_500)
+        ));
+        assert!(account_reading_changed(
+            &view(500.0, 1_000),
+            &view(499.0, 1_000)
+        ));
+        let mut with_position = view(500.0, 1_000);
+        with_position.positions.push(engine_types::PositionView {
+            exact_amounts: None,
+            symbol: SymbolId(0),
+            side: engine_types::Side::Buy,
+            qty: 0.1,
+            entry_px: 100.0,
+            stop_attached: true,
+            stop_px: 90.0,
+            exact_stop_px: None,
+            leverage: Some(5.0),
+        });
+        assert!(account_reading_changed(&view(500.0, 1_000), &with_position));
+    }
 }

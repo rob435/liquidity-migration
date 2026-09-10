@@ -1674,6 +1674,20 @@ impl VenueGateway for SimVenueGateway {
         result
     }
 
+    /// The venue models binary64 stops, so the exact trigger is projected onto
+    /// the same slot. Without this a native sleeve's position stop cannot be
+    /// restored after a boot, and the engine latches shut on a naked position.
+    async fn set_stop_exact(
+        &mut self,
+        symbol: SymbolId,
+        terms: &engine_types::order_terms::ExactStopTerms,
+    ) -> Result<(), VenueError> {
+        let trigger_px = terms.trigger_price.to_f64().map_err(|error| {
+            VenueError::BadRequest(format!("exact stop trigger is unreadable: {error}"))
+        })?;
+        self.set_stop(symbol, trigger_px).await
+    }
+
     fn add_symbol(&mut self, symbol: &str) -> Option<SymbolId> {
         Some(self.lock().add_symbol(symbol))
     }

@@ -27,12 +27,22 @@ engine — the execution loop
 
   engine sim [--seed N] [--seeds K] [--seconds S] [--symbols M] [--crashes C]
              [--faults none|light|heavy] [--twice] [--out DIR] [--keep] [--report PATH]
+             [--strategies quoter|demo|mainnet|mexc|hyperliquid] [--hours H]
+             [--tape-step-s S] [--capital USDT] [--shock on|off] [--pump P] [--gate]
       Run the loop on a seeded synthetic market against the simulated venue,
       with venue replies lost, private updates dropped and duplicated, feed
-      hiccups, and C process deaths with a boot from the log after each. At
-      the end the venue's books, the log and the engine are checked against
-      each other. One seed is one run, byte for byte; --twice proves it.
-      Exit status is non-zero when any check fails; the seed reproduces it.
+      hiccups, signal rows late, repeated and withheld, and C process deaths
+      with a boot from the log after each. At the end the venue's books, the
+      log and the engine are checked against each other. One seed is one run,
+      byte for byte; --twice proves it. Exit status is non-zero when any check
+      fails; the seed reproduces it.
+      --strategies quoter (the default) runs one market maker and no producer.
+      A realm name runs that deployed template's own generated strategy
+      blocks, on the fleet's operational profile, against a synthetic signal
+      producer on the worker's grids: 12 hours, three symbols, a 10-second
+      tape and 500 USDT unless --hours, --symbols, --tape-step-s or --capital
+      say otherwise. --pump is the chance per symbol and UTC day that the
+      features carry an entry trigger.
 
   engine bench [--events N] [--rate PER_SEC] [--every N] [--symbols A,B]
                [--wal PATH] [--fills] [--venue-delay-ms MS]

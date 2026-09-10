@@ -503,13 +503,49 @@ pub(super) fn parse_sim_options(
     let seed: u64 = value(args, "--seed")
         .unwrap_or_else(|| "1".into())
         .parse()?;
-    let mut base = engine_tools::sim::SimOptions::new(seed, dir);
+    let mut base = match value(args, "--strategies") {
+        None => engine_tools::sim::SimOptions::new(seed, dir),
+        Some(name) => match engine_tools::sim::SimStrategies::parse(&name) {
+            Some(engine_tools::sim::SimStrategies::Quoter) => {
+                engine_tools::sim::SimOptions::new(seed, dir)
+            }
+            Some(engine_tools::sim::SimStrategies::Realm(realm)) => {
+                engine_tools::sim::SimOptions::realm(seed, dir, realm)
+            }
+            None => {
+                return Err(format!(
+                    "--strategies takes quoter, demo, mainnet, mexc or hyperliquid, not {name:?}"
+                )
+                .into())
+            }
+        },
+    };
+    if let Some(v) = value(args, "--hours") {
+        base.hours(v.parse()?);
+    }
     if let Some(v) = value(args, "--seconds") {
         base.seconds = v.parse()?;
     }
     if let Some(v) = value(args, "--symbols") {
         base.symbols = v.parse()?;
     }
+    if let Some(v) = value(args, "--tape-step-s") {
+        base.tape_step_s = v.parse()?;
+    }
+    if let Some(v) = value(args, "--capital") {
+        base.capital = v.parse()?;
+    }
+    if let Some(v) = value(args, "--shock") {
+        base.shock = match v.as_str() {
+            "on" => true,
+            "off" => false,
+            other => return Err(format!("--shock takes on or off, not {other:?}").into()),
+        };
+    }
+    if let Some(v) = value(args, "--pump") {
+        base.pump_probability = v.parse()?;
+    }
+    base.gate = args.iter().any(|a| a == "--gate");
     if let Some(v) = value(args, "--crashes") {
         base.crashes = v.parse()?;
     }

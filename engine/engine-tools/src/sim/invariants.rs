@@ -4,10 +4,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use engine_types::{
-    AccountView, OrderUpdate, Side, SymbolId, VenueExecution, VenueOrder, WalRecord,
+    AccountView, OrderUpdate, Side, SignalObservation, Strategy, StrategyId, SymbolId,
+    VenueExecution, VenueOrder, WalRecord,
 };
 
 use crate::backtest::venue::Accounting;
+
+/// A batch published this close to the end of the tape has no time left to
+/// become a decision: LONG's own entry window is `book_validity_ms` less
+/// `engine_entry_cutoff_ms`, 45 minutes in every rendered config.
+const ENTRY_WINDOW_MS: i64 = 45 * 60_000;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct Check {
@@ -57,6 +63,75 @@ pub struct Evidence<'a> {
     /// Σ `net_usdt` over the round trips the log closes, as `engine fills`
     /// reads them; `None` when it closes none.
     pub ledger_net_usdt: Option<f64>,
+    /// Every row the producer published, whether or not it was delivered.
+    pub published: &'a [SignalObservation],
+    /// The sleeves' own health when the loop stopped; `None` when it did not.
+    pub strategy_health: Option<&'a [(String, String)]>,
+    /// The sleeves rebuilt from the config the run booted with, in slot order.
+    pub judged: &'a [(StrategyId, String, Box<dyn Strategy>)],
+    pub long: Option<StrategyId>,
+    pub carry: Option<StrategyId>,
+    pub tape_end_ms: i64,
+}
+
+/// How many rows the log settled, either way.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SignalCounts {
+    pub observed: u64,
+    pub consumed: u64,
+    pub rejected: u64,
+}
+
+pub fn signal_counts(records: &[WalRecord]) -> SignalCounts {
+    let mut counts = SignalCounts::default();
+    for record in records {
+        match record {
+            WalRecord::SignalObservation { .. } => counts.observed += 1,
+            WalRecord::SignalObservationConsumed { .. } => counts.consumed += 1,
+            WalRecord::SignalObservationRejected { .. } => counts.rejected += 1,
+            _ => {}
+        }
+    }
+    counts
+}
+
+/// Orders and fills charged to each configured sleeve name.
+#[derive(Clone, Debug, Default)]
+pub struct BySleeve {
+    pub orders: BTreeMap<String, u64>,
+    pub fills: BTreeMap<String, u64>,
+}
+
+pub fn by_sleeve(records: &[WalRecord], sleeves: &[String]) -> BySleeve {
+    let mut out = BySleeve::default();
+    let mut owner: BTreeMap<&str, usize> = BTreeMap::new();
+    for record in records {
+        match record {
+            WalRecord::OrderSent { request, .. } => {
+                let slot = request.strategy.0 as usize;
+                owner.insert(request.client_order_id.as_str(), slot);
+                if let Some(name) = sleeves.get(slot) {
+                    *out.orders.entry(name.clone()).or_insert(0) += 1;
+                }
+            }
+            WalRecord::OrderUpdate {
+                update:
+                    OrderUpdate::Fill {
+                        client_order_id, ..
+                    },
+                ..
+            } => {
+                if let Some(name) = owner
+                    .get(client_order_id.as_str())
+                    .and_then(|slot| sleeves.get(*slot))
+                {
+                    *out.fills.entry(name.clone()).or_insert(0) += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 pub fn all(e: &Evidence<'_>) -> Vec<Check> {
@@ -69,6 +144,12 @@ pub fn all(e: &Evidence<'_>) -> Vec<Check> {
         cash_flow_agrees_when_flat(e),
         ledger_agrees_when_flat(e),
         numbers_finite(e),
+        strategies_healthy(e),
+        signals_consumed_exactly_once(e),
+        checkpoint_identity_holds(e),
+        sleeve_attribution_agrees(e),
+        no_opening_before_readiness(e),
+        working_entries_settled(e),
     ]
 }
 
@@ -391,4 +472,295 @@ fn numbers_finite(e: &Evidence<'_>) -> Check {
         }
     }
     Check::judge("numbers_finite", &problems, "every figure is finite")
+}
+
+/// No sleeve is reporting a health error, and no callback fault is latched.
+///
+/// A LONG or CARRY reducer that refuses one of its own producer's rows sets
+/// exactly this, so a producer whose envelope drifts from the rendered config
+/// fails here rather than quietly trading nothing.
+fn strategies_healthy(e: &Evidence<'_>) -> Check {
+    let name = "strategies_healthy";
+    let Some(health) = e.strategy_health else {
+        return Check::pass(name, "not judged: the engine did not stop cleanly");
+    };
+    let mut problems: Vec<String> = health
+        .iter()
+        .map(|(sleeve, error)| format!("{sleeve}: {error}"))
+        .collect();
+    // Read from the note's text until workstream C's typed `intent_refused`
+    // record lands; the reason is the log's only statement of it today.
+    if let Some(text) = e.records.iter().find_map(|record| match record {
+        WalRecord::Note { source, text }
+            if source == "engine" && text.contains("strategy_callback_unavailable") =>
+        {
+            Some(text.clone())
+        }
+        _ => None,
+    }) {
+        problems.push(format!("a callback fault reached the log: {text}"));
+    }
+    Check::judge(
+        name,
+        &problems,
+        format!("{} sleeves, none reporting an error", e.judged.len()),
+    )
+}
+
+/// Every row the producer published in time to matter reached the log once and
+/// was settled once, and no gap the engine recorded is still open.
+fn signals_consumed_exactly_once(e: &Evidence<'_>) -> Check {
+    let name = "signals_consumed_exactly_once";
+    if e.published.is_empty() {
+        return Check::pass(name, "not judged: no producer");
+    }
+    let mut observed: BTreeMap<(&str, u64), usize> = BTreeMap::new();
+    let mut settled: BTreeMap<(&str, u64), usize> = BTreeMap::new();
+    let mut last_gap: BTreeMap<&str, u64> = BTreeMap::new();
+    for record in e.records {
+        match record {
+            WalRecord::SignalObservation { observation, .. } => {
+                *observed
+                    .entry((observation.source.as_str(), observation.sequence))
+                    .or_insert(0) += 1;
+            }
+            WalRecord::SignalObservationConsumed {
+                source, sequence, ..
+            }
+            | WalRecord::SignalObservationRejected {
+                source, sequence, ..
+            } => {
+                *settled.entry((source.as_str(), *sequence)).or_insert(0) += 1;
+            }
+            WalRecord::SignalGapRecorded { gap, .. } => {
+                last_gap.insert(gap.source.as_str(), gap.next_sequence);
+            }
+            _ => {}
+        }
+    }
+    let deadline = e.tape_end_ms - ENTRY_WINDOW_MS;
+    let mut due = 0usize;
+    let mut problems = Vec::new();
+    for row in e
+        .published
+        .iter()
+        .filter(|row| row.available_wall_ts_ms <= deadline)
+    {
+        due += 1;
+        let key = (row.source.as_str(), row.sequence);
+        match observed.get(&key).copied().unwrap_or(0) {
+            1 => {}
+            0 => problems.push(format!("{} {} never reached the log", key.0, key.1)),
+            n => problems.push(format!("{} {} is in the log {n} times", key.0, key.1)),
+        }
+        match settled.get(&key).copied().unwrap_or(0) {
+            1 => {}
+            0 => problems.push(format!("{} {} was never settled", key.0, key.1)),
+            n => problems.push(format!("{} {} was settled {n} times", key.0, key.1)),
+        }
+    }
+    for key in settled.keys() {
+        if !observed.contains_key(key) {
+            problems.push(format!(
+                "{} {} was settled without ever being recorded",
+                key.0, key.1
+            ));
+        }
+    }
+    for (source, next_sequence) in &last_gap {
+        if !observed.contains_key(&(source, *next_sequence)) {
+            problems.push(format!(
+                "{source} is still missing {next_sequence} at the end"
+            ));
+        }
+    }
+    Check::judge(
+        name,
+        &problems,
+        format!(
+            "{due} of {} published rows were due; {} observed, {} settled, {} gaps recorded",
+            e.published.len(),
+            observed.len(),
+            settled.len(),
+            last_gap.len()
+        ),
+    )
+}
+
+/// The newest durable state each sleeve wrote is state that sleeve accepts,
+/// and no boot wrote its initial checkpoint over what an earlier one had.
+fn checkpoint_identity_holds(e: &Evidence<'_>) -> Check {
+    let name = "checkpoint_identity_holds";
+    if e.judged.is_empty() {
+        return Check::pass(name, "not judged: no strategies");
+    }
+    let mut newest: BTreeMap<StrategyId, &engine_types::StrategyCheckpoint> = BTreeMap::new();
+    let mut initial_writes: BTreeMap<StrategyId, usize> = BTreeMap::new();
+    let initial: BTreeMap<StrategyId, Option<engine_types::StrategyCheckpoint>> = e
+        .judged
+        .iter()
+        .map(|(id, _, strategy)| (*id, strategy.initial_checkpoint()))
+        .collect();
+    for record in e.records {
+        let WalRecord::StrategyGlobalCheckpoint {
+            strategy,
+            checkpoint,
+            ..
+        } = record
+        else {
+            continue;
+        };
+        newest.insert(*strategy, checkpoint);
+        if initial
+            .get(strategy)
+            .and_then(Option::as_ref)
+            .is_some_and(|first| first == checkpoint)
+        {
+            *initial_writes.entry(*strategy).or_insert(0) += 1;
+        }
+    }
+    let mut problems = Vec::new();
+    for (id, sleeve, strategy) in e.judged {
+        if let Some(checkpoint) = newest.get(id) {
+            if let Err(error) = strategy.validate_checkpoint(checkpoint) {
+                problems.push(format!("{sleeve}: {error}"));
+            }
+            if let Some(identity) = strategy.checkpoint_identity() {
+                if identity.decision_fingerprint != checkpoint.decision_fingerprint {
+                    problems.push(format!(
+                        "{sleeve}: the log's newest checkpoint is fingerprinted {} against the block's {}",
+                        checkpoint.decision_fingerprint, identity.decision_fingerprint
+                    ));
+                }
+            }
+        }
+        let writes = initial_writes.get(id).copied().unwrap_or(0);
+        if writes > 1 {
+            problems.push(format!(
+                "{sleeve}: a boot wrote the initial checkpoint again ({writes} times in the log)"
+            ));
+        }
+    }
+    Check::judge(
+        name,
+        &problems,
+        format!("{} sleeve checkpoints validated", newest.len()),
+    )
+}
+
+/// Per symbol, the sleeves' own inventories add up to the venue's position:
+/// `positions_agree` for a log that has more than one owner in it.
+fn sleeve_attribution_agrees(e: &Evidence<'_>) -> Check {
+    let name = "sleeve_attribution_agrees";
+    let attribution = match engine_core::attribution::Attribution::try_from_records(e.records) {
+        Ok(attribution) => attribution,
+        Err(error) => {
+            return Check::fail(
+                name,
+                format!("the log's attribution is unreadable: {error}"),
+            )
+        }
+    };
+    let mut owned: BTreeMap<SymbolId, f64> = BTreeMap::new();
+    let mut sleeves: BTreeSet<StrategyId> = BTreeSet::new();
+    for (strategy, symbol, signed_qty) in attribution.rows() {
+        sleeves.insert(strategy);
+        *owned.entry(symbol).or_insert(0.0) += signed_qty;
+    }
+    let mut venue: BTreeMap<SymbolId, f64> = BTreeMap::new();
+    for p in &e.venue_view.positions {
+        *venue.entry(p.symbol).or_insert(0.0) += signed(p.side, p.qty);
+    }
+    let symbols: BTreeSet<SymbolId> = owned.keys().chain(venue.keys()).copied().collect();
+    let mut problems = Vec::new();
+    for symbol in &symbols {
+        let sleeve_qty = owned.get(symbol).copied().unwrap_or(0.0);
+        let venue_qty = venue.get(symbol).copied().unwrap_or(0.0);
+        if (sleeve_qty - venue_qty).abs() > 1e-9 {
+            problems.push(format!(
+                "symbol {}: sleeves {sleeve_qty} venue {venue_qty}",
+                symbol.0
+            ));
+        }
+    }
+    Check::judge(
+        name,
+        &problems,
+        format!("{} sleeves over {} symbols", sleeves.len(), symbols.len()),
+    )
+}
+
+/// LONG sent nothing before it had durably taken one of its producer's rows.
+fn no_opening_before_readiness(e: &Evidence<'_>) -> Check {
+    let name = "no_opening_before_readiness";
+    let Some(long) = e.long else {
+        return Check::pass(name, "not judged: no producer");
+    };
+    let mut consumed = false;
+    let mut problems = Vec::new();
+    for record in e.records {
+        match record {
+            WalRecord::SignalObservationConsumed { source, .. }
+                if engine_types::ManagedSignalSource::parse(source)
+                    .is_some_and(|id| id.lane == engine_types::SignalLane::Long) =>
+            {
+                consumed = true;
+            }
+            WalRecord::OrderSent { request, .. }
+                if request.strategy == long && !consumed && !request.reduce_only =>
+            {
+                problems.push(format!(
+                    "{} left before LONG had consumed a row",
+                    request.client_order_id
+                ));
+            }
+            _ => {}
+        }
+    }
+    Check::judge(
+        name,
+        &problems,
+        if consumed {
+            "LONG consumed a row before it sent anything".to_string()
+        } else {
+            "LONG never consumed a row and never sent one".to_string()
+        },
+    )
+}
+
+/// Every worked LONG entry ended: filled, cancelled or refused in the log, or
+/// still in the engine's own in-flight ledger when the tape ran out.
+fn working_entries_settled(e: &Evidence<'_>) -> Check {
+    let name = "working_entries_settled";
+    let Some(long) = e.long else {
+        return Check::pass(name, "not judged: no producer");
+    };
+    let Some(in_flight) = e.engine_in_flight else {
+        return Check::pass(name, "not judged: the engine did not stop cleanly");
+    };
+    let mut ledger = engine_core::inflight::LedgerOfOrders::default();
+    for record in e.records {
+        if let Err(error) = ledger.try_apply(record) {
+            return Check::fail(
+                name,
+                format!("the log's order ledger is unreadable: {error}"),
+            );
+        }
+    }
+    let known: BTreeSet<&str> = in_flight.iter().map(String::as_str).collect();
+    let mut worked = 0usize;
+    let mut problems = Vec::new();
+    for (id, order) in &ledger.orders {
+        if order.request.strategy != long || order.request.reduce_only || order.entry_work.is_none()
+        {
+            continue;
+        }
+        worked += 1;
+        if order.ending.is_none() && !known.contains(id.as_str()) {
+            problems.push(format!(
+                "{id} is neither terminal in the log nor in flight in the engine"
+            ));
+        }
+    }
+    Check::judge(name, &problems, format!("{worked} worked LONG entries"))
 }

@@ -1,5 +1,6 @@
-//! Seeded faults on the three boundaries the engine has with the world:
-//! the venue's command replies, the private stream, and the market feed.
+//! Seeded faults on the four boundaries the engine has with the world:
+//! the venue's command replies, the private stream, the market feed, and the
+//! signal spool.
 //!
 //! Each wrapper draws exactly one number per call, from its own stream, and
 //! decides before it awaits anything. That is what keeps two runs of one
@@ -18,7 +19,8 @@ use engine_types::numeric::ExactInstrumentSpec;
 use engine_types::orders::{OrderLookup, OrderLookupClient};
 use engine_types::{
     AccountIdentity, AccountInventory, AccountView, AmendSpec, Feed, FeedError, InstrumentRule,
-    MarketEvent, MarketFeed, OrderAck, OrderFeed, OrderRequest, OrderUpdate, Symbol, SymbolId,
+    MarketEvent, MarketFeed, OrderAck, OrderFeed, OrderRequest, OrderUpdate, SignalError,
+    SignalFeed, SignalFeedEvent, SignalGapRequest, SignalObservation, StrategyId, Symbol, SymbolId,
     VenueCaps, VenueError, VenueGateway, VenueMutationTiming, VenueOrder,
 };
 
@@ -44,6 +46,9 @@ pub struct FaultRates {
     pub private_hiccup: f64,
     pub market_hiccup: f64,
     pub market_reset: f64,
+    pub signal_delay: f64,
+    pub signal_duplicate: f64,
+    pub signal_withhold: f64,
 }
 
 impl FaultRates {
@@ -59,6 +64,9 @@ impl FaultRates {
         private_hiccup: 0.0,
         market_hiccup: 0.0,
         market_reset: 0.0,
+        signal_delay: 0.0,
+        signal_duplicate: 0.0,
+        signal_withhold: 0.0,
     };
 
     /// A bad day at a real venue: one command in fifty goes wrong somehow.
@@ -74,6 +82,9 @@ impl FaultRates {
         private_hiccup: 0.005,
         market_hiccup: 0.002,
         market_reset: 0.001,
+        signal_delay: 0.05,
+        signal_duplicate: 0.02,
+        signal_withhold: 0.01,
     };
 
     /// An outage in progress.
@@ -89,6 +100,9 @@ impl FaultRates {
         private_hiccup: 0.02,
         market_hiccup: 0.01,
         market_reset: 0.005,
+        signal_delay: 0.15,
+        signal_duplicate: 0.05,
+        signal_withhold: 0.03,
     };
 
     pub fn named(name: &str) -> Option<FaultRates> {
@@ -684,5 +698,248 @@ impl<M: MarketFeed> MarketFeed for FaultyMarketFeed<M> {
 
     fn retire(&mut self, symbol: &str, feed: Feed) -> bool {
         self.inner.retire(symbol, feed)
+    }
+}
+
+// ----------------------------------------------------------- signal spool
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SignalFault {
+    None,
+    /// Delivered later than the worker published it.
+    Delay,
+    /// Delivered twice: at-least-once delivery from an ordered spool.
+    Duplicate,
+    /// Held back so the engine sees a hole in the source's sequence.
+    Withhold,
+}
+
+/// A row the wrapper took out of the spool and owes the engine. It lives
+/// outside the wrapper because the spool's durable bytes outlive the process
+/// reading them: a death must not lose a row the worker already published.
+#[derive(Clone, Debug)]
+pub struct Parked {
+    due_ns: u64,
+    row: SignalObservation,
+    /// A withheld row waits for a later row of its own source to be
+    /// delivered, so the engine sees the hole before the row that fills it.
+    holds_for_successor: bool,
+}
+
+pub type SharedParkedSignals = Arc<Mutex<Vec<Parked>>>;
+
+pub fn shared_parked_signals() -> SharedParkedSignals {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+/// A signal spool whose rows arrive late, twice, or out of order.
+///
+/// The wrapper borrows the durable feed rather than owning it, so one spool
+/// serves every boot of one seed. A row it takes for itself is acknowledged
+/// out of the inner feed on the spot and parked: the engine's acknowledgement
+/// of that delivery is the wrapper's, not the spool's.
+pub struct FaultySignalFeed<'a, F> {
+    inner: &'a mut F,
+    rng: SharedRng,
+    rates: FaultRates,
+    scheduler: Scheduler,
+    log: SharedFaultLog,
+    parked: SharedParkedSignals,
+    delay_by: Duration,
+    /// A copy to deliver a second time.
+    repeat: Option<SignalObservation>,
+    /// The last delivery came from the wrapper's own hand.
+    owned: bool,
+}
+
+impl<'a, F: SignalFeed> FaultySignalFeed<'a, F> {
+    pub fn new(
+        inner: &'a mut F,
+        rates: FaultRates,
+        rng: SharedRng,
+        scheduler: Scheduler,
+        log: SharedFaultLog,
+        parked: SharedParkedSignals,
+        delay_by: Duration,
+    ) -> Self {
+        FaultySignalFeed {
+            inner,
+            rng,
+            rates,
+            scheduler,
+            log,
+            parked,
+            delay_by,
+            repeat: None,
+            owned: false,
+        }
+    }
+
+    fn roll(&self) -> SignalFault {
+        let r = &self.rates;
+        draw(
+            &self.rng,
+            &[
+                (r.signal_delay, SignalFault::Delay),
+                (r.signal_duplicate, SignalFault::Duplicate),
+                (r.signal_withhold, SignalFault::Withhold),
+            ],
+            SignalFault::None,
+        )
+    }
+
+    fn park(&self, row: SignalObservation, due_ns: u64, holds_for_successor: bool) {
+        let mut parked = lock(&self.parked);
+        parked.push(Parked {
+            due_ns,
+            row,
+            holds_for_successor,
+        });
+        parked.sort_by(|a, b| {
+            a.due_ns
+                .cmp(&b.due_ns)
+                .then_with(|| a.row.source.cmp(&b.row.source))
+                .then_with(|| a.row.sequence.cmp(&b.row.sequence))
+        });
+    }
+
+    fn take_due(&self, now_ns: u64) -> Option<SignalObservation> {
+        let mut parked = lock(&self.parked);
+        let index = parked
+            .iter()
+            .position(|row| !row.holds_for_successor && row.due_ns <= now_ns)?;
+        Some(parked.remove(index).row)
+    }
+
+    fn earliest_due(&self) -> Option<u64> {
+        lock(&self.parked)
+            .iter()
+            .find(|row| !row.holds_for_successor)
+            .map(|row| row.due_ns)
+    }
+
+    /// A later row of `source` has been delivered: whatever was withheld from
+    /// that source is now owed to the engine.
+    fn release_successors(&self, source: &str, now_ns: u64) {
+        for parked in lock(&self.parked).iter_mut() {
+            if parked.holds_for_successor && parked.row.source == source {
+                parked.holds_for_successor = false;
+                parked.due_ns = now_ns;
+            }
+        }
+    }
+}
+
+impl<F: SignalFeed> SignalFeed for FaultySignalFeed<'_, F> {
+    fn set_sleeve_keys(
+        &mut self,
+        keys: Vec<engine_types::identity::SleeveKey>,
+    ) -> Result<(), SignalError> {
+        self.inner.set_sleeve_keys(keys)
+    }
+
+    fn request_readiness(&mut self) -> Result<(), SignalError> {
+        self.inner.request_readiness()
+    }
+
+    fn request_lifecycle(
+        &mut self,
+        producers: Vec<engine_types::SignalProducerLifecycle>,
+        legacy_sources: Vec<engine_types::SignalSourceFrontier>,
+    ) -> Result<(), SignalError> {
+        self.inner.request_lifecycle(producers, legacy_sources)
+    }
+
+    async fn next_event(&mut self) -> Result<SignalFeedEvent, SignalError> {
+        loop {
+            if let Some(row) = self.repeat.take() {
+                self.owned = true;
+                return Ok(SignalFeedEvent::Observation(row));
+            }
+            if let Some(row) = self.take_due(self.scheduler.now_ns()) {
+                self.owned = true;
+                return Ok(SignalFeedEvent::Observation(row));
+            }
+            // Sequential, never a `select!`: a wait raced against the inner
+            // feed resolves in whichever order the two tasks happen to be
+            // polled, and two runs of one seed then write different logs.
+            if let Some(due) = self.earliest_due() {
+                self.scheduler.sleep_until(due, WaiterKind::Signal).await;
+                continue;
+            }
+            let event = self.inner.next_event().await?;
+            let SignalFeedEvent::Observation(row) = event else {
+                return Ok(event);
+            };
+            self.release_successors(&row.source, self.scheduler.now_ns());
+            // Decided before anything is awaited, and what the wrapper keeps
+            // is parked where a death cannot lose it.
+            match self.roll() {
+                SignalFault::None => {
+                    self.owned = false;
+                    return Ok(SignalFeedEvent::Observation(row));
+                }
+                SignalFault::Delay => {
+                    FaultLog::note(&self.log, "signal.delay");
+                    let steps = 1 + lock(&self.rng).below(6);
+                    let due = self
+                        .scheduler
+                        .now_ns()
+                        .saturating_add(self.delay_by.as_nanos() as u64 * steps);
+                    self.inner.acknowledge_last()?;
+                    self.park(row, due, false);
+                }
+                SignalFault::Duplicate => {
+                    FaultLog::note(&self.log, "signal.duplicate");
+                    self.repeat = Some(row.clone());
+                    self.owned = false;
+                    return Ok(SignalFeedEvent::Observation(row));
+                }
+                SignalFault::Withhold => {
+                    FaultLog::note(&self.log, "signal.withhold");
+                    self.inner.acknowledge_last()?;
+                    self.park(row, self.scheduler.now_ns(), true);
+                }
+            }
+        }
+    }
+
+    fn set_gap_requests(
+        &mut self,
+        gaps: &[SignalGapRequest],
+        blocked_destinations: &[StrategyId],
+    ) -> Result<(), SignalError> {
+        self.inner.set_gap_requests(gaps, blocked_destinations)
+    }
+
+    fn acknowledge_last(&mut self) -> Result<(), SignalError> {
+        if std::mem::take(&mut self.owned) {
+            return Ok(());
+        }
+        self.inner.acknowledge_last()
+    }
+
+    fn defer_last(&mut self, observation: SignalObservation) -> Result<(), SignalError> {
+        if std::mem::take(&mut self.owned) {
+            // The engine could not take it yet. Park it a delay out rather
+            // than now, so a destination that stays blocked is re-offered on
+            // a later poll instead of spinning against this one.
+            let due = self
+                .scheduler
+                .now_ns()
+                .saturating_add(self.delay_by.as_nanos() as u64);
+            self.park(observation, due, false);
+            return Ok(());
+        }
+        self.inner.defer_last(observation)
+    }
+
+    async fn next_observation(&mut self) -> Result<SignalObservation, SignalError> {
+        match self.next_event().await? {
+            SignalFeedEvent::Observation(row) => Ok(row),
+            _ => Err(SignalError::Source(
+                "the simulated spool advertised readiness where a row was expected".into(),
+            )),
+        }
     }
 }
