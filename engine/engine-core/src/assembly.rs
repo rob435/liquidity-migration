@@ -11,9 +11,10 @@ use engine_marketdata::MarketFeeds;
 use engine_risk::{EnvelopeConfig, Kernel, KernelConfig};
 use engine_strategies::build_strategy;
 use engine_types::{
-    AccountIdentity, Strategy, StrategyId, Subscription, Symbol, VenueError, WalError, WalRecord,
+    AccountIdentity, Capability, Strategy, StrategyId, Subscription, Symbol, VenueError, WalError,
+    WalRecord,
 };
-use engine_venue::{InventoryProbe, OrderFeeds, Venue, VenueName};
+use engine_venue::{Evidence, InventoryProbe, OrderFeeds, Venue, VenueName};
 use engine_wal::WalWriter;
 use serde::Deserialize;
 
@@ -358,6 +359,105 @@ pub fn strategies_for_registry(
         )?);
     }
     Ok(strategies)
+}
+
+/// What one configured sleeve needs of the chosen realm, and how much of that
+/// the realm has been seen doing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SleeveCompatibility {
+    pub sleeve: String,
+    pub plug: String,
+    pub required: Vec<Capability>,
+    /// Required capabilities the realm holds no current receipt for. Accepted,
+    /// and named in the boot log: this is what makes the run a forward test.
+    pub unproven: Vec<Capability>,
+}
+
+/// Every configured sleeve against the chosen realm's capability row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompatibilityPlan {
+    pub venue: VenueName,
+    pub sleeves: Vec<SleeveCompatibility>,
+}
+
+/// Sleeves whose actions reach for something the chosen adapter does not do.
+///
+/// Every refusal is collected before the error is returned: an operator who
+/// pointed a config at the wrong realm gets the whole list, not the first
+/// sleeve of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompatibilityError {
+    pub venue: VenueName,
+    pub refusals: Vec<(String, String, Capability)>,
+}
+
+impl std::fmt::Display for CompatibilityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut first = true;
+        for (sleeve, plug, capability) in &self.refusals {
+            if !first {
+                f.write_str("\n")?;
+            }
+            first = false;
+            write!(
+                f,
+                "sleeve \"{sleeve}\" ({plug}) requires {capability}, which {} does not do",
+                self.venue
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl Error for CompatibilityError {}
+
+/// Check every configured sleeve's execution requirements against the realm's
+/// capability row.
+///
+/// `sleeves` is index-aligned with `strategies`, the way
+/// [`strategies_for_registry`] builds both from one identity plan.
+///
+/// [`Evidence::Unknown`] is the only refusal: it means the adapter does not do
+/// the thing at all, so the sleeve's action would die inside the engine every
+/// time it was tried. `Implemented` and a stale receipt are accepted and
+/// reported as unproven — the funded alt realms run as the owner's forward
+/// test, and refusing them here would be a second, undirected run gate.
+pub fn compatibility(
+    venue: VenueName,
+    strategies: &[Box<dyn Strategy>],
+    sleeves: &[String],
+) -> Result<CompatibilityPlan, CompatibilityError> {
+    let mut plan = CompatibilityPlan {
+        venue,
+        sleeves: Vec::with_capacity(strategies.len()),
+    };
+    let mut refusals = Vec::new();
+    for (slot, strategy) in strategies.iter().enumerate() {
+        let plug = strategy.name().to_string();
+        let sleeve = sleeves.get(slot).cloned().unwrap_or_else(|| plug.clone());
+        let required = strategy.execution_requirements();
+        let mut unproven = Vec::new();
+        for capability in &required {
+            match venue.capability(*capability) {
+                Evidence::Unknown => {
+                    refusals.push((sleeve.clone(), plug.clone(), *capability));
+                }
+                evidence if !evidence.qualifies() => unproven.push(*capability),
+                _ => {}
+            }
+        }
+        plan.sleeves.push(SleeveCompatibility {
+            sleeve,
+            plug,
+            required,
+            unproven,
+        });
+    }
+    if refusals.is_empty() {
+        Ok(plan)
+    } else {
+        Err(CompatibilityError { venue, refusals })
+    }
 }
 
 /// A sleeve name belongs to one block.
@@ -717,9 +817,25 @@ mod deployed_templates {
             .replace(
                 "/etc/liquidity-migration/signal-worker-demo-source/operational-profile.json",
                 &profile_path,
+            )
+            .replace(
+                "/etc/liquidity-migration/signal-worker-mexc-source/operational-profile.json",
+                &profile_path,
+            )
+            .replace(
+                "/etc/liquidity-migration/signal-worker-hyperliquid-source/operational-profile.json",
+                &profile_path,
             );
         toml::from_str::<Config>(&text).unwrap_or_else(|e| panic!("{template} must parse: {e}"))
     }
+
+    /// Every template a deploy installs, and the profile it renders beside it.
+    const DEPLOYED: [(&str, &str); 4] = [
+        ("engine.demo.toml.template", "operational.json"),
+        ("engine.mainnet.toml.template", "operational.json"),
+        ("engine.mexc.toml.template", "operational.json"),
+        ("engine.hyperliquid.toml.template", "operational.json"),
+    ];
 
     fn assemble(template: &str, profile: &str) -> Config {
         let config = config_from(template, profile);
@@ -761,6 +877,121 @@ mod deployed_templates {
         let config = config_from("engine.mainnet.toml.template", "operational.json");
         let sleeves: Vec<&str> = config.strategies.iter().map(|s| s.sleeve_name()).collect();
         assert_eq!(sleeves, ["carry", "long", "exodus", "maker_canary"]);
+    }
+
+    #[cfg(feature = "mexc")]
+    #[test]
+    fn the_mexc_template_assembles_whole() {
+        let config = assemble("engine.mexc.toml.template", "operational.json");
+        assert_eq!(config.engine.venue, "mexc_mainnet");
+    }
+
+    #[cfg(feature = "hyperliquid")]
+    #[test]
+    fn the_hyperliquid_template_assembles_whole() {
+        let config = assemble("engine.hyperliquid.toml.template", "operational.json");
+        assert_eq!(config.engine.venue, "hyperliquid_mainnet");
+    }
+
+    /// Nothing a deployed template configures may reach for a verb its own
+    /// realm's adapter does not have. This is the guard that keeps the boot
+    /// check from being the thing that stops a funded engine.
+    #[test]
+    fn every_deployed_template_is_compatible_with_its_venue() {
+        for (template, profile) in DEPLOYED {
+            let config = config_from(template, profile);
+            let Ok(venue) = venue_name(&config.engine.venue) else {
+                // The venue is outside this build's feature set; the
+                // per-feature CI matrix covers it where it is compiled.
+                continue;
+            };
+            let strategies = strategies(&config.strategies).unwrap();
+            let sleeves: Vec<_> = config
+                .strategies
+                .iter()
+                .map(|block| block.sleeve_name().to_string())
+                .collect();
+            let plan = compatibility(venue, &strategies, &sleeves)
+                .unwrap_or_else(|e| panic!("{template} is deployed and must boot: {e}"));
+            assert_eq!(plan.sleeves.len(), config.strategies.len(), "{template}");
+            assert!(
+                plan.sleeves
+                    .iter()
+                    .all(|sleeve| !sleeve.required.is_empty()),
+                "{template} configures a sleeve that declares no execution requirements"
+            );
+            if venue.venue() == "bybit" {
+                assert!(
+                    plan.sleeves.iter().all(|sleeve| sleeve.unproven.is_empty()),
+                    "{template}: {:?}",
+                    plan.sleeves
+                );
+            }
+        }
+    }
+
+    /// The funded alt realms run as a forward test, and the boot log says so
+    /// per sleeve. LONG rests its entries on both, so post-only is required
+    /// and observed; the stop is required and has never been seen working.
+    #[cfg(feature = "mexc")]
+    #[test]
+    fn the_mexc_long_sleeve_boots_owing_its_protection_receipts() {
+        use engine_types::Capability as C;
+        let config = config_from("engine.mexc.toml.template", "operational.json");
+        let strategies = strategies(&config.strategies).unwrap();
+        let sleeves: Vec<_> = config
+            .strategies
+            .iter()
+            .map(|block| block.sleeve_name().to_string())
+            .collect();
+        let plan = compatibility(VenueName::MexcMainnet, &strategies, &sleeves).unwrap();
+        let long = plan
+            .sleeves
+            .iter()
+            .find(|sleeve| sleeve.sleeve == "long")
+            .expect("the mexc template runs LONG");
+        assert_eq!(long.plug, "long_native");
+        assert!(long.required.contains(&C::PostOnly));
+        assert!(!long.required.contains(&C::Amend));
+        assert_eq!(
+            long.unproven,
+            [
+                C::FillAttribution,
+                C::ExactQuantity,
+                C::ProtectionPlace,
+                C::ProtectionChange,
+                C::ProtectionTrigger,
+            ]
+        );
+    }
+
+    /// A maker on MEXC is not a maker with a cancel-and-replace: the amend is
+    /// the plug's own verb, and the venue has none.
+    #[cfg(feature = "mexc")]
+    #[test]
+    fn a_quoter_pointed_at_mexc_is_refused_before_the_venue_is_built() {
+        let quotes = StrategyConfig {
+            name: "quoter".into(),
+            sleeve: Some("quotes".into()),
+            params: toml::from_str(
+                r#"
+                symbols = ["BTCUSDT"]
+                half_spread_bps = 10.0
+                requote_bps = 2.0
+                qty = 0.1
+                max_position = 0.3
+                stop_loss_fraction = 0.35
+            "#,
+            )
+            .unwrap(),
+        };
+        let built = strategies(std::slice::from_ref(&quotes)).unwrap();
+        let error = compatibility(VenueName::MexcMainnet, &built, &["quotes".to_string()])
+            .expect_err("a venue with no amend cannot run a quoter");
+        assert_eq!(
+            error.to_string(),
+            "sleeve \"quotes\" (quoter) requires amend, which mexc_mainnet does not do"
+        );
     }
 
     #[test]
