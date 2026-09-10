@@ -36,7 +36,7 @@ Entry-point wrapper for all operational workflows. Prefix `liquidity-migration-`
 | **MEXC preflight** | `scripts/ops.sh real-money preflight-mexc` | Read-only | Validates the MEXC credential file, its arming switch, and the mexc worker source. |
 | **Hyperliquid preflight** | `scripts/ops.sh real-money preflight-hyperliquid` | Read-only | Validates the Hyperliquid credential file (address shape, API wallet key shape, no other venue's keys), its arming switch, and the hyperliquid worker source. |
 | **Verify Identity** | `scripts/ops.sh verify-account-identity --environment <demo\|mainnet\|mexc\|hyperliquid>` | Read-only | Authenticates the realm's GET-only probe and binds it to `EXPECTED_ENGINE_ACCOUNT_USER_ID`; a mismatch prints the id the credentials answered as. |
-| **Canary Order** | `scripts/ops.sh canary-order --environment <demo\|mexc\|hyperliquid> --symbol SYMBOL --expected-user-id ID [--execute]` | Mutating with `--execute` | One bounded live order lifecycle through the realm's own credential file: one venue-minimum post-only order 0.5% under the bid, cancelled, the account proved clean twice. The engine accepts it on the Bybit demo and on `live-canary` realms only; `mexc_mainnet` and `hyperliquid_mainnet` are both `live-canary` today, so `demo`, `mexc` and `hyperliquid` are all accepted. `CANARY_REALMS` in `scripts/ops.sh` is the practice realm plus every funded realm the table holds at `posture=stopped`. |
+| **Canary Order** | `scripts/ops.sh canary-order --environment <demo\|mexc\|hyperliquid> --symbol SYMBOL --expected-user-id ID [--execute]` | Mutating with `--execute` | One bounded live order lifecycle through the realm's own credential file: one venue-minimum post-only order 0.5% under the bid, cancelled, the account proved clean twice. The engine accepts it on the Bybit demo and on `live-canary` realms only; `mexc_mainnet` and `hyperliquid_mainnet` are both `live-canary` today, so `demo`, `mexc` and `hyperliquid` are all accepted. `CANARY_REALMS` in `scripts/ops.sh` is the practice realm plus every funded realm on a venue with no practice sibling. A running engine holds the account lease, so take a realm's canary while its posture is `stopped`. |
 | **Storage** | `scripts/ops.sh storage [plan]` | Read-only | Prints the reclaimer's receipt and `status.json`. `plan` re-measures the budget and reports the candidates without pruning, uploading or unlinking. |
 | **Deploy** | `scripts/ops.sh deploy [mode]` | Mutating | Executes exact-commit deployment (`deploy`, `rollback`, `verify`, `stop-mainnet`, `disarm-mainnet`, `stop-mexc`, `disarm-mexc`, `stop-hyperliquid`, `disarm-hyperliquid`). |
 
@@ -187,7 +187,7 @@ Also derived per realm: the liveness service and timer, the signal spool `/var/l
 - Must keep `lm_realm_field` and `realms.py` answering the same value for every field of every realm; the parity test compares them.
 - The practice realm must be `posture=running`: the deploy soaks on it before any funded handover.
 - A new realm on a known venue is one table row, plus its `configs/signal-worker-<realm>.json`, its `deploy/engine.<realm>.toml.template`, and the owner's credential file on the host. A new **venue** also needs its credential families and labels in `VENUE_FACTS` (`realms.py`) and in `lm_realm_field` (`lib_realms.sh`).
-- Must never read `posture` as authorization: `REAL_MONEY=true` in the realm's own credential file is still the only arming gate, and the engine's own `readiness` still gates the start.
+- Must never read `posture` as authorization: `REAL_MONEY=true` in the realm's own credential file is still the only arming gate. The engine's own `readiness` refuses `production-blocked` and `read-only`; a `live-canary` realm runs as the owner's forward test and its boot log names the unproven capabilities.
 
 **Recipes**
 
@@ -459,9 +459,9 @@ dial written in either is read by nothing.
 | Sleeves | LONG entries on; CARRY and EXODUS entries rendered off. CARRY scores Bybit funding, MEXC funding differs per symbol. No maker, no probe |
 | Public data | MEXC's own: `sources.public_venue = "mexc"` in `configs/signal-worker.mexc.json`. Instruments, tickers, hourly klines and settled funding from `api.mexc.com`, the `contract.mexc.com` `edge` socket for the live ticker and candle; quantities converted from contracts to base by `contractSize`; funding carries each contract's own `collectCycle` (8 h, 4 h, 1 h or 24 h). The Binance top-trader ratio and the LLM gate are shared. Switching venue changed the realm's feature-contract hashes and checkpoint key, so its worker cold-starts |
 | Symbols the venue does not list | Dropped before ranking: `universe.listed_on` is `mexc`, so the worker reads `GET /api/v1/contract/detail` on `live.instrument_cadence_ms` and keeps the USDT-settled, API-tradable contracts in the engine's spelling (`BTC_USDT` is `BTCUSDT`; Bybit's `1000PEPEUSDT` is not MEXC's `PEPEUSDT`). A name that still reaches the engine waits at admission and is said once |
-| Source readiness | `mexc_mainnet` is `live-canary`: `engine run` is refused, `engine canary-order` is permitted with `REAL_MONEY` armed. `engine venues` prints the current value and `verify` prints it as `mexc readiness=...` |
-| Evidence boundary | The 2026-09-08 20:16 UTC canary (venue order `852400800159322624`) observed create, `New`, cancel, `Cancelled` and two clean scans. That is submit/cancel evidence only — no fill, no fee, no reduction, no protective place or trigger, no reconnect or history recovery — and it predates the execution-v2 catalogue and encoding change, so it does not carry forward |
-| What promotes it | Reviewed evidence on this exact realm, with the current adapter, for the capabilities being enabled: fill attribution, protective order place and trigger, and reconnect/history recovery. `engine canary-order` is the bounded harness that gathers it; it is not itself permission for general trading |
+| Source readiness | `mexc_mainnet` is `live-canary`: `engine run` runs as the owner's forward test (posture `running`, `REAL_MONEY` armed) and logs the unproven capabilities at boot; `engine canary-order` is permitted with `REAL_MONEY` armed. `engine venues` prints the current value and `verify` prints it as `mexc readiness=...` |
+| Evidence boundary | The 2026-09-10 11:59 UTC canary (venue order `853000482766018560`, client id `lmcan-1a08b2fd4a5-087e-0000`) observed create, `New`, cancel, `Cancelled` and four clean scans on the current adapter: submit, cancel and post-only are `observed`. No fill, no fee, no reduction, no protective place or trigger, no reconnect or history recovery has been observed |
+| What promotes it | Reviewed evidence on this exact realm, with the current adapter, for the capabilities being enabled: fill attribution, protective order place and trigger, and reconnect/history recovery. The forward test gathers it; each receipt is a dated `Observed` cell in the matrix row |
 
 **Must** write `/etc/liquidity-migration/mexc-account-bindings.json` before any
 MEXC mode runs; without it every MEXC gateway and probe refuses at construction.
@@ -470,12 +470,12 @@ reply. MEXC exposes no numeric account id in its replies, so the engine reports
 the registry's `uid-<account_uid>`; `deploy/engine.mexc.env.template` carries
 the `uid-` prefix, and the host's `engine-mexc.env` still holds the retired
 `key-…` value until the owner rewrites it.
-**Must** know that `REAL_MONEY=true` in `mexc-mainnet.env` does not start the
-realm while the source is `live-canary`: deploy reads `engine venues` from the
-installed binary, renders and projects the realm's configuration so the canary
-has something to run against, and leaves every unit stopped. `deploy/realms.tsv`
-also holds `mexc posture=stopped`, and deploy tests readiness before posture, so
-the readiness line is the one it prints.
+**Must** know that `REAL_MONEY=true` in `mexc-mainnet.env` alone does not start
+the realm: deploy reads `engine venues` from the installed binary, renders and
+projects the realm's configuration whenever the switch is armed, and starts the
+units only when the readiness is one `engine run` accepts (`live-proven` or
+`live-canary`) and `deploy/realms.tsv` holds `mexc posture=running`. Deploy
+tests readiness before posture.
 **Must Never** set the switch without explicit owner instruction.
 
 Arming, in order:
@@ -513,17 +513,17 @@ scripts/ops.sh attest-flat --environment mexc
 
 # 5. Arm REAL_MONEY=true in mexc-mainnet.env, then deploy; that deploy renders
 #    engine-mexc.toml and projects the worker env so the canary has a
-#    configuration, and leaves the units stopped while the source is
-#    live-canary. Gather the missing capability evidence with canary-order.
+#    configuration, and leaves the units stopped while the posture is stopped.
+#    Take the canary while the realm is stopped: a running engine holds the lease.
 scripts/ops.sh real-money preflight-mexc
 gh workflow run vps-deploy.yml --ref main -f mode=deploy
 scripts/ops.sh canary-order --environment mexc --symbol BTCUSDT \
   --expected-user-id uid-<UID> --execute
 
-# 6. Record the canary receipt in CHANGELOG.md, move mexc_mainnet to
-#    live-proven in engine/engine-public/src/registry.rs, set its posture to
-#    running in deploy/realms.tsv, push, and deploy again; that deploy starts
-#    the realm.
+# 6. Record the canary receipt in CHANGELOG.md and as dated Observed cells in
+#    the realm's row in engine/engine-public/src/registry.rs, set its posture
+#    to running in deploy/realms.tsv, push, and deploy again; that deploy
+#    starts the realm. live-proven follows from the row, never from a label.
 ```
 
 `verify-account-identity`, `attest-flat` and `canary-order` run on the host
@@ -547,7 +547,7 @@ read-only modes drop `REAL_MONEY`, the canary keeps it.
 | Rendered config | `/etc/liquidity-migration/engine-hyperliquid.toml`, rendered by deploy |
 | Sleeves | LONG entries on; CARRY and EXODUS entries rendered off. Both score Bybit's eight-hourly funding rate and Hyperliquid funds hourly. No maker, no probe |
 | Public data | Hyperliquid's own: `sources.public_venue = "hyperliquid"` in `configs/signal-worker.hyperliquid.json`. `meta` and `metaAndAssetCtxs` for instruments and tickers, `candleSnapshot` for hourly klines (quote turnover is approximated as base volume × the bar's mean price, because the venue states none), `fundingHistory` for the hourly settled rate stamped on the hour, and the `activeAssetCtx`/`candle` socket. Listing age comes from the first daily candle. The engine prices against Hyperliquid's own `bbo` / `activeAssetCtx` socket |
-| Source readiness | `hyperliquid_mainnet` is `live-canary`: `engine canary-order` runs, `engine run` refuses. `engine venues` prints the current value |
+| Source readiness | `hyperliquid_mainnet` is `live-canary`: `engine canary-order` runs, and `engine run` runs as the owner's forward test (posture `running`, `REAL_MONEY` armed), logging the unproven capabilities at boot. `engine venues` prints the current value. The 2026-09-10 11:59 UTC canary (venue order `541177774027`, client id `lmcan-1a08b2fcd82-08b6-0000`) observed submit, cancel and post-only on the funded address |
 
 | Venue fact | Where it changes a decision |
 | :--- | :--- |
@@ -569,7 +569,8 @@ canary's derivative-flat precheck, but they do block `attest-flat`.
 **Must** arm `REAL_MONEY=true` in `hyperliquid-mainnet.env` before the canary:
 the gateway refuses to build unarmed. Deploy provisions the realm whenever the
 switch is armed and starts its units only when the installed `engine venues`
-reports `live-proven`; `verify` prints `hyperliquid armed|off` and
+reports a readiness `engine run` accepts (`live-proven` or `live-canary`) and
+the table holds `posture=running`; `verify` prints `hyperliquid armed|off` and
 `hyperliquid readiness=...`.
 **Must Never** set the switch without explicit owner instruction.
 
@@ -590,7 +591,7 @@ install -o root -g root -m 0600 deploy/engine.hyperliquid.env.template \
 
 # 3. Deploy once: with the switch armed, deploy renders
 #    engine-hyperliquid.toml and projects the worker env, and leaves every
-#    hyperliquid unit stopped while the realm is live-canary.
+#    hyperliquid unit stopped while the posture is stopped.
 scripts/ops.sh real-money preflight-hyperliquid
 gh workflow run vps-deploy.yml --ref main -f mode=deploy
 
@@ -604,9 +605,10 @@ scripts/ops.sh verify-account-identity --environment hyperliquid
 scripts/ops.sh canary-order --environment hyperliquid --symbol BTCUSDT \
   --expected-user-id 0x<40 hex> --execute
 
-# 6. Record the canary receipt in CHANGELOG.md, move hyperliquid_mainnet to
-#    live-proven in engine/engine-public/src/registry.rs, push, and deploy
-#    again; that deploy starts the realm.
+# 6. Record the canary receipt in CHANGELOG.md and as dated Observed cells in
+#    the realm's row in engine/engine-public/src/registry.rs, set its posture
+#    to running in deploy/realms.tsv, push, and deploy again; that deploy
+#    starts the realm. live-proven follows from the row, never from a label.
 ```
 
 Both engine subcommands run on the host under `systemd-run` as

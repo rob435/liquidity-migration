@@ -147,10 +147,11 @@ credential_armed() {
 realm_armed() { credential_armed "$(lm_realm_field "$1" credential_env)"; }
 
 # The installed engine's own evidence gate for one funded realm. `engine run`
-# refuses a realm whose source readiness is not live-proven, so starting its
-# units would fail the handover and roll the fleet back; the realm stays
-# stopped instead, whatever its arming switch says. Sets FUNDED_REALM_READINESS
-# to what the binary printed, or `unknown` when it printed nothing.
+# accepts live-proven and, as the owner's forward test, live-canary; it refuses
+# every other readiness, so starting those units would fail the handover and
+# roll the fleet back. The realm stays stopped instead, whatever its arming
+# switch says. Sets FUNDED_REALM_READINESS to what the binary printed, or
+# `unknown` when it printed nothing.
 realm_run_ready() {
     local realm="$1" venue_name
     venue_name="$(lm_realm_field "$realm" engine_venue)" \
@@ -160,7 +161,10 @@ realm_run_ready() {
             | awk -F '\t' -v name="$venue_name" '$1 == name { print $5 }'
     )"
     FUNDED_REALM_READINESS="${FUNDED_REALM_READINESS:-unknown}"
-    [ "$FUNDED_REALM_READINESS" = live-proven ]
+    case "$FUNDED_REALM_READINESS" in
+        live-proven|live-canary) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # The owner's credential file for one funded realm.
@@ -1404,7 +1408,7 @@ deploy_mode() {
         echo "staging $realm configuration while live engines continue trading"
         provision_funded_realm "$realm"
         if ! realm_run_ready "$realm"; then
-            echo "$realm armed but the installed engine reports $(lm_realm_field "$realm" engine_venue) readiness=$FUNDED_REALM_READINESS: units stay stopped until the canary evidence promotes it"
+            echo "$realm armed but the installed engine reports $(lm_realm_field "$realm" engine_venue) readiness=$FUNDED_REALM_READINESS: units stay stopped, the engine refuses to run at that readiness"
         elif [ "$(lm_realm_field "$realm" posture)" = stopped ]; then
             stop_funded_units "$realm"
             echo "$realm posture=stopped in deploy/realms.tsv: units stay stopped"

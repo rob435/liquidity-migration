@@ -13,7 +13,7 @@ use std::path::Path;
 
 use engine_types::{AccountIdentity, MarketFeed, VenueGateway};
 use engine_venue::lease::{self, AccountLease, LeaseError};
-use engine_venue::Venue;
+use engine_venue::{Venue, VenueReadiness};
 
 use crate::assembly;
 use crate::config;
@@ -36,11 +36,25 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     tracing::warn!("orders will be sent, and the risk kernel gates every one of them");
 
     // Compilation and request-shape tests are not production evidence. Keep
-    // this before the log claim and before any credential or socket is opened;
-    // testnet realms remain runnable specifically so they can earn canary
-    // evidence without real capital.
+    // this before the log claim and before any credential or socket is opened.
+    // A live-canary realm runs as the owner's forward test, on the realm
+    // table's posture and the credential file's REAL_MONEY, and this line
+    // names what the run has not yet been seen doing.
     let chosen = assembly::venue_name(&settings.venue)?;
     chosen.require_engine_run_ready()?;
+    if chosen.readiness() == VenueReadiness::LiveCanary {
+        let unproven: Vec<_> = chosen
+            .unproven_capabilities()
+            .iter()
+            .map(|capability| capability.as_str())
+            .collect();
+        tracing::warn!(
+            venue = %chosen,
+            readiness = chosen.readiness().as_str(),
+            unproven = unproven.join(", "),
+            "forward test: this realm holds no current live receipt for these capabilities"
+        );
+    }
 
     let _log_claim = engine_wal::lock(&settings.wal_path)?;
     let (wal, replayed) = assembly::wal(&settings.wal_path)?;

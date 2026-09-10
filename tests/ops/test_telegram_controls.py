@@ -231,19 +231,22 @@ def fleet_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                     "entries|demo|long|true\n"
                     "entries|demo|carry|true\n"
                     "entries|demo|exodus|true\n"
-                    "entries|mainnet|long|true\n"
-                    "entries|mainnet|carry|true\n"
-                    "entries|mainnet|exodus|true\n"
+                    "entries|mexc|long|true\n"
+                    "entries|mexc|carry|false\n"
+                    "entries|mexc|exodus|false\n"
+                    "entries|hyperliquid|long|true\n"
+                    "entries|hyperliquid|carry|false\n"
+                    "entries|hyperliquid|exodus|false\n"
                     "unit|demo|owner|-|liquidity-migration-engine.service|active\n"
                     "unit|demo|signal|directional|liquidity-migration-signal-worker-demo.service|active\n"
-                    "unit|mainnet|owner|-|liquidity-migration-engine-mainnet.service|active\n"
-                    "unit|mainnet|signal|directional|liquidity-migration-signal-worker-mainnet.service|active\n"
-                    # The mexc and hyperliquid realms are in the manifest and
-                    # unarmed: unit rows, no heartbeat, therefore no entry rows.
-                    "unit|mexc|owner|-|liquidity-migration-engine-mexc.service|inactive\n"
-                    "unit|mexc|signal|directional|liquidity-migration-signal-worker-mexc.service|inactive\n"
-                    "unit|hyperliquid|owner|-|liquidity-migration-engine-hyperliquid.service|inactive\n"
-                    "unit|hyperliquid|signal|directional|liquidity-migration-signal-worker-hyperliquid.service|inactive\n"
+                    # The mainnet realm is in the manifest and stopped by
+                    # posture: unit rows, no heartbeat, therefore no entry rows.
+                    "unit|mainnet|owner|-|liquidity-migration-engine-mainnet.service|inactive\n"
+                    "unit|mainnet|signal|directional|liquidity-migration-signal-worker-mainnet.service|inactive\n"
+                    "unit|mexc|owner|-|liquidity-migration-engine-mexc.service|active\n"
+                    "unit|mexc|signal|directional|liquidity-migration-signal-worker-mexc.service|active\n"
+                    "unit|hyperliquid|owner|-|liquidity-migration-engine-hyperliquid.service|active\n"
+                    "unit|hyperliquid|signal|directional|liquidity-migration-signal-worker-hyperliquid.service|active\n"
                 ),
                 stderr="",
             )
@@ -296,11 +299,8 @@ def test_status_renders_manifest_owners_signal_workers_and_entry_permissions(fle
     assert "demo owner: active" in status
     assert "demo signal worker: active" in status
     assert "demo exodus: entries on" in status
-    assert "real money: owner active" in status
-    assert "signal active" in status
-    assert "carry=on" in status
-    assert "exodus=on" in status
-    assert "long=on" in status
+    assert "mexc: owner active; signal active; entries long=on, carry=off, exodus=off" in status
+    assert "hyperliquid: owner active; signal active; entries long=on, carry=off, exodus=off" in status
     assert commands == [list(tc.CONTROL_COMMANDS["status-fleet"])]
 
 
@@ -340,15 +340,14 @@ def test_hyperliquid_pause_and_resume_each_reach_exactly_their_own_action(fleet_
     assert "REAL_MONEY is not touched" in message
 
 
-def test_an_unarmed_funded_realm_reports_units_without_entry_rows(fleet_env) -> None:
-    """An unarmed realm publishes no heartbeat, so the helper reports no entry
-    permissions for it. That is a status line, not a broken panel."""
+def test_a_funded_realm_with_no_owner_reports_units_without_entry_rows(fleet_env) -> None:
+    """A stopped or unarmed realm publishes no heartbeat, so the helper reports
+    no entry permissions for it. That is a status line, not a broken panel."""
 
     _config, fleet, _commands = fleet_env
     status = fleet.status_text()
-    assert "mexc: owner inactive; signal inactive; not armed" in status
-    assert "hyperliquid: owner inactive; signal inactive; not armed" in status
-    assert fleet.funded_present() == ("mainnet",)
+    assert "real money: owner inactive; signal inactive; no heartbeat, entry state unknown" in status
+    assert fleet.funded_present() == ("mexc", "hyperliquid")
 
 
 def test_control_action_allowlist_cannot_forward_paths_units_or_environment(fleet_env) -> None:

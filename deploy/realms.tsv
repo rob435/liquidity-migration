@@ -1,6 +1,6 @@
 # realm-table-v1
 # realm|venue|engine_venue|engine_realm|kind|posture|legacy_names|long_entries|carry_entries|exodus_entries|owner_stop|worker_stop|liveness_timer_stop|liveness_service_stop
-demo|bybit|bybit_demo|demo|practice|running|true|toggles|toggles|true|10|140|80|200
-mainnet|bybit|bybit_mainnet|mainnet|funded|running|false|true|true|true|20|150|90|210
-mexc|mexc|mexc_mainnet|mexc_mainnet|funded|stopped|false|true|false|false|30|160|91|211
-hyperliquid|hyperliquid|hyperliquid_mainnet|hyperliquid_mainnet|funded|stopped|false|true|false|false|40|170|93|212
+demo|bybit|bybit_demo|demo|practice|running|true|false|false|false|10|140|80|200
+mainnet|bybit|bybit_mainnet|mainnet|funded|stopped|false|true|true|true|20|150|90|210
+mexc|mexc|mexc_mainnet|mexc_mainnet|funded|running|false|true|false|false|30|160|91|211
+hyperliquid|hyperliquid|hyperliquid_mainnet|hyperliquid_mainnet|funded|running|false|true|false|false|40|170|93|212

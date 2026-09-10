@@ -118,8 +118,8 @@ opened.
 | `bybit_mainnet` | `live-proven` | yes | Mainnet realm credentials, account lease and `REAL_MONEY` arming. |
 | `hyperliquid_testnet` | `testnet-canary` | yes | Testnet realm only. |
 | `lighter_testnet` | `testnet-canary` | yes | Testnet realm only. |
-| `mexc_mainnet` | `live-canary` | no | Canary permitted with `REAL_MONEY` armed; `engine run` refused. Evidence boundary: the 2026-09-08 20:16 UTC canary lifecycle (venue order `852400800159322624`) was taken on `32f27d4b`, before the execution-v2 catalogue and encoding change in `1e2cfc22`, so it is stale and carries no capability. No fill, stop trigger or `isTaker` push has been observed. |
-| `hyperliquid_mainnet` | `live-canary` | no | Canary permitted with `REAL_MONEY` armed; `engine run` refused until the unattended capability set carries current receipts from this exact realm. No order lifecycle has run here at all. `hyperliquid_testnet` is a different chain and a different account, so its evidence does not carry. |
+| `mexc_mainnet` | `live-canary` | yes, as the owner's forward test | Funded realm credentials, account lease and `REAL_MONEY` arming; the boot log names the unproven capabilities. Evidence boundary: the 2026-09-10 11:59 UTC canary (venue order `853000482766018560`) observed submit, cancel and post-only on the current adapter. No fill, stop place or trigger, or reconnect recovery has been observed. |
+| `hyperliquid_mainnet` | `live-canary` | yes, as the owner's forward test | Funded realm credentials, account lease and `REAL_MONEY` arming; the boot log names the unproven capabilities. Evidence boundary: the 2026-09-10 11:59 UTC canary (venue order `541177774027`) observed submit, cancel and post-only on the funded address. `hyperliquid_testnet` is a different chain and a different account, so its evidence does not carry. |
 | `lighter_mainnet` | `production-blocked` | no | Refused before credential or socket access. |
 | `binance_testnet` | `production-blocked` | no | Refused before credential or socket access. |
 | `binance_mainnet` | `production-blocked` | no | Private engine run refused; public market clients are separate. |
@@ -168,9 +168,9 @@ doing it here; `unknown` = the adapter does not do it.
 <!-- BEGIN GENERATED capability-matrix -->
 | Capability | `bybit_demo` | `bybit_mainnet` | `mexc_mainnet` | `hyperliquid_mainnet` | `hyperliquid_testnet` |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `submit` | observed 2026-09-06 | observed 2026-09-06 | stale 2026-09-08 | implemented | implemented |
-| `cancel` | observed 2026-09-06 | observed 2026-08-29 | stale 2026-09-08 | implemented | implemented |
-| `post-only` | observed 2026-09-04 | observed 2026-08-30 | implemented | implemented | implemented |
+| `submit` | observed 2026-09-06 | observed 2026-09-06 | observed 2026-09-10 | observed 2026-09-10 | implemented |
+| `cancel` | observed 2026-09-06 | observed 2026-08-29 | observed 2026-09-10 | observed 2026-09-10 | implemented |
+| `post-only` | observed 2026-09-04 | observed 2026-08-30 | observed 2026-09-10 | observed 2026-09-10 | implemented |
 | `fill-attribution` | observed 2026-09-06 | observed 2026-09-08 | implemented | implemented | implemented |
 | `partial-fill` | implemented | observed 2026-09-06 | implemented | implemented | implemented |
 | `amend` | implemented | observed 2026-08-29 | unknown | implemented | implemented |
@@ -206,12 +206,14 @@ which fails on any drift between it and the block above.
   `implemented` is worth.
 * **Must Never**: real capital reach a `production-blocked` or `read-only`
   realm. The boot gate refuses the run; there is no override flag.
-* **Must Never**: `engine run` start on a `live-canary` realm. That state
-  admits `engine canary-order` and nothing else, and it exists for a funded
-  realm whose live evidence is still owed. A practice sibling elsewhere on the
-  venue does not settle it: `hyperliquid_testnet` is `testnet-canary` and
-  `hyperliquid_mainnet` is `live-canary` at the same time, because they are a
-  different chain and a different account.
+* **Must**: `engine run` on a `live-canary` realm log the unproven capabilities
+  at boot (`runner.rs`, `WARN forward test`). The run itself is the owner's:
+  `posture=running` in `deploy/realms.tsv` and `REAL_MONEY=true` in the realm's
+  credential file. The state still admits `engine canary-order`, and its
+  receipts promote the matrix row; the label is never edited. A practice
+  sibling elsewhere on the venue does not settle it: `hyperliquid_testnet` is
+  `testnet-canary` and `hyperliquid_mainnet` is `live-canary` at the same
+  time, because they are a different chain and a different account.
 
 ---
 

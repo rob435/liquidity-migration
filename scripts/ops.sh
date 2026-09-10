@@ -15,11 +15,14 @@ DEPLOY_MODES="deploy rollback verify"
 for funded_realm in $(lm_funded_realms); do
   DEPLOY_MODES="$DEPLOY_MODES stop-$funded_realm disarm-$funded_realm"
 done
-# The canary proves an account the fleet has not started trading: the practice
-# realm, and any funded realm the table still holds stopped.
+# The canary's accounts: the practice realm, and every funded realm on a venue
+# with no practice sibling, whose only route to live evidence the canary is.
+# The engine refuses a live-proven realm and a running engine holds the lease,
+# so this list is the typo guard, not the gate.
 CANARY_REALMS="$(lm_practice_realm)"
+practice_venue="$(lm_realm_field "$(lm_practice_realm)" venue)"
 for funded_realm in $(lm_funded_realms); do
-  if [ "$(lm_realm_field "$funded_realm" posture)" = stopped ]; then
+  if [ "$(lm_realm_field "$funded_realm" venue)" != "$practice_venue" ]; then
     CANARY_REALMS="$CANARY_REALMS $funded_realm"
   fi
 done

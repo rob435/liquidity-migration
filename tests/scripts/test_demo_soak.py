@@ -216,6 +216,7 @@ def recorder_handover(tmp_path: Path):
             'ensure_runtime_identities() { tick after-checkout; }',
             f'install_units() {{ cp "$REPO_DIR/deploy/systemd/{unit}" "$LM_SYSTEMD_UNIT_DIR/{unit}"; }}',
             "start_independent_units() { tick new-unit; }", "handover_realm() { :; }",
+            "stop_funded_units() { :; }",
             'wait_demo_soak() { for binary in engine engine-tools signal-worker; do '
             'cmp "$RELEASE_DIR/bin/$binary" "$FIXTURE_INCUMBENT/$binary"; done; '
             f'tick soak; return {soak_status}; }}',

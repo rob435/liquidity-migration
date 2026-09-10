@@ -203,11 +203,11 @@ fn derive_readiness(real_money: bool, evidence: impl Fn(Capability) -> Evidence)
 /// Derived from the realm's capability row, never assigned: a compiled adapter
 /// is not production evidence, and neither is a promotion note. `LiveProven`
 /// means every capability in [`UNATTENDED_PROTECTED_TRADING`] carries a current
-/// receipt from that exact realm. `LiveCanary` keeps general trading blocked
-/// while a bounded harness gathers what is missing. A practice sibling's
-/// evidence is another chain and another account and does not carry, so
-/// `engine canary-order` is permitted here with `REAL_MONEY` armed while the
-/// execution engine stays refused.
+/// receipt from that exact realm. `LiveCanary` names a funded realm still
+/// owed that evidence. Whether such a realm trades is the owner's call, made
+/// in the realm table's posture and the credential file's `REAL_MONEY`; the
+/// boot log names what is unproven. A practice sibling's evidence is another
+/// chain and another account and does not carry.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
 pub enum VenueReadiness {
     LiveProven,
@@ -215,8 +215,8 @@ pub enum VenueReadiness {
     /// missing live evidence with test funds.
     TestnetCanary,
     /// Offline conformance is green and the live evidence this funded realm
-    /// owes has not been taken. `engine canary-order` may run here; `engine
-    /// run` may not.
+    /// owes has not been taken. `engine canary-order` runs here, and `engine
+    /// run` is the owner's forward test: the realm gathers its own receipts.
     LiveCanary,
     /// Real capital is blocked until exact-venue live evidence exists.
     ProductionBlocked,
@@ -236,7 +236,10 @@ impl VenueReadiness {
     }
 
     pub fn permits_engine_run(self) -> bool {
-        matches!(self, Self::LiveProven | Self::TestnetCanary)
+        matches!(
+            self,
+            Self::LiveProven | Self::TestnetCanary | Self::LiveCanary
+        )
     }
 }
 
@@ -554,24 +557,27 @@ impl VenueName {
                     current: true,
                 },
             },
-            // One canary lifecycle, taken before this adapter's execution
-            // semantics changed. `1e2cfc22` rewrote the catalogue and the
-            // encoding, so the receipt does not carry forward; the rest of the
-            // row is what the gateway implements, never observed live.
+            // One canary lifecycle on the current adapter; the rest of the row
+            // is what the gateway implements, never observed live.
             Self::MexcMainnet => match capability {
                 C::Submit => Evidence::Observed {
-                    on: "2026-09-08",
-                    receipt: "canary PASS 20:16:27 UTC on the funded account: `create=accepted venue_order_id=852400800159322624`, `private_order=New` (CHANGELOG 2026-09-08)",
-                    adapter_commit: "32f27d4b",
-                    current: false,
+                    on: "2026-09-10",
+                    receipt: "canary PASS 11:59:17 UTC on the funded account: `create=accepted client_id=lmcan-1a08b2fd4a5-087e-0000 venue_order_id=853000482766018560`, `private_order=New` (CHANGELOG 2026-09-10)",
+                    adapter_commit: "6e5ca627",
+                    current: true,
                 },
                 C::Cancel => Evidence::Observed {
-                    on: "2026-09-08",
-                    receipt: "the same 20:16:27 UTC canary: `cancel=accepted`, `private_order=Cancelled`, `order_status=Cancelled cumulative_filled_qty=0` (CHANGELOG 2026-09-08)",
-                    adapter_commit: "32f27d4b",
-                    current: false,
+                    on: "2026-09-10",
+                    receipt: "the same 11:59 UTC canary: `cancel=accepted`, `private_order=Cancelled`, `order_status=Cancelled cumulative_filled_qty=0`, four clean scans (CHANGELOG 2026-09-10)",
+                    adapter_commit: "6e5ca627",
+                    current: true,
                 },
-                C::PostOnly => Evidence::Implemented,
+                C::PostOnly => Evidence::Observed {
+                    on: "2026-09-10",
+                    receipt: "the same 11:59 UTC canary rested post-only at 77462.1 under bid 77851.4 and was `New` with nothing filled (CHANGELOG 2026-09-10)",
+                    adapter_commit: "6e5ca627",
+                    current: true,
+                },
                 C::FillAttribution => Evidence::Implemented,
                 C::PartialFill => Evidence::Implemented,
                 // `VenueCaps::amend_in_place` is false and `amend_order`
@@ -587,11 +593,39 @@ impl VenueName {
                 // The adapter reads no funding row at all.
                 C::FundingFeeCash => Evidence::Unknown,
             },
-            // Nothing has been observed on either Hyperliquid realm: no order
-            // lifecycle has run on the funded address, and the testnet is a
-            // different chain and a different account, so neither row carries
-            // to the other.
-            Self::HyperliquidMainnet | Self::HyperliquidTestnet => match capability {
+            // One canary lifecycle on the funded address; the rest of the row
+            // is what the gateway implements, never observed live.
+            Self::HyperliquidMainnet => match capability {
+                C::Submit => Evidence::Observed {
+                    on: "2026-09-10",
+                    receipt: "canary PASS 11:59:20 UTC on the funded address: `create=accepted client_id=lmcan-1a08b2fcd82-08b6-0000 venue_order_id=541177774027`, `private_order=New` (CHANGELOG 2026-09-10)",
+                    adapter_commit: "6e5ca627",
+                    current: true,
+                },
+                C::Cancel => Evidence::Observed {
+                    on: "2026-09-10",
+                    receipt: "the same 11:59 UTC canary: `cancel=accepted`, `private_order=Cancelled`, `order_status=Cancelled cumulative_filled_qty=0`, four clean scans (CHANGELOG 2026-09-10)",
+                    adapter_commit: "6e5ca627",
+                    current: true,
+                },
+                C::PostOnly => Evidence::Observed {
+                    on: "2026-09-10",
+                    receipt: "the same 11:59 UTC canary rested post-only at 77460 under bid 77850 and was `New` with nothing filled (CHANGELOG 2026-09-10)",
+                    adapter_commit: "6e5ca627",
+                    current: true,
+                },
+                C::Amend => Evidence::Implemented,
+                C::FillAttribution | C::PartialFill | C::ExactQuantity => Evidence::Implemented,
+                C::ReduceBelowMinimum => Evidence::Unknown,
+                C::ProtectionPlace | C::ProtectionChange | C::ProtectionTrigger => {
+                    Evidence::Implemented
+                }
+                C::ReconnectHistoryRecovery => Evidence::Implemented,
+                C::FundingFeeCash => Evidence::Unknown,
+            },
+            // Nothing has been observed on the testnet: it is a different chain
+            // and a different account, so the funded row does not carry to it.
+            Self::HyperliquidTestnet => match capability {
                 C::Amend | C::Submit | C::Cancel | C::PostOnly => Evidence::Implemented,
                 C::FillAttribution | C::PartialFill | C::ExactQuantity => Evidence::Implemented,
                 C::ReduceBelowMinimum => Evidence::Unknown,
@@ -689,7 +723,8 @@ impl VenueName {
     }
 
     /// Refuse before the engine opens a log, credential, or socket when this
-    /// realm has not earned the evidence its capital class needs.
+    /// realm is one the owner has not directed the engine at: a venue outside
+    /// the funded binary's default set, or one with no trading API.
     pub fn require_engine_run_ready(self) -> Result<(), VenueError> {
         if !self.compiled() {
             return Err(self.disabled_error());
@@ -698,23 +733,11 @@ impl VenueName {
         if readiness.permits_engine_run() {
             return Ok(());
         }
-        Err(VenueError::BadRequest(match readiness {
-            VenueReadiness::LiveCanary => format!(
-                "{} readiness is {}; `engine canary-order` is a bounded qualification harness, not permission for general trading; this realm holds no current receipt for {}",
-                self.as_str(),
-                readiness.as_str(),
-                self.unproven_capabilities()
-                    .iter()
-                    .map(|capability| capability.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            other => format!(
-                "{} readiness is {}; the execution engine is blocked until this exact realm has reviewed live order lifecycle evidence",
-                self.as_str(),
-                other.as_str()
-            ),
-        }))
+        Err(VenueError::BadRequest(format!(
+            "{} readiness is {}; the execution engine is blocked until this exact realm has reviewed live order lifecycle evidence",
+            self.as_str(),
+            readiness.as_str()
+        )))
     }
 
     /// Refuse the operator canary on any realm it is not the right instrument
@@ -747,10 +770,14 @@ mod audit_readiness_tests {
 
     #[test]
     fn a_submit_cancel_canary_does_not_qualify_general_protected_position_trading() {
+        // The row stays live-canary and names what it owes; the run itself is
+        // the owner's forward test, so the boot gate admits it.
         let venue = VenueName::MexcMainnet;
-        assert!(!venue.readiness().permits_engine_run());
-        let error = venue.require_engine_run_ready().unwrap_err().to_string();
-        assert!(error.contains("protection-trigger"), "{error}");
+        assert_eq!(venue.readiness(), VenueReadiness::LiveCanary);
+        assert!(venue
+            .unproven_capabilities()
+            .contains(&Capability::ProtectionTrigger));
+        venue.require_engine_run_ready().unwrap();
         assert!(venue.require_canary_ready().is_ok());
     }
 }
@@ -857,29 +884,33 @@ mod capability_matrix_tests {
     }
 
     #[test]
-    fn mexc_owes_every_unattended_capability_because_its_one_receipt_is_stale() {
-        assert_eq!(
-            VenueName::MexcMainnet.unproven_capabilities(),
-            vec![
-                Capability::Submit,
-                Capability::Cancel,
-                Capability::FillAttribution,
-                Capability::ProtectionPlace,
-                Capability::ProtectionTrigger,
-                Capability::ReconnectHistoryRecovery,
-            ]
-        );
+    fn the_alt_realms_owe_what_a_submit_cancel_canary_cannot_show() {
+        let owed = vec![
+            Capability::FillAttribution,
+            Capability::ProtectionPlace,
+            Capability::ProtectionTrigger,
+            Capability::ReconnectHistoryRecovery,
+        ];
+        assert_eq!(VenueName::MexcMainnet.unproven_capabilities(), owed);
+        assert_eq!(VenueName::HyperliquidMainnet.unproven_capabilities(), owed);
         assert!(VenueName::BybitDemo.unproven_capabilities().is_empty());
         assert!(VenueName::BybitMainnet.unproven_capabilities().is_empty());
     }
 
     #[test]
     fn a_receipt_taken_before_an_execution_semantics_change_does_not_qualify() {
-        let stale = VenueName::MexcMainnet.capability(Capability::Submit);
-        assert!(matches!(stale, Evidence::Observed { current: false, .. }));
+        let stale = Evidence::Observed {
+            on: "2026-09-08",
+            receipt: "synthetic row under test, not a receipt",
+            adapter_commit: "0000000",
+            current: false,
+        };
         assert!(!stale.qualifies());
         assert!(!Evidence::Implemented.qualifies());
         assert!(!Evidence::Unknown.qualifies());
+        assert!(VenueName::MexcMainnet
+            .capability(Capability::Submit)
+            .qualifies());
     }
 
     #[test]

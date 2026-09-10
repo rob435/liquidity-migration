@@ -1048,9 +1048,8 @@ mod tests {
                 }
                 VenueName::HyperliquidMainnet | VenueName::MexcMainnet => {
                     assert_eq!(venue.readiness(), VenueReadiness::LiveCanary);
-                    let error = venue.require_engine_run_ready().unwrap_err().to_string();
-                    assert!(error.contains("live-canary"), "{error}");
-                    assert!(error.contains("canary-order"), "{error}");
+                    assert!(!venue.unproven_capabilities().is_empty());
+                    venue.require_engine_run_ready().unwrap();
                 }
                 VenueName::LighterMainnet
                 | VenueName::BinanceTestnet
@@ -1081,10 +1080,13 @@ mod tests {
     }
 
     #[test]
-    fn a_live_canary_realm_may_take_the_canary_and_never_the_engine() {
-        // The whole point of the state: funded capital, one bounded operator
-        // proof permitted, and the strategy loop still refused.
-        assert!(!VenueReadiness::LiveCanary.permits_engine_run());
+    fn a_live_canary_realm_takes_the_canary_and_runs_as_the_owners_forward_test() {
+        // Funded capital owed its receipts: the bounded operator proof runs,
+        // and so does the strategy loop, on posture and arming. The two
+        // states no capability row produces stay refused.
+        assert!(VenueReadiness::LiveCanary.permits_engine_run());
+        assert!(!VenueReadiness::ProductionBlocked.permits_engine_run());
+        assert!(!VenueReadiness::ReadOnly.permits_engine_run());
         assert_eq!(VenueReadiness::LiveCanary.as_str(), "live-canary");
     }
 }

@@ -49,11 +49,12 @@ fn conformance_local_fixtures_do_not_promote_dormant_realms() {
                     name,
                     VenueName::HyperliquidMainnet | VenueName::MexcMainnet
                 ));
-                // Funded capital, and the operator canary is the only thing
-                // this state opens.
+                // Funded capital still owed its receipts: the canary runs, and
+                // so does the engine, as the owner's forward test.
                 assert!(name.is_real_money());
+                assert!(!name.unproven_capabilities().is_empty());
                 name.require_canary_ready().unwrap();
-                assert!(name.require_engine_run_ready().is_err());
+                name.require_engine_run_ready().unwrap();
             }
             VenueReadiness::ProductionBlocked | VenueReadiness::ReadOnly => {
                 assert!(name.require_engine_run_ready().is_err());

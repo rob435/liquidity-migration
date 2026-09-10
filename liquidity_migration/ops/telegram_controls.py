@@ -395,7 +395,7 @@ class VpsFleet:
             else:
                 lines.append(
                     f"{name}: owner {owner.active}; "
-                    f"signal {status.signal(realm).active}; not armed"
+                    f"signal {status.signal(realm).active}; no heartbeat, entry state unknown"
                 )
         return "\n".join(lines)
 

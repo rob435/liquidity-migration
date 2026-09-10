@@ -188,7 +188,7 @@ def test_deploy_starts_each_funded_realm_only_when_its_own_switch_is_armed() -> 
         'if ! realm_run_ready "$realm"; then'
     )
     assert 'handover_realm "$realm"' in deploy_body
-    assert "units stay stopped until the canary evidence promotes it" in deploy_body
+    assert "units stay stopped, the engine refuses to run at that readiness" in deploy_body
     # The table's posture is the switch that keeps a proven realm stopped.
     assert 'posture=stopped in deploy/realms.tsv: units stay stopped' in deploy_body
     assert 'stop_funded_units "$realm"' in deploy_body
@@ -203,13 +203,14 @@ def test_deploy_starts_each_funded_realm_only_when_its_own_switch_is_armed() -> 
 @pytest.mark.parametrize("realm", ["mexc", "hyperliquid"])
 @pytest.mark.parametrize(
     ("readiness", "ready"),
-    [("live-proven", True), ("live-canary", False), ("production-blocked", False), ("", False)],
+    [("live-proven", True), ("live-canary", True), ("production-blocked", False), ("", False)],
 )
-def test_a_funded_handover_waits_for_the_engines_own_live_proven_readiness(
+def test_a_funded_handover_waits_for_a_readiness_the_engine_will_run(
     tmp_path: Path, realm: str, readiness: str, ready: bool
 ) -> None:
     # The installed binary decides. An armed switch alone must not start a
-    # realm `engine run` would refuse at boot.
+    # realm `engine run` would refuse at boot; live-canary runs as the owner's
+    # forward test, so the deploy starts it.
     engine = tmp_path / "engine"
     venue = f"{realm}_mainnet"
     rows = ["name\tvenue\trealm\treal_money\treadiness", "bybit_mainnet\tbybit\tmainnet\ttrue\tlive-proven"]

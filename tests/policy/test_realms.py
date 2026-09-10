@@ -351,12 +351,16 @@ def test_ops_and_deploy_launcher_modes_come_from_the_funded_realms() -> None:
 # ------------------------------------------------------------- posture
 
 
-def test_posture_drives_the_deploy_and_mexc_and_hyperliquid_stay_stopped() -> None:
+def test_posture_drives_the_deploy_and_the_table_names_the_realms_that_run() -> None:
+    # The practice realm stays up for the soak; the funded postures are the
+    # owner's: Bybit mainnet stopped, both alt realms running as a forward test.
     by_name = {row.realm: row for row in realms()}
     assert by_name["demo"].posture == "running"
-    assert by_name["mainnet"].posture == "running"
-    assert by_name["mexc"].posture == "stopped"
-    assert by_name["hyperliquid"].posture == "stopped"
+    assert by_name["mainnet"].posture == "stopped"
+    assert by_name["mexc"].posture == "running"
+    assert by_name["hyperliquid"].posture == "running"
+    # Demo opens nothing: every sleeve's entries are rendered off.
+    assert (by_name["demo"].long_entries, by_name["demo"].carry_entries, by_name["demo"].exodus_entries) == ("false", "false", "false")
 
     deploy = (ROOT / "scripts" / "vps" / "deploy_remote.sh").read_text(encoding="utf-8")
     body = deploy[deploy.index("deploy_mode()") : deploy.index("\nrollback_mode()")]

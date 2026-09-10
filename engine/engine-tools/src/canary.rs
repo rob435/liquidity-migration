@@ -1517,20 +1517,20 @@ mod tests {
         #[cfg(feature = "mexc")]
         {
             // Submit/cancel qualification is not evidence of general protected
-            // trading. The bounded harness remains separate from engine run.
+            // trading; the row stays live-canary while the owner's forward
+            // test runs the engine beside this harness.
             VenueName::MexcMainnet.require_canary_ready().unwrap();
-            assert!(VenueName::MexcMainnet.require_engine_run_ready().is_err());
+            VenueName::MexcMainnet.require_engine_run_ready().unwrap();
         }
         #[cfg(feature = "hyperliquid")]
         {
-            // The realm this command exists to gather evidence for; `engine
-            // run` on it stays refused.
+            // The realm this command exists to gather evidence for.
             VenueName::HyperliquidMainnet
                 .require_canary_ready()
                 .unwrap();
-            assert!(VenueName::HyperliquidMainnet
+            VenueName::HyperliquidMainnet
                 .require_engine_run_ready()
-                .is_err());
+                .unwrap();
         }
     }
 

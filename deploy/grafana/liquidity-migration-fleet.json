@@ -38,8 +38,8 @@
           "uid": "${DS_METRICS}"
         },
         "query": "label_values(lm_engine_up, realm)",
-        "regex": "/^(demo|mainnet)$/",
-        "allValue": "demo|mainnet",
+        "regex": "/^(demo|mexc|hyperliquid)$/",
+        "allValue": "demo|mexc|hyperliquid",
         "current": {
           "text": "All",
           "value": "$__all"
