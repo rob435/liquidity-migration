@@ -240,7 +240,7 @@ struct World {
     private_latency: Duration,
     fee_snapshot_sha256: Option<String>,
     /// The spool: durable rows, read across every boot of this seed.
-    signal_feed: Mutex<SignalReplayFeed>,
+    signal_feed: SignalReplayFeed,
     /// Rows the fault wrapper took and owes the engine; they survive a death
     /// exactly as the spool's bytes do.
     parked_signals: SharedParkedSignals,
@@ -249,14 +249,17 @@ struct World {
     tape_end_ms: i64,
 }
 
+/// What the engine had to say when its loop stopped.
+struct StoppedEngine {
+    outcome: RunOutcome,
+    in_flight: Vec<String>,
+    account: AccountView,
+    strategy_health: Vec<(String, String)>,
+}
+
 /// How one boot of the engine ended.
 enum SegmentEnd {
-    Stopped {
-        outcome: RunOutcome,
-        in_flight: Vec<String>,
-        account: AccountView,
-        strategy_health: Vec<(String, String)>,
-    },
+    Stopped(Box<StoppedEngine>),
     /// The seeded death.
     Died,
     /// The engine exited with an error, which is what the live unit does
@@ -399,14 +402,14 @@ impl World {
                 market_rng,
                 signal_rng,
                 log: FaultLog::shared(),
-                signal_feed: Mutex::new({
+                signal_feed: {
                     let feed =
                         SignalReplayFeed::from_observations(published.clone(), scheduler.clone());
                     match signals::lifecycle(&producer) {
                         Some(lifecycle) => feed.with_lifecycle(lifecycle),
                         None => feed,
                     }
-                }),
+                },
                 parked_signals: shared_parked_signals(),
                 published,
                 producer,
@@ -422,7 +425,7 @@ impl World {
                 deaths,
                 rtt,
                 private_latency,
-                fee_snapshot_sha256: fees.snapshot_sha256.clone(),
+                fee_snapshot_sha256: fees.snapshot_sha256,
             },
             clock,
         ))
@@ -430,7 +433,7 @@ impl World {
 
     /// One boot of the engine, to a clean stop or to the seeded death.
     async fn run_segment(
-        &self,
+        &mut self,
         death_at: Option<u64>,
         reconnecting: bool,
     ) -> Result<SegmentEnd, EngineError> {
@@ -469,10 +472,9 @@ impl World {
             self.scheduler.clone(),
             self.log.clone(),
         );
-        let mut spool = lock(&self.signal_feed);
-        spool.rebooted();
+        self.signal_feed.rebooted();
         let mut signal_feed = FaultySignalFeed::new(
-            &mut *spool,
+            &mut self.signal_feed,
             self.opts.faults,
             self.signal_rng.clone(),
             self.scheduler.clone(),
@@ -523,7 +525,7 @@ impl World {
         };
         pump_task.abort();
         match outcome {
-            Some(Ok(outcome)) => Ok(SegmentEnd::Stopped {
+            Some(Ok(outcome)) => Ok(SegmentEnd::Stopped(Box::new(StoppedEngine {
                 outcome,
                 in_flight: engine
                     .in_flight_ids()
@@ -532,7 +534,7 @@ impl World {
                     .collect(),
                 account: engine.account().clone(),
                 strategy_health: engine.strategy_health(),
-            }),
+            }))),
             Some(Err(error)) => {
                 // A non-zero exit, whatever the reason: the supervisor boots
                 // the unit again. Persistent reasons show up as a restart
@@ -578,25 +580,20 @@ fn sha256_of(path: &Path) -> Result<String, EngineError> {
 /// Run one seed to its verdict.
 pub async fn run_seed(opts: SimOptions) -> Result<SimReport, EngineError> {
     let keep = opts.keep;
-    let (world, _clock) = World::build(opts)?;
+    let (mut world, _clock) = World::build(opts)?;
 
     let mut deaths_done = 0usize;
     let mut restarts = 0u32;
     let mut restart_reasons: Vec<String> = Vec::new();
     let mut segments = 0u32;
-    let mut stopped: Option<(RunOutcome, Vec<String>, AccountView, Vec<(String, String)>)> = None;
+    let mut stopped: Option<Box<StoppedEngine>> = None;
     let mut engine_error: Option<String> = None;
     loop {
         segments += 1;
         let death_at = world.deaths.get(deaths_done).copied();
         match world.run_segment(death_at, segments > 1).await {
-            Ok(SegmentEnd::Stopped {
-                outcome,
-                in_flight,
-                account,
-                strategy_health,
-            }) => {
-                stopped = Some((outcome, in_flight, account, strategy_health));
+            Ok(SegmentEnd::Stopped(end)) => {
+                stopped = Some(end);
                 break;
             }
             Ok(SegmentEnd::Died) => {
@@ -667,7 +664,7 @@ pub async fn run_seed(opts: SimOptions) -> Result<SimReport, EngineError> {
     };
     let stopped_by = stopped
         .as_ref()
-        .map(|(o, _, _, _)| format!("{:?}", o.stopped_by));
+        .map(|end| format!("{:?}", end.outcome.stopped_by));
     // Rebuilt from the same config the run booted with, so `validate_checkpoint`
     // is the reducer's own answer about its own durable state.
     let judged = assembly::strategies(&world.loaded.config.strategies)
@@ -690,13 +687,13 @@ pub async fn run_seed(opts: SimOptions) -> Result<SimReport, EngineError> {
         venue_orders: &venue_orders,
         venue_executions: &venue_executions,
         venue_accounting: &venue_accounting,
-        engine_in_flight: stopped.as_ref().map(|(_, ids, _, _)| ids.as_slice()),
-        engine_account: stopped.as_ref().map(|(_, _, account, _)| account),
+        engine_in_flight: stopped.as_ref().map(|end| end.in_flight.as_slice()),
+        engine_account: stopped.as_ref().map(|end| &end.account),
         stopped_by: stopped_by.as_deref(),
         engine_error: engine_error.as_deref(),
         ledger_net_usdt,
         published: &world.published,
-        strategy_health: stopped.as_ref().map(|(_, _, _, health)| health.as_slice()),
+        strategy_health: stopped.as_ref().map(|end| end.strategy_health.as_slice()),
         judged: &judged,
         long: world.producer.long.as_ref().map(|b| b.id),
         carry: world.producer.carry.as_ref().map(|b| b.id),
@@ -726,7 +723,7 @@ pub async fn run_seed(opts: SimOptions) -> Result<SimReport, EngineError> {
         signals_rejected: counts.rejected,
         strategy_errors: stopped
             .as_ref()
-            .map(|(_, _, _, health)| health.clone())
+            .map(|end| end.strategy_health.clone())
             .unwrap_or_default(),
         orders_by_sleeve: by_sleeve.orders,
         fills_by_sleeve: by_sleeve.fills,

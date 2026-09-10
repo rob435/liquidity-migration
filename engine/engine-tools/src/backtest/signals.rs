@@ -243,9 +243,9 @@ impl SignalReplayFeed {
             schema_version: SIGNAL_LIFECYCLE_SCHEMA_VERSION,
             boot_nonce: "sim".into(),
             producer: SignalProducerReport {
-                producer: plan.producer.clone(),
+                producer: plan.producer,
                 epoch,
-                generation: plan.generation.clone(),
+                generation: plan.generation,
                 sealed,
                 sources,
             },
@@ -460,6 +460,7 @@ mod tests {
             gaps: Vec::new(),
             blocked_destinations: Vec::new(),
             scheduler: scheduler.clone(),
+            ..SignalReplayFeed::empty(scheduler.clone())
         };
         let (sender, mut live) = crate::signals::signal_channel();
         sender.try_send(missing.clone()).unwrap();
@@ -514,6 +515,7 @@ mod tests {
             gaps: Vec::new(),
             blocked_destinations: Vec::new(),
             scheduler: scheduler.clone(),
+            ..SignalReplayFeed::empty(scheduler.clone())
         };
         let delivered = feed.next_observation().await.unwrap();
         assert_eq!(delivered, future);
@@ -578,7 +580,8 @@ mod tests {
                 next_sequence: 1,
             }],
             blocked_destinations: Vec::new(),
-            scheduler,
+            scheduler: scheduler.clone(),
+            ..SignalReplayFeed::empty(scheduler)
         };
         assert_eq!(feed.next_observation().await.unwrap(), missing);
         feed.acknowledge_last().unwrap();
@@ -605,7 +608,8 @@ mod tests {
             producer_frontiers: std::collections::BTreeMap::new(),
             gaps: Vec::new(),
             blocked_destinations: Vec::new(),
-            scheduler,
+            scheduler: scheduler.clone(),
+            ..SignalReplayFeed::empty(scheduler)
         };
         feed.set_gap_requests(
             &[SignalGapRequest {

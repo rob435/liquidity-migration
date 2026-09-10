@@ -436,8 +436,8 @@ pub fn publish(
                     available,
                     json!({
                         "schema_version": 1,
-                        "config": identity.clone(),
-                        "universe": universe.clone(),
+                        "config": &identity,
+                        "universe": &universe,
                         "payload": {
                             "kind": "llm_gate_candidates",
                             "decision_ts_ms": hour,

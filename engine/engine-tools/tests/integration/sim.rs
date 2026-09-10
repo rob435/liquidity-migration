@@ -30,10 +30,13 @@ fn options(seed: u64, tag: &str) -> SimOptions {
 const PINNED_FEE_SNAPSHOT: &str =
     "13ea6684a9f394b3dd83663f538bf0b5af3ab09d6c17f2deac5254be9c25bd1d";
 
-/// Seed 1, 300 s, two symbols, no faults, no death.
-const QUOTER_CLEAN_LOG: &str = "217c7db7c4f50aa42260b2093a7f27c7e3b219a4277f50882d124335d70b2f97";
+/// Seed 1, 300 s, two symbols, no faults, no death. The counts and both
+/// fingerprints moved on 2026-09-10, when the simulated venue learned the
+/// exact standalone stops a real one has: the stop supervisor's restore now
+/// succeeds where it used to record a refusal.
+const QUOTER_CLEAN_LOG: &str = "75aef4c6d94c3d1fb1b70ae3b5ae37e10fc33519162ad3356cbc01c9abcf205d";
 /// Seed 7, 300 s, two symbols, heavy faults, two deaths.
-const QUOTER_HEAVY_LOG: &str = "73a4da2469c97f1c4b7ac12de05af696139456a860ca4462b48cc53b5114a0dd";
+const QUOTER_HEAVY_LOG: &str = "bd8a269651b3b30ab68ba37a5c20aa7b91ec980803e37224de7670791176e331";
 
 /// The quoter's log, record for record, with the `Boot` record left out.
 ///
@@ -128,7 +131,7 @@ async fn without_faults_the_simulation_keeps_the_backtest_promise() {
     assert!(first.orders_sent > 2, "{}", first.orders_sent);
     assert!(first.faults.is_empty(), "{:?}", first.faults);
     assert_eq!(first.segments, 1);
-    assert_eq!(first.wal_records, 7334);
+    assert_eq!(first.wal_records, 7331);
     assert_pinned_log(&first, &dir, QUOTER_CLEAN_LOG);
     assert_order_terms_and_simulated_fill_boundary(&dir);
     let second = run_seed(opts).await.expect("the world runs again");
@@ -144,12 +147,12 @@ async fn faults_and_a_death_leave_the_log_and_the_venue_agreeing() {
     // Record counts, unlike the log's file hash, are a function of the code
     // and the seed alone.
     for (seed, records) in [
-        (1u64, 8191),
-        (2, 7824),
-        (3, 7478),
-        (4, 7524),
-        (5, 7341),
-        (6, 7622),
+        (1u64, 8469),
+        (2, 7821),
+        (3, 10102),
+        (4, 7565),
+        (5, 7340),
+        (6, 7619),
     ] {
         let mut opts = options(seed, "faulty");
         opts.crashes = 1;
@@ -191,7 +194,7 @@ async fn one_seed_replays_byte_for_byte_under_heavy_faults() {
     let first = run_seed(opts.clone()).await.expect("the world runs");
     assert!(first.passed(), "{:#?}", first.failures());
     assert_eq!(first.crashes_injected, 2);
-    assert_eq!(first.wal_records, 8445);
+    assert_eq!(first.wal_records, 7453);
     assert_pinned_log(&first, &dir, QUOTER_HEAVY_LOG);
     assert_order_terms_and_simulated_fill_boundary(&dir);
     // Every halt cancel the venue refused, never answered or never confirmed
