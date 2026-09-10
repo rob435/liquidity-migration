@@ -31,12 +31,12 @@ const PINNED_FEE_SNAPSHOT: &str =
     "13ea6684a9f394b3dd83663f538bf0b5af3ab09d6c17f2deac5254be9c25bd1d";
 
 /// Seed 1, 300 s, two symbols, no faults, no death. The counts and both
-/// fingerprints moved on 2026-09-10, when the simulated venue learned the
-/// exact standalone stops a real one has: the stop supervisor's restore now
-/// succeeds where it used to record a refusal.
-const QUOTER_CLEAN_LOG: &str = "75aef4c6d94c3d1fb1b70ae3b5ae37e10fc33519162ad3356cbc01c9abcf205d";
+/// fingerprints are functions of the engine's code, the simulated venue and
+/// the seed alone: a refactor leaves them; a change to what the quoter's run
+/// writes moves them and is re-pinned with its change point in CHANGELOG.md.
+const QUOTER_CLEAN_LOG: &str = "a19fe49ee0c57d3f07c2b1b663c7240f7b8ce77987cf23fbfbb243a37398a01b";
 /// Seed 7, 300 s, two symbols, heavy faults, two deaths.
-const QUOTER_HEAVY_LOG: &str = "bd8a269651b3b30ab68ba37a5c20aa7b91ec980803e37224de7670791176e331";
+const QUOTER_HEAVY_LOG: &str = "b743e2bceedabff2e7e6bda60ac275a6dac72a96cacbd95786dee7ff5f760a57";
 
 /// The quoter's log, record for record, with the `Boot` record left out.
 ///
@@ -131,7 +131,7 @@ async fn without_faults_the_simulation_keeps_the_backtest_promise() {
     assert!(first.orders_sent > 2, "{}", first.orders_sent);
     assert!(first.faults.is_empty(), "{:?}", first.faults);
     assert_eq!(first.segments, 1);
-    assert_eq!(first.wal_records, 7331);
+    assert_eq!(first.wal_records, 10897);
     assert_pinned_log(&first, &dir, QUOTER_CLEAN_LOG);
     assert_order_terms_and_simulated_fill_boundary(&dir);
     let second = run_seed(opts).await.expect("the world runs again");
@@ -147,12 +147,12 @@ async fn faults_and_a_death_leave_the_log_and_the_venue_agreeing() {
     // Record counts, unlike the log's file hash, are a function of the code
     // and the seed alone.
     for (seed, records) in [
-        (1u64, 8469),
-        (2, 7821),
-        (3, 10102),
-        (4, 7565),
-        (5, 7340),
-        (6, 7619),
+        (1u64, 11387),
+        (2, 11074),
+        (3, 12148),
+        (4, 10975),
+        (5, 10901),
+        (6, 11027),
     ] {
         let mut opts = options(seed, "faulty");
         opts.crashes = 1;
@@ -194,7 +194,7 @@ async fn one_seed_replays_byte_for_byte_under_heavy_faults() {
     let first = run_seed(opts.clone()).await.expect("the world runs");
     assert!(first.passed(), "{:#?}", first.failures());
     assert_eq!(first.crashes_injected, 2);
-    assert_eq!(first.wal_records, 7453);
+    assert_eq!(first.wal_records, 10855);
     assert_pinned_log(&first, &dir, QUOTER_HEAVY_LOG);
     assert_order_terms_and_simulated_fill_boundary(&dir);
     // Every halt cancel the venue refused, never answered or never confirmed
