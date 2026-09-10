@@ -1201,6 +1201,83 @@ fn long_fast_forward_records_the_exact_skipped_range() {
 }
 
 #[test]
+fn a_checkpoint_from_another_public_source_is_archived_and_the_worker_cold_starts() {
+    let config = test_config();
+    let universe = test_universe();
+    let root = temporary_root("drifted-public-source");
+    let state_dir = root.join("state");
+    let spool_dir = root.join("spool");
+    let first = DurableSignalWorker::open_with_universe(
+        config.clone(),
+        universe.clone(),
+        &state_dir,
+        &spool_dir,
+    )
+    .unwrap();
+    let first_generation = first.worker.state.source_generation.clone();
+    let first_contract = first.worker.state.source_contract_sha256.clone();
+    drop(first);
+    std::fs::write(state_dir.join("hot-input-journal.jsonl"), b"").unwrap();
+
+    // The realm now reads another venue's public data: the checkpoint, its
+    // journal and its pending files belong to the old contract.
+    let mut moved = config;
+    moved.sources.public_venue = "mexc".into();
+    let second = DurableSignalWorker::open_with_universe(
+        moved.clone(),
+        universe.clone(),
+        &state_dir,
+        &spool_dir,
+    )
+    .unwrap();
+    assert_ne!(second.worker.state.source_contract_sha256, first_contract);
+    assert_eq!(
+        second.worker.state.source_contract_sha256,
+        source_history_hash(&moved)
+    );
+    assert_ne!(second.worker.state.source_generation, first_generation);
+    assert_eq!(second.worker.state.last_input_sequence, 0);
+    let second_generation = second.worker.state.source_generation.clone();
+    let archives = std::fs::read_dir(&state_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("drifted-source-")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(archives.len(), 1);
+    let archive = archives[0].path();
+    let archived: WorkerState =
+        serde_json::from_slice(&std::fs::read(archive.join("checkpoint.json")).unwrap()).unwrap();
+    assert_eq!(archived.source_generation, first_generation);
+    assert_eq!(archived.source_contract_sha256, first_contract);
+    assert!(archive.join("hot-input-journal.jsonl").exists());
+    assert!(!state_dir.join("hot-input-journal.jsonl").exists());
+    drop(second);
+
+    // The fresh checkpoint is the one the same source reopens.
+    let third =
+        DurableSignalWorker::open_with_universe(moved, universe, &state_dir, &spool_dir).unwrap();
+    assert_eq!(third.worker.state.source_generation, second_generation);
+    assert_eq!(
+        std::fs::read_dir(&state_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("drifted-source-")
+            })
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn paused_engine_coalesces_actionable_generations_and_republishes_current_state() {
     let config = compact_feature_config();
     let universe = test_universe();

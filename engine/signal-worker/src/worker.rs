@@ -2466,6 +2466,35 @@ fn validate_source_generation(value: &str) -> Result<(), WorkerError> {
     Ok(())
 }
 
+/// Moves a checkpoint written under another public source, with its journal
+/// and pending files, into `<state_dir>/drifted-source-<sha8>-<unix_ms>/`.
+fn archive_drifted_source_state(
+    state_dir: &Path,
+    previous_contract: &str,
+) -> Result<std::path::PathBuf, WorkerError> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0);
+    let short = previous_contract.get(..8).unwrap_or(previous_contract);
+    let archive = state_dir.join(format!("drifted-source-{short}-{stamp}"));
+    std::fs::create_dir_all(&archive)
+        .map_err(|error| WorkerError::io("create drifted signal state archive", error))?;
+    for name in [
+        "checkpoint.json",
+        "pending-transaction.json",
+        "pending-next-state.json",
+        "hot-input-journal.jsonl",
+    ] {
+        let source = state_dir.join(name);
+        if source.exists() {
+            std::fs::rename(&source, archive.join(name))
+                .map_err(|error| WorkerError::io("archive drifted signal state", error))?;
+        }
+    }
+    Ok(archive)
+}
+
 fn random_source_generation() -> Result<String, WorkerError> {
     loop {
         let mut bytes = [0_u8; SOURCE_GENERATION_BYTES];
@@ -2603,6 +2632,24 @@ impl DurableSignalWorker {
         let journal = AppendJournal::new(state_dir.as_ref().join("hot-input-journal.jsonl"));
         let spool = SpoolWriter::new(spool_dir.as_ref())?;
         let mut checkpoint_writes_session = 0_u64;
+        // A checkpoint written under another public source, its journal and
+        // any pending transaction on it are one lineage, and nothing in them
+        // carries to this source. Archive them beside the state and start as
+        // a first boot would, rather than exit until an operator does it.
+        if let Some(previous) = checkpoint.load::<WorkerState>()? {
+            let current = source_history_hash(&config);
+            if previous.source_contract_sha256 != current {
+                let archive = archive_drifted_source_state(
+                    state_dir.as_ref(),
+                    &previous.source_contract_sha256,
+                )?;
+                eprintln!(
+                    "signal-worker: state: checkpoint public source contract drifted from {} to {current}; archived {} and cold-starting",
+                    previous.source_contract_sha256,
+                    archive.display()
+                );
+            }
+        }
         if !checkpoint.path().exists() {
             let initial = SignalWorker::new_with_source_generation(
                 config.clone(),
