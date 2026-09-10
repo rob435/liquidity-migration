@@ -11,6 +11,8 @@ pub const HOUR_MS: i64 = 3_600_000;
 pub const DAY_MS: i64 = 24 * HOUR_MS;
 pub const MIN_REPLAY_DAYS: i64 = 45;
 pub const MIN_DECISION_SYMBOLS: usize = 50;
+/// The scorer's answer to a decision universe under [`MIN_DECISION_SYMBOLS`].
+pub const UNIVERSE_TOO_THIN: &str = "CARRY decision universe has fewer than 50 symbols";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -345,7 +347,7 @@ pub fn score_decision(
         }
     }
     if current_universe.len() < MIN_DECISION_SYMBOLS {
-        return Err("CARRY decision universe has fewer than 50 symbols");
+        return Err(UNIVERSE_TOO_THIN);
     }
 
     let mut state = prior.clone();

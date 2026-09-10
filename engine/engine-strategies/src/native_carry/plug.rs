@@ -225,6 +225,9 @@ impl NativeCarry {
                 Skipped::NoPrice { symbol } => (symbol, "no_price"),
                 Skipped::NoInstrumentRule { symbol } => (symbol, "no_instrument_rule"),
                 Skipped::ForeignOwner { symbol } => (symbol, "foreign_strategy_owner"),
+                Skipped::DecisionUniverseBelowMinimum { symbol, .. } => {
+                    (symbol, "decision_universe_below_minimum")
+                }
             };
             self.core.blockers.insert(symbol, reason.to_owned());
         }
@@ -536,6 +539,11 @@ impl NativeCarry {
             observation.observation_id.clone(),
         );
         let effective_config = self.effective_config(ctx);
+        let holds_nothing = {
+            let symbols = self.known_symbols(Vec::new(), ctx);
+            let (working, opening) = owned_order_state(ctx);
+            working.is_empty() && opening.is_empty() && attributed_exposure_is_flat(ctx, &symbols)
+        };
         match envelope.payload {
             SignalPayload::CarryScorerCatchup {
                 decision_ts_ms,
@@ -561,6 +569,7 @@ impl NativeCarry {
                         decision_ts_ms,
                         rows,
                         signal_receipt: receipt,
+                        holds_nothing,
                     },
                     self.core.state.clone(),
                     &effective_config,
@@ -607,6 +616,7 @@ impl NativeCarry {
                             decision_ts_ms,
                             rows,
                             signal_receipt: receipt,
+                            holds_nothing,
                         },
                         self.core.state.clone(),
                         &effective_config,

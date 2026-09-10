@@ -8,13 +8,14 @@ use serde_json::json;
 
 use super::scorer::{
     score_decision, CarryDecision, CarryFeatureRow, CarryRuleConfig, ScorerState, DAY_MS,
+    UNIVERSE_TOO_THIN,
 };
 use crate::native_common::{
     checkpoint_payload, config_fingerprint, hex_digest, order_effects, valid_sha256, valid_symbol,
     CarryPresettlementFire, Effect, ExecutionOutput, PlannedTarget, PlannerFacts,
     DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
 };
-use crate::position_plan::{plan as plan_targets, PlanRules, Step, Target};
+use crate::position_plan::{plan as plan_targets, PlanRules, Skipped, Step, Target};
 
 pub const CONTRACT_SCHEMA_VERSION: u16 = 1;
 // Admission cycles are one minute, matching the registered idle-cycle clock.
@@ -400,6 +401,29 @@ pub struct ScorerCatchupInput {
     pub decision_ts_ms: i64,
     pub rows: Vec<CarryFeatureRow>,
     pub signal_receipt: (String, u64, String),
+    /// No attributed exposure, no working order, no opening order.
+    pub holds_nothing: bool,
+}
+
+/// Whether a day with too thin a universe is a day with nothing to decide:
+/// the sleeve may not open and holds nothing a decision would manage. Every
+/// other case keeps the scorer's refusal, because a held position or an open
+/// entry permission needs the decision that refusal withholds.
+fn decision_can_wait(config: &StrategyConfig, holds_nothing: bool) -> bool {
+    !config.entries_enabled && holds_nothing
+}
+
+fn thin_universe_skip(rows: &[CarryFeatureRow], decision_ts_ms: i64) -> Skipped {
+    let symbols = rows
+        .iter()
+        .filter(|row| row.bar_ts_ms == decision_ts_ms)
+        .map(|row| row.symbol.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    Skipped::DecisionUniverseBelowMinimum {
+        symbol: "*".to_owned(),
+        symbols,
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -431,15 +455,32 @@ pub fn reduce_scorer_catchup(
     {
         return Err("CARRY scorer catch-up is not the next UTC generation");
     }
-    let (_, scorer) = score_decision(
+    let scored = score_decision(
         &input.rows,
         input.decision_ts_ms,
         &state.scorer,
         &config.rule,
-    )?;
+    );
+    let (source, sequence, observation_id) = input.signal_receipt;
+    let scorer = match scored {
+        Ok((_, scorer)) => scorer,
+        Err(UNIVERSE_TOO_THIN) if decision_can_wait(config, input.holds_nothing) => {
+            return Ok(ScorerCatchupOutput {
+                execution: ExecutionOutput {
+                    effects: vec![Effect::ConsumeSignal {
+                        source,
+                        sequence,
+                        observation_id,
+                    }],
+                    skipped: vec![thin_universe_skip(&input.rows, input.decision_ts_ms)],
+                },
+                next_state: state,
+            });
+        }
+        Err(error) => return Err(error),
+    };
     state.scorer = scorer;
     state.validate()?;
-    let (source, sequence, observation_id) = input.signal_receipt;
     Ok(ScorerCatchupOutput {
         execution: ExecutionOutput {
             effects: vec![
@@ -471,12 +512,40 @@ pub fn reduce_signal(
     {
         return Err("CARRY signal batch identity is invalid");
     }
-    let (decision, scorer) = score_decision(
+    let holds_nothing = input.facts.held.is_empty()
+        && input.owned_working_symbols.is_empty()
+        && input.owned_opening_order_ids.is_empty();
+    let (decision, scorer) = match score_decision(
         &batch.rows,
         batch.decision_ts_ms,
         &prior.scorer,
         &config.rule,
-    )?;
+    ) {
+        Ok(scored) => scored,
+        Err(UNIVERSE_TOO_THIN) if decision_can_wait(config, holds_nothing) => {
+            let mut effects = Vec::new();
+            if let Some((source, sequence, observation_id)) = input.signal_receipt {
+                effects.push(Effect::ConsumeSignal {
+                    source,
+                    sequence,
+                    observation_id,
+                });
+            }
+            return Ok(ReducerOutput {
+                next_state: prior,
+                effective_decision: input.decision,
+                summary: PlanSummary::default(),
+                settled_exit_fires: Vec::new(),
+                presettlement_fires: Vec::new(),
+                drop_exit_fires: Vec::new(),
+                execution: ExecutionOutput {
+                    effects,
+                    skipped: vec![thin_universe_skip(&batch.rows, batch.decision_ts_ms)],
+                },
+            });
+        }
+        Err(error) => return Err(error),
+    };
     let upcoming = if batch.upcoming_rows.is_empty() {
         None
     } else {
@@ -1186,7 +1255,7 @@ mod daily_hold_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::position_plan::{Held, Skipped};
+    use crate::position_plan::Held;
 
     const FIXTURE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1647,6 +1716,7 @@ mod tests {
                         sequence as u64 + 1,
                         format!("catchup-{day}"),
                     ),
+                    holds_nothing: false,
                 },
                 state,
                 &config(),
@@ -1672,6 +1742,7 @@ mod tests {
                 decision_ts_ms: 50 * DAY_MS,
                 rows: scorer_rows(50, 50),
                 signal_receipt: ("worker".into(), 4, "gap".into()),
+                holds_nothing: false,
             },
             state.clone(),
             &config(),
@@ -1737,6 +1808,115 @@ mod tests {
             .expect("same current generation is idempotent");
         assert_eq!(duplicate.next_state, output.next_state);
         assert!(duplicate.execution.skipped.is_empty());
+    }
+
+    #[test]
+    fn a_thin_decision_universe_is_consumed_without_a_decision_only_when_off_and_flat() {
+        let day = 100;
+        let placeholder = CarryDecision {
+            schema_version: 1,
+            decision_ts_ms: day * DAY_MS,
+            weights: BTreeMap::new(),
+            universe_size: 0,
+            replay_days: 0,
+            gross: 0.0,
+        };
+        let mut input = ReducerInput {
+            now_ms: day * DAY_MS + 1,
+            decision: placeholder,
+            upcoming_decision: None,
+            settled_funding: Vec::new(),
+            presettlement: Vec::new(),
+            durable_fires: Vec::new(),
+            trail_by_symbol: BTreeMap::new(),
+            entry_blockers: BTreeMap::new(),
+            account_healthy: true,
+            equity_usdt: 52.0,
+            upcoming_sizing_equity_usdt: None,
+            facts: PlannerFacts::default(),
+            owned_working_symbols: BTreeSet::new(),
+            owned_opening_order_ids: BTreeMap::new(),
+            checkpoint_fingerprint: None,
+            signal_receipt: Some(("worker".into(), 9, "thin".into())),
+        };
+        // Sixty days of history for four symbols: past the replay floor, under
+        // the universe floor.
+        let mut rows = scorer_rows(day - 60, day);
+        rows.retain(|row| row.symbol.as_str() < "S004USDT");
+        let batch = CarrySignalBatch {
+            schema_version: 1,
+            decision_ts_ms: day * DAY_MS,
+            rows: rows.clone(),
+            upcoming_rows: Vec::new(),
+            settled_funding: Vec::new(),
+            presettlement: Vec::new(),
+            marks: Vec::new(),
+            rejections: Vec::new(),
+        };
+        let state = SleeveState {
+            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
+            ..SleeveState::default()
+        };
+        let mut off = config();
+        off.entries_enabled = false;
+
+        // Entries off and nothing held: the batch is consumed, nothing else
+        // changes, and the heartbeat learns why through the skipped row.
+        let output = reduce_signal(batch.clone(), input.clone(), state.clone(), &off)
+            .expect("nothing to decide is not an error");
+        assert_eq!(output.next_state, state);
+        assert!(matches!(
+            output.execution.effects.as_slice(),
+            [Effect::ConsumeSignal { sequence: 9, .. }]
+        ));
+        assert!(matches!(
+            output.execution.skipped.as_slice(),
+            [Skipped::DecisionUniverseBelowMinimum { symbols: 4, .. }]
+        ));
+
+        // Entries on: the scorer's refusal stands.
+        assert_eq!(
+            reduce_signal(batch.clone(), input.clone(), state.clone(), &config()).unwrap_err(),
+            UNIVERSE_TOO_THIN
+        );
+        // Entries off with a holding: the refusal stands, the position needs
+        // its decision.
+        input.facts.held.insert(
+            "S000USDT".into(),
+            Held {
+                qty: 1.0,
+                side: Side::Buy,
+                px: 100.0,
+                entry_px: 100.0,
+                stop_px: 60.0,
+            },
+        );
+        assert_eq!(
+            reduce_signal(batch, input, state.clone(), &off).unwrap_err(),
+            UNIVERSE_TOO_THIN
+        );
+
+        // The catch-up reducer follows the same rule.
+        let catchup = |holds_nothing: bool, config: &StrategyConfig| {
+            reduce_scorer_catchup(
+                ScorerCatchupInput {
+                    decision_ts_ms: day * DAY_MS,
+                    rows: rows.clone(),
+                    signal_receipt: ("worker".into(), 10, "thin-catchup".into()),
+                    holds_nothing,
+                },
+                state.clone(),
+                config,
+            )
+        };
+        let skipped = catchup(true, &off).expect("nothing to catch up");
+        assert_eq!(skipped.next_state, state);
+        assert!(matches!(
+            skipped.execution.effects.as_slice(),
+            [Effect::ConsumeSignal { sequence: 10, .. }]
+        ));
+        assert_eq!(catchup(false, &off).unwrap_err(), UNIVERSE_TOO_THIN);
+        assert_eq!(catchup(true, &config()).unwrap_err(), UNIVERSE_TOO_THIN);
     }
 
     #[test]

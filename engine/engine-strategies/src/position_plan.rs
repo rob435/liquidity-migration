@@ -129,6 +129,10 @@ pub enum Skipped {
     /// Another sleeve owns exposure or an opening order on this symbol.
     #[serde(rename = "foreign_strategy_owner")]
     ForeignOwner { symbol: String },
+    /// The day's decision universe is under the scorer's floor while the
+    /// sleeve holds nothing and may not open: there is no decision to make,
+    /// and the batch is consumed. `symbol` is `*`.
+    DecisionUniverseBelowMinimum { symbol: String, symbols: usize },
 }
 
 /// The knobs, all stated rather than assumed.

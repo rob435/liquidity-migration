@@ -138,6 +138,9 @@ impl NativeExodus {
                 Skipped::NoPrice { symbol } => (symbol, "no_price"),
                 Skipped::NoInstrumentRule { symbol } => (symbol, "no_instrument_rule"),
                 Skipped::ForeignOwner { symbol } => (symbol, "foreign_strategy_owner"),
+                Skipped::DecisionUniverseBelowMinimum { symbol, .. } => {
+                    (symbol, "decision_universe_below_minimum")
+                }
             };
             self.core.blockers.insert(symbol, reason.to_owned());
         }
