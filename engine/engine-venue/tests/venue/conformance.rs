@@ -54,7 +54,7 @@ fn request() -> OrderRequest {
     }
 }
 
-fn build(name: VenueName, server: &TestServer) -> Venue {
+pub(crate) fn build(name: VenueName, server: &TestServer) -> Venue {
     let symbols = vec!["BTCUSDT".into()];
     let url = server.base_url();
     #[allow(unreachable_patterns)]

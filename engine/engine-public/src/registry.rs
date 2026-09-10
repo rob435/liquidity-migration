@@ -621,6 +621,59 @@ impl VenueName {
         }
     }
 
+    /// What every `Observed` cell in the rows above was taken against: a
+    /// sha256 over that venue's whole adapter source.
+    ///
+    /// `engine/engine-venue/tests/venue/adapter_semantics.rs` recomputes it
+    /// from `engine-venue/src/venues/<venue>/` — every `.rs` file that is not
+    /// a test module — and fails on drift, naming the realms of that venue
+    /// whose rows hold a current receipt. Request encoding, order types,
+    /// quantity conversion and fill interpretation all live in those files,
+    /// so a change to any of them is a change to what a receipt means.
+    ///
+    /// `Evidence::Observed { current }` stays a hand flag rather than being
+    /// derived from this pin: a comment edit under `venues/bybit/` would
+    /// otherwise demote `bybit_mainnet` to `live-canary`. The pin's job is to
+    /// make the review happen, not to make the verdict.
+    pub const fn adapter_semantics_fingerprint(self) -> &'static str {
+        match self {
+            Self::BybitDemo | Self::BybitMainnet => Self::BYBIT_SEMANTICS,
+            Self::BinanceTestnet | Self::BinanceMainnet => Self::BINANCE_SEMANTICS,
+            Self::HyperliquidTestnet | Self::HyperliquidMainnet => Self::HYPERLIQUID_SEMANTICS,
+            Self::LighterTestnet | Self::LighterMainnet => Self::LIGHTER_SEMANTICS,
+            Self::MexcMainnet => Self::MEXC_SEMANTICS,
+            Self::VariationalMainnet => Self::VARIATIONAL_SEMANTICS,
+        }
+    }
+
+    /// `gateway.rs`, `private.rs`, `public.rs`, `realm.rs`, `mod.rs`: the v5
+    /// linear order and trading-stop encoding, the amend by `orderLinkId`,
+    /// the qty=0 whole-position close, and the execution stream both funded
+    /// Bybit realms' receipts were read off.
+    const BYBIT_SEMANTICS: &'static str =
+        "dd0edc1a1b482c3941077f0d52e3466838eb2abf40534755a0acfdfafe6d60b1";
+    /// The USDT-M futures REST and user-stream encoding.
+    const BINANCE_SEMANTICS: &'static str =
+        "bf69d5f34759320ca5cd79f808f9151ace4e5eead6314fb06e9b9ded2bb9cecd";
+    /// The signed exchange actions (`order`, `batchModify`, `cancel`), the
+    /// EIP-712 digest, the `cloid` scheme, and the fill and open-order reads
+    /// the funded address's canary receipt was taken against.
+    const HYPERLIQUID_SEMANTICS: &'static str =
+        "1639dd4e14b45214db68450998e3f29460b63d80d738f8ff08fb752372c08929";
+    /// The transaction encoding and the account/history resync, `crypto/`
+    /// included.
+    const LIGHTER_SEMANTICS: &'static str =
+        "7c94f6fc2582c7620dfc7c21b7144db568be0818be9d6613f0f6fbd6b51633e1";
+    /// The contract-API order encoding, the contract-count quantity
+    /// conversion, the position-bound stop record, and the private login and
+    /// `personal.filter` frames the funded account's canary receipt was taken
+    /// against.
+    const MEXC_SEMANTICS: &'static str =
+        "08b22a3dbf54d09b2d918e4b5467c317ece1e763230fa22ee5b0b45403e82f62";
+    /// The public market reads, and the refusal every write returns.
+    const VARIATIONAL_SEMANTICS: &'static str =
+        "a79c459e38b6768d387978c3cbb5d85af56ab5674193ca5577352a473924ac2c";
+
     /// The [`UNATTENDED_PROTECTED_TRADING`] capabilities this realm holds no
     /// current receipt for. Empty is what `live-proven` means.
     pub fn unproven_capabilities(self) -> Vec<Capability> {
