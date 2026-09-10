@@ -721,6 +721,9 @@ enum SignalFault {
 pub struct Parked {
     due_ns: u64,
     row: SignalObservation,
+    /// A withheld row waits for a later row of its own source to be
+    /// delivered, so the engine sees the hole before the row that fills it.
+    holds_for_successor: bool,
 }
 
 pub type SharedParkedSignals = Arc<Mutex<Vec<Parked>>>;
@@ -785,9 +788,13 @@ impl<'a, F: SignalFeed> FaultySignalFeed<'a, F> {
         )
     }
 
-    fn park(&self, row: SignalObservation, due_ns: u64) {
+    fn park(&self, row: SignalObservation, due_ns: u64, holds_for_successor: bool) {
         let mut parked = lock(&self.parked);
-        parked.push(Parked { due_ns, row });
+        parked.push(Parked {
+            due_ns,
+            row,
+            holds_for_successor,
+        });
         parked.sort_by(|a, b| {
             a.due_ns
                 .cmp(&b.due_ns)
@@ -798,20 +805,28 @@ impl<'a, F: SignalFeed> FaultySignalFeed<'a, F> {
 
     fn take_due(&self, now_ns: u64) -> Option<SignalObservation> {
         let mut parked = lock(&self.parked);
-        let index = parked.iter().position(|row| row.due_ns <= now_ns)?;
+        let index = parked
+            .iter()
+            .position(|row| !row.holds_for_successor && row.due_ns <= now_ns)?;
         Some(parked.remove(index).row)
     }
 
     fn earliest_due(&self) -> Option<u64> {
-        lock(&self.parked).first().map(|row| row.due_ns)
+        lock(&self.parked)
+            .iter()
+            .find(|row| !row.holds_for_successor)
+            .map(|row| row.due_ns)
     }
-}
 
-/// A free function so the wait captures no reference to the wrapper.
-async fn signal_due(scheduler: Scheduler, at: Option<u64>) {
-    match at {
-        Some(at) => scheduler.sleep_until(at, WaiterKind::Signal).await,
-        None => std::future::pending().await,
+    /// A later row of `source` has been delivered: whatever was withheld from
+    /// that source is now owed to the engine.
+    fn release_successors(&self, source: &str, now_ns: u64) {
+        for parked in lock(&self.parked).iter_mut() {
+            if parked.holds_for_successor && parked.row.source == source {
+                parked.holds_for_successor = false;
+                parked.due_ns = now_ns;
+            }
+        }
     }
 }
 
@@ -845,15 +860,18 @@ impl<F: SignalFeed> SignalFeed for FaultySignalFeed<'_, F> {
                 self.owned = true;
                 return Ok(SignalFeedEvent::Observation(row));
             }
-            let due = self.earliest_due();
-            let event = tokio::select! {
-                biased;
-                () = signal_due(self.scheduler.clone(), due) => continue,
-                event = self.inner.next_event() => event?,
-            };
+            // Sequential, never a `select!`: a wait raced against the inner
+            // feed resolves in whichever order the two tasks happen to be
+            // polled, and two runs of one seed then write different logs.
+            if let Some(due) = self.earliest_due() {
+                self.scheduler.sleep_until(due, WaiterKind::Signal).await;
+                continue;
+            }
+            let event = self.inner.next_event().await?;
             let SignalFeedEvent::Observation(row) = event else {
                 return Ok(event);
             };
+            self.release_successors(&row.source, self.scheduler.now_ns());
             // Decided before anything is awaited, and what the wrapper keeps
             // is parked where a death cannot lose it.
             match self.roll() {
@@ -869,7 +887,7 @@ impl<F: SignalFeed> SignalFeed for FaultySignalFeed<'_, F> {
                         .now_ns()
                         .saturating_add(self.delay_by.as_nanos() as u64 * steps);
                     self.inner.acknowledge_last()?;
-                    self.park(row, due);
+                    self.park(row, due, false);
                 }
                 SignalFault::Duplicate => {
                     FaultLog::note(&self.log, "signal.duplicate");
@@ -879,14 +897,8 @@ impl<F: SignalFeed> SignalFeed for FaultySignalFeed<'_, F> {
                 }
                 SignalFault::Withhold => {
                     FaultLog::note(&self.log, "signal.withhold");
-                    // Due one delay from now, so the row after it is
-                    // delivered first and the engine records the hole.
-                    let due = self
-                        .scheduler
-                        .now_ns()
-                        .saturating_add(self.delay_by.as_nanos() as u64);
                     self.inner.acknowledge_last()?;
-                    self.park(row, due);
+                    self.park(row, self.scheduler.now_ns(), true);
                 }
             }
         }
@@ -916,7 +928,7 @@ impl<F: SignalFeed> SignalFeed for FaultySignalFeed<'_, F> {
                 .scheduler
                 .now_ns()
                 .saturating_add(self.delay_by.as_nanos() as u64);
-            self.park(observation, due);
+            self.park(observation, due, false);
             return Ok(());
         }
         self.inner.defer_last(observation)

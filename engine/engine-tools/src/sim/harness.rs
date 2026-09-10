@@ -40,9 +40,10 @@ use crate::trades::Trades;
 /// market to trade and the last one has time to catch up.
 const DEATH_WINDOW: (f64, f64) = (0.1, 0.9);
 
-/// The shock starts after this many seconds, so the producer's first batch has
-/// already opened a position for it to hit.
-const SHOCK_START_S: u64 = 2 * 3_600;
+/// The shock starts after this many seconds: the first hour boundary carries
+/// the day the tape opened in, whose entry deadline has long passed, so a
+/// position is already held by then.
+const SHOCK_START_S: u64 = 5_400;
 
 #[derive(Clone, Debug)]
 pub struct SimOptions {

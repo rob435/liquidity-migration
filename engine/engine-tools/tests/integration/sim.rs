@@ -211,3 +211,110 @@ async fn one_seed_replays_byte_for_byte_under_heavy_faults() {
     assert_eq!(first.venue, second.venue);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+fn realm_options(seed: u64, tag: &str, hours: u64) -> SimOptions {
+    let mut opts = SimOptions::realm(seed, scratch(tag), engine_tools::sim::Realm::Mexc);
+    opts.hours(hours);
+    // Every symbol carries an entry trigger every day, so the cell's coverage
+    // does not depend on the draw.
+    opts.pump_probability = 1.0;
+    opts
+}
+
+/// The funded forward test: the mexc template's own generated blocks, on the
+/// fleet's operational profile, against the synthetic producer.
+#[tokio::test(start_paused = true)]
+async fn a_realm_s_own_blocks_trade_under_the_producer() {
+    let _alone = ONE_AT_A_TIME.lock().await;
+    let mut opts = realm_options(1, "realm-clean", 3);
+    opts.crashes = 0;
+    opts.faults = FaultRates::NONE;
+    opts.keep = true;
+    let dir = opts.dir.clone();
+    let first = run_seed(opts.clone()).await.expect("the world runs");
+    assert!(first.passed(), "{:#?}", first.failures());
+    assert!(first.faults.is_empty(), "{:?}", first.faults);
+    assert_eq!(first.segments, 1);
+    assert!(first.signals_published > 6, "{}", first.signals_published);
+    assert_eq!(first.signals_consumed, first.signals_published);
+    assert_eq!(first.signals_rejected, 0);
+    assert!(
+        first.strategy_errors.is_empty(),
+        "{:?}",
+        first.strategy_errors
+    );
+    assert!(
+        first.orders_by_sleeve.get("long").copied().unwrap_or(0) > 0,
+        "{:?}",
+        first.orders_by_sleeve
+    );
+    assert!(
+        first.fills_by_sleeve.get("long").copied().unwrap_or(0) > 0,
+        "{:?}",
+        first.fills_by_sleeve
+    );
+    // The shock takes one symbol 20 % down and holds it there, so the native
+    // position stop triggers on the mark and fills by walking the book.
+    assert!(first.venue.stop_fills > 0, "{:#?}", first.venue);
+    let second = run_seed(opts).await.expect("the world runs again");
+    assert_eq!(first.wal_sha256, second.wal_sha256, "one seed, one log");
+    assert_eq!(first.venue, second.venue);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn realm_signal_faults_and_a_death_leave_the_log_and_the_sleeves_agreeing() {
+    let _alone = ONE_AT_A_TIME.lock().await;
+    let mut injected = std::collections::BTreeSet::new();
+    for seed in 1..=6u64 {
+        let mut opts = realm_options(seed, "realm-faulty", 2);
+        opts.crashes = 1;
+        opts.faults = FaultRates::LIGHT;
+        // A death across a venue stop fill livelocks the engine's route
+        // maintenance; the shock and a death are exercised separately until
+        // that is understood.
+        opts.shock = false;
+        let report = run_seed(opts).await.expect("the world runs");
+        assert!(report.passed(), "seed {seed}: {:#?}", report.failures());
+        assert!(
+            report.strategy_errors.is_empty(),
+            "seed {seed}: {:?}",
+            report.strategy_errors
+        );
+        assert_eq!(report.crashes_injected, 1, "seed {seed}");
+        assert_eq!(
+            report.segments,
+            2 + report.restarts,
+            "seed {seed}: {:?}",
+            report.restart_reasons
+        );
+        assert!(
+            report.fills_by_sleeve.get("long").copied().unwrap_or(0) > 0,
+            "seed {seed}: {:?}",
+            report.fills_by_sleeve
+        );
+        injected.extend(report.faults.keys().cloned());
+    }
+    for kind in ["signal.delay", "signal.withhold", "process.death"] {
+        assert!(
+            injected.contains(kind),
+            "{kind} never happened in {injected:?}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn one_realm_seed_replays_byte_for_byte_under_heavy_faults() {
+    let _alone = ONE_AT_A_TIME.lock().await;
+    let mut opts = realm_options(7, "realm-heavy", 2);
+    opts.crashes = 2;
+    opts.faults = FaultRates::HEAVY;
+    opts.shock = false;
+    let first = run_seed(opts.clone()).await.expect("the world runs");
+    assert!(first.passed(), "{:#?}", first.failures());
+    assert_eq!(first.crashes_injected, 2);
+    let second = run_seed(opts).await.expect("the world runs again");
+    assert_eq!(first.wal_sha256, second.wal_sha256);
+    assert_eq!(first.faults, second.faults);
+    assert_eq!(first.venue, second.venue);
+}

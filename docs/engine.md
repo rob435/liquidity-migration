@@ -532,19 +532,37 @@ The core loop with embedded strategy reducers and a virtual clock on a seeded sy
 | Flag | Default | Meaning |
 | :--- | :--- | :--- |
 | `--seed N` | 1 | The seed; `--seeds K` runs `N..N+K` |
-| `--seconds S` | 600 | Tape length in virtual seconds; one ticker, one book delta and one print per symbol per second |
-| `--symbols M` | 2 | Symbols the quoter trades, from `BTCUSDT`, `ETHUSDT`, `SOLUSDT` |
+| `--strategies quoter\|demo\|mainnet\|mexc\|hyperliquid` | `quoter` | `quoter` runs one market maker and no producer. A realm name runs that deployed template's own generated `[[strategy]]` blocks, byte for byte from `deploy/engine.<realm>.toml.template`, on `configs/operational.json`, against the synthetic producer. Both are compiled in |
+| `--seconds S` | 600 | Tape length in virtual seconds (quoter mode) |
+| `--hours H` | 12 | Tape length in virtual hours (realm mode) |
+| `--tape-step-s S` | 1 quoter, 10 realm | Seconds between tape rows: one ticker, one book delta and one print per symbol per step. Must stay inside `max_quote_age_ms` |
+| `--symbols M` | 2 quoter, 3 realm | Symbols traded, from `BTCUSDT`, `ETHUSDT`, `SOLUSDT` |
+| `--capital USDT` | 10 000 quoter, 500 realm | The venue's starting cash, which is the account's whole equity. 500 is where the LONG target clears every catalogue minimum and stays under the profile's per-symbol cap |
+| `--shock on\|off` | off quoter, on realm | One seeded symbol falls 20 % over 60 s from 1.5 h in and holds there an hour |
+| `--pump P` | 0.5 | Chance per symbol and UTC day that the producer's features carry an entry trigger |
+| `--gate` | off | Also publish one `llm_gate_candidates` row |
 | `--crashes C` | 1 | Process deaths; the private socket dies with the process and the next boot recovers from the log and the venue's fill history |
 | `--faults none\|light\|heavy` | `light` | Per-call fault rates (`engine/engine-tools/src/sim/faults.rs`); `light` is one command in fifty going wrong |
 | `--twice` | off | Run every seed twice and compare the logs byte for byte |
 | `--out DIR`, `--keep` | temp dir, off | Where the tape, config, log and trades go; kept only with `--keep` |
 | `--report PATH` | none | The sweep as JSON (`SweepReport`) |
 
+Realm mode does not model the signal worker, the spool files, the socket, or
+the venue's real latency: the producer is a pure function of the seed, the
+spool is a queue in memory, and every clock is virtual. The producer publishes
+on the worker's own grids — LONG features close at UTC midnight and republish
+hourly, CARRY publishes readiness, hourly market snapshots, funding on the
+eight-hour grid and a daily feature batch — and holds the worker's own
+two-round producer lifecycle handshake, because an engine booted with exact
+instruments refuses to let a legacy source make a dependent sleeve ready.
+
 | Injected | Where | What the engine must do |
 | :--- | :--- | :--- |
 | venue refusal; request lost before the venue; reply lost after it; slow reply; account read failure | `FaultyGateway` | treat the ambiguous send as ambiguous; learn the order's fate before growing; a halt cancel refused, unanswered or unconfirmed by the private stream is settled by reading the order's status, which cancels a working order again or records the ending |
 | private update dropped, duplicated or delayed; socket hiccup | `FaultyOrderFeed` | dedupe by execution id; recover a gap from the venue's fill history |
 | market feed hiccup; feed reset | `FaultyMarketFeed` | re-arm; never open against a stale quote |
+| signal row delayed past its window, delivered twice, or withheld so its source has a hole | `FaultySignalFeed` | consume a late row without deciding; dedupe on the durable cursor; record the gap, suspend the destination's openings, accept the missing row and resume |
+| one symbol falls 20 % and holds there | `market::Shock` | the native position stop triggers on the mark, fills by walking the book, and its fill is owned by the sleeve that opened the position |
 | process death; engine exit with an error | `harness` | boot from the log; a supervisor restart is modelled by booting again, and more than 8 restarts in one run is a crash loop |
 
 | Check | Holds when |
@@ -557,6 +575,14 @@ The core loop with embedded strategy reducers and a virtual clock on a seeded sy
 | `cash_flow_agrees_when_flat` | with no position open, the log's fills as money equal the venue's realized P&L net of every fee |
 | `ledger_agrees_when_flat` | with no position open, the round trips the log closes (as `engine fills` reads them) net to the venue's realized P&L net of closed fees |
 | `numbers_finite` | no NaN or infinity in the venue's books or the engine's account view |
+| `strategies_healthy` | no sleeve reports a health error and no callback fault is latched |
+| `signals_consumed_exactly_once` | every row published in time to matter is in the log once, settled once, and no recorded gap is still open |
+| `checkpoint_identity_holds` | each sleeve accepts its own newest durable state, at the block's fingerprint, and no boot rewrote the initial checkpoint |
+| `sleeve_attribution_agrees` | the sleeves' own inventories add up per symbol to the venue's position |
+| `no_opening_before_readiness` | LONG sent nothing before it durably consumed one of its producer's rows |
+| `working_entries_settled` | every worked LONG entry is terminal in the log or in flight in the engine |
+
+The last six report "not judged" and pass in quoter mode, which has no producer.
 
 The `cfg(test)` build shortens the engine's confirmation windows, so the simulator's own tests run as an integration test against the library as shipped (`engine/engine-tools/tests/integration/sim.rs`).
 
@@ -589,6 +615,19 @@ export RUSTDOC="$audit_rust_bin/rustdoc"
 cargo build --manifest-path engine/Cargo.toml --release --locked -p engine-tools --bins
 engine/target/release/engine-tools sim --seed 4 --seconds 300 --crashes 1 --faults light --keep --out /tmp/sim --report /tmp/sim/report.json
 engine/target/release/engine-tools sim --seed 100 --seeds 24 --faults light --twice
+
+# The funded forward test: the mexc template's own blocks against the producer.
+# Byte identity holds under a paused clock, which is where the suite checks it;
+# the engine's dispatch and drain deadlines read the wall clock, so two CLI runs
+# of one seed can take different paths.
+engine/target/release/engine-tools sim --strategies mexc --hours 3 --pump 1.0 \
+  --crashes 0 --faults none --keep --out /tmp/sim-mexc --report /tmp/sim-mexc/report.json
+engine/target/release/engine-tools sim --strategies mexc --hours 2 --pump 1.0 --shock off \
+  --seed 1 --seeds 6 --crashes 1 --faults light
+
+# Open fault: a death across a venue stop fill livelocks the engine's route
+# maintenance, so --shock and --crashes are exercised separately.
+engine/target/release/engine-tools sim --strategies mexc --hours 2 --pump 1.0 --crashes 1
 
 # Convert a stopped, complete copied WAL family into a new directory.
 engine/target/release/engine-tools wal-convert-v5 \
