@@ -187,6 +187,34 @@ The table is generated from the code by
 `registry::capability_matrix_tests::the_published_capability_matrix_matches_the_registry`,
 which fails on any drift between it and the block above.
 
+#### Strategy execution requirements
+
+`Strategy::execution_requirements` is asked of each built sleeve, so a
+requirement that follows from config is answered by the sleeve that is actually
+configured. `engine/engine-core/src/assembly.rs::compatibility` checks the set
+against the chosen realm's row above.
+
+| Plug | Requires | Never requires | Note |
+| --- | --- | --- | --- |
+| `long_native`, `carry_native`, `exodus_native` | `submit`, `cancel`, `fill-attribution`, `exact-quantity`, `protection-place`, `protection-change`, `protection-trigger`, plus `post-only` when the config sets `rest_entries` | `amend`, `reduce-below-minimum`, `funding-fee-cash` | One list through `native_common::sleeve::SleeveCore`: all three share `emit_effects`. `rest_entries` is true for `carry` and `long` and false for `exodus` in every deployed template. |
+| `quoter` | `submit`, `cancel`, `post-only`, `fill-attribution`, `amend`, `protection-place` | — | `amend` is the plug's own verb: it moves its resting quote rather than replacing it, so it cannot run on `mexc_mainnet`. `stop_loss_fraction` is a required positive parameter, so every opening quote carries a stop. |
+| `probe` | `submit`, `cancel`, `post-only`, `fill-attribution`, `protection-place` | `amend` | One post-only limit with a stop, pulled by id after its rest window. |
+| `bench` | `submit`, `protection-place` | — | A market order with a stop; the workload never cancels or reads a position back. |
+
+`amend` is absent from every native sleeve on purpose. A resting entry is
+repriced by the ENGINE's working supervisor (`engine-core/src/working.rs`), not
+by the sleeve. On a venue with `amend: unknown` that reprice is refused with a
+WAL `Note` and the entry rests unrepriced until its window ends — 30 s in the
+LONG templates. LONG runs exactly that way on `mexc_mainnet` today, so
+requiring `amend` here would refuse the boot of a funded engine.
+
+#### Boot checks on the chosen realm
+
+| Check | Where | Refuses on |
+| --- | --- | --- |
+| Strategy × venue compatibility | `assembly::compatibility`, called from `runner.rs` after the sleeve identities are resolved and before the venue, lease, credential or socket | A required capability whose row is `unknown` — the adapter does not do it, so the sleeve's action would die inside the engine every time. `implemented` and a stale receipt are accepted and logged per sleeve as a forward test (`WARN forward test: this sleeve's execution requirements hold no current live receipt on this realm`). |
+| Adapter-semantics pin | `VenueName::adapter_semantics_fingerprint`, one sha256 per venue over `engine-venue/src/venues/<venue>/**.rs` excluding test modules; checked by `engine/engine-venue/tests/venue/adapter_semantics.rs` | Nothing at runtime; it fails the suite, naming the realms of that venue that hold a current receipt. `Evidence::Observed { current }` stays a hand flag — deriving it would demote a realm on a comment edit. |
+
 #### Invariants
 
 * **Must**: every realm retain its declared readiness and feature mapping in
@@ -204,6 +232,17 @@ which fails on any drift between it and the block above.
   semantics — request encoding, order types, quantity conversion, fill
   interpretation — count as current. It is `stale`, and worth what
   `implemented` is worth.
+* **Must**: every plug declare what its own actions need in
+  `Strategy::execution_requirements`, and boot refuse a requirement the chosen
+  realm's row calls `unknown` before any credential or socket is opened.
+  `engine-core/src/assembly.rs::deployed_templates::every_deployed_template_is_compatible_with_its_venue`
+  is what keeps that check from being the thing that stops a funded engine.
+* **Must**: an adapter change re-pin that venue's
+  `adapter_semantics_fingerprint` after reviewing every `observed` cell on its
+  realms. `VenueCaps` and the row are one claim each about the same three
+  behaviours (`amend`, `protection-place`, `reduce-below-minimum`) and
+  `adapter_semantics.rs` asserts them equal for every compiled realm; where
+  they disagree the code is right and the row is edited.
 * **Must Never**: real capital reach a `production-blocked` or `read-only`
   realm. The boot gate refuses the run; there is no override flag.
 * **Must**: `engine run` on a `live-canary` realm log the unproven capabilities
