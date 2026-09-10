@@ -223,9 +223,10 @@ pub struct Cohort {
     /// `intent` records.
     pub intent_records: u64,
     pub order_lane: Lane,
-    /// Every other record, by its wire kind; a source row of a kind that can
-    /// produce no order is counted as `signal:<kind>`.
-    pub not_an_opportunity: BTreeMap<String, u64>,
+    /// Every record outside the two lanes, by its wire kind: what happened to
+    /// an opportunity as well as what was never one. A source row of a kind
+    /// that can produce no order is counted as `signal:<kind>`.
+    pub other_records: BTreeMap<String, u64>,
     /// Verdicts naming no order this walk held an intent for. Zero unless the
     /// log holds a decision path this reader does not model.
     pub unattached_verdicts: u64,
@@ -252,9 +253,7 @@ impl Cohort {
     /// Records the two lanes and the census between them account for. Must
     /// equal `records`.
     pub fn accounted(&self) -> u64 {
-        self.source_row_records
-            + self.intent_records
-            + self.not_an_opportunity.values().sum::<u64>()
+        self.source_row_records + self.intent_records + self.other_records.values().sum::<u64>()
     }
 
     pub fn balanced(&self) -> bool {
@@ -739,7 +738,7 @@ pub fn of_log(records: &[WalRecord]) -> Cohort {
         source_lane,
         intent_records,
         order_lane,
-        not_an_opportunity: census,
+        other_records: census,
         unattached_verdicts,
         unattached_refusals,
         funnel,
@@ -1103,8 +1102,8 @@ impl Cohort {
              the\n  number; a worker on another host puts its offset in there too.\n",
         );
 
-        let _ = write!(out, "\n  not an order opportunity\n");
-        for (kind, count) in &self.not_an_opportunity {
+        let _ = write!(out, "\n  every other record, by its wire kind\n");
+        for (kind, count) in &self.other_records {
             let _ = writeln!(out, "    {count:>8}  {kind}");
         }
 
@@ -1116,8 +1115,8 @@ impl Cohort {
             ),
             ("order decisions (intent)", self.intent_records),
             (
-                "not an order opportunity",
-                self.not_an_opportunity.values().sum::<u64>(),
+                "every other record",
+                self.other_records.values().sum::<u64>(),
             ),
         ] {
             let _ = writeln!(out, "    {value:>8}  {name}");

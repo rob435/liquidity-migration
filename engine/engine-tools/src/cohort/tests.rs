@@ -330,14 +330,11 @@ fn every_opportunity_lands_in_one_bucket_and_the_totals_add_up() {
         )])
     );
 
-    assert_eq!(
-        cohort.not_an_opportunity.get("signal:funding_update"),
-        Some(&1)
-    );
-    assert_eq!(cohort.not_an_opportunity.get("boot"), Some(&1));
-    assert_eq!(cohort.not_an_opportunity.get("verdict"), Some(&4));
-    assert_eq!(cohort.not_an_opportunity.get("order_sent_v2"), Some(&2));
-    assert_eq!(cohort.not_an_opportunity.get("intent"), None);
+    assert_eq!(cohort.other_records.get("signal:funding_update"), Some(&1));
+    assert_eq!(cohort.other_records.get("boot"), Some(&1));
+    assert_eq!(cohort.other_records.get("verdict"), Some(&4));
+    assert_eq!(cohort.other_records.get("order_sent_v2"), Some(&2));
+    assert_eq!(cohort.other_records.get("intent"), None);
 
     assert_eq!(cohort.records, 20);
     assert_eq!(cohort.source_row_records, 4);
@@ -564,7 +561,7 @@ fn a_hundred_refusals_inside_one_suppression_window_all_count() {
         BTreeMap::from([("below_minimum_notional".to_string(), 100)])
     );
     assert_eq!(
-        cohort.not_an_opportunity.get("note"),
+        cohort.other_records.get("note"),
         Some(&1),
         "one note for a hundred refusals is the suppression working"
     );
@@ -682,7 +679,7 @@ fn a_row_only_a_segment_restatement_names_is_in_the_lane_and_outside_the_record_
     assert_eq!(cohort.source_rows, 1);
     assert_eq!(cohort.restated_only_rows, 1);
     assert_eq!(cohort.source_lane.unresolved, 1);
-    assert_eq!(cohort.not_an_opportunity.get("segment_base_v7"), Some(&1));
+    assert_eq!(cohort.other_records.get("segment_base_v7"), Some(&1));
     assert!(cohort.balanced());
     assert!(cohort
         .table()
@@ -762,7 +759,7 @@ fn the_json_report_names_every_bucket_and_every_interval() {
         assert!(value[lane]["rejected_by_reason"].is_object(), "{lane}");
         assert!(value[lane]["expired_by_reason"].is_object(), "{lane}");
     }
-    assert_eq!(value["not_an_opportunity"]["signal:funding_update"], 1);
+    assert_eq!(value["other_records"]["signal:funding_update"], 1);
     assert_eq!(value["order_lane"]["rejected_by_reason"]["stale_quote"], 1);
     assert_eq!(value["intents_by_cause"]["none"], 4);
     assert_eq!(value["refusals_predate_typed_records"], false);
