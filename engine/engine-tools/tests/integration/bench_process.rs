@@ -292,8 +292,7 @@ fn a_cancel_behind_a_slow_opening_waits_for_the_gateway_call_in_flight() {
     // The run ends on the last answered pull, whose own timing row can still
     // be on its way to the log; every pull follows an answered opening.
     assert!(
-        contention.cancels_sent + 1 >= PULLS
-            && contention.openings_sent >= contention.cancels_sent,
+        contention.cancels_sent + 1 >= PULLS && contention.openings_sent >= contention.cancels_sent,
         "the workload did not cycle: {} openings, {} cancels",
         contention.openings_sent,
         contention.cancels_sent
