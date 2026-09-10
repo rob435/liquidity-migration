@@ -241,6 +241,29 @@ pub enum DenyReason {
     },
 }
 
+impl DenyReason {
+    /// The variant's stable snake_case word. This is what a report groups a
+    /// population of refusals by, and what `intent_refused.code` carries: the
+    /// numbers inside a reason belong to the one order, never to the
+    /// population.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::LossGuardTripped { .. } => "loss_guard_tripped",
+            Self::EnvelopeBreached { .. } => "envelope_breached",
+            Self::ComponentGrossBreached { .. } => "component_gross_breached",
+            Self::InitialMarginBreached { .. } => "initial_margin_breached",
+            Self::AvailableMarginExhausted { .. } => "available_margin_exhausted",
+            Self::RollingLossTripped { .. } => "rolling_loss_tripped",
+            Self::PartitionExhausted { .. } => "partition_exhausted",
+            Self::MissingStop => "missing_stop",
+            Self::StaleAccountView { .. } => "stale_account_view",
+            Self::StaleQuote { .. } => "stale_quote",
+            Self::UnknownState { .. } => "unknown_state",
+            Self::SymbolNotionalBreached { .. } => "symbol_notional_breached",
+        }
+    }
+}
+
 /// The kernel's answer. `Allow.qty` may be smaller than the intent's if a
 /// control clamped size; the engine sends the clamped quantity.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
