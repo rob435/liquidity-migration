@@ -332,6 +332,46 @@ async fn the_verdict_record_names_the_order_it_approved() {
     );
 }
 
+/// The join a report needs: which callback decided this order. Without it a
+/// source row can only be charged to whichever order happens to follow it.
+#[tokio::test(start_paused = true)]
+async fn an_intent_record_names_the_callback_it_was_decided_in() {
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    let records = h.records.lock().unwrap();
+    let cause = records
+        .iter()
+        .find_map(|record| match record {
+            WalRecord::Intent { cause, .. } => Some(cause.clone()),
+            _ => None,
+        })
+        .expect("an intent record")
+        .expect("the decision came out of a strategy callback");
+    assert_eq!(
+        cause.immediate(),
+        Some(&engine_types::Cause::Market { symbol }),
+        "this buyer decides on a quote"
+    );
+    assert!(
+        cause.callback_id.is_some(),
+        "the callback that decided it is identified"
+    );
+    assert!(
+        cause.callback_wall_ms > 0,
+        "engine realtime ms at delivery, beside the intent's monotonic decided_ns"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_refusal_stops_before_the_order_is_written() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);

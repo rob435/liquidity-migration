@@ -376,11 +376,38 @@ fn cross_remainder(
         },
         stop: request.sleeve_stop(),
         reduce_only: false,
-        tag: format!("work-cross:{}", request.client_order_id),
+        tag: cross_tag(&request.client_order_id),
         decided_ns: now_ns,
         work: None,
         leverage: None,
     })
+}
+
+/// The tag a crossed remainder carries. Read back by [`worked_order_of`],
+/// which is the only reader: format and parse stay together.
+fn cross_tag(client_order_id: &str) -> String {
+    format!("work-cross:{client_order_id}")
+}
+
+/// The resting order one of this supervisor's own actions continues, for
+/// `Cause::Working` on the log. A crossed remainder is a fresh order, so its
+/// predecessor is named by the tag it carries; an amend and a cancel name it
+/// directly.
+pub(crate) fn worked_order_of(action: &engine_types::Action) -> String {
+    match action {
+        Action::Amend {
+            client_order_id, ..
+        }
+        | Action::Cancel {
+            client_order_id, ..
+        } => client_order_id.clone(),
+        Action::Place(intent) => intent
+            .tag
+            .strip_prefix("work-cross:")
+            .unwrap_or_default()
+            .to_string(),
+        _ => String::new(),
+    }
 }
 
 /// The grace clock starts at the first cross attempt, priced or not, so an

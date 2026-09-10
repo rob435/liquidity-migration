@@ -1130,6 +1130,28 @@ mod tests {
         );
     }
 
+    /// The reader boundary. A binary older than the writer meets `cause` as a
+    /// field it has never heard of; no variant here sets
+    /// `deny_unknown_fields`, so it skips the field and replays the intent.
+    /// The new `intent_refused` KIND is the half that does not survive: an
+    /// unknown `kind` fails deserialization.
+    #[test]
+    fn an_unknown_field_on_an_intent_frame_is_skipped_and_an_unknown_kind_is_not() {
+        let mut newer: serde_json::Value = serde_json::from_str(INTENT_WITHOUT_A_CAUSE).unwrap();
+        newer["a_field_from_a_later_writer"] = serde_json::json!({"anything": 1});
+        let record: WalRecord = serde_json::from_value(newer).unwrap();
+        assert_eq!(
+            serde_json::to_string(&record).unwrap(),
+            INTENT_WITHOUT_A_CAUSE
+        );
+
+        let unknown = serde_json::json!({"kind": "a_record_from_a_later_writer"});
+        assert!(
+            serde_json::from_value::<WalRecord>(unknown).is_err(),
+            "an unknown record kind must refuse rather than replay as something else"
+        );
+    }
+
     #[test]
     fn a_typed_refusal_frame_reads_back_and_round_trips() {
         let frame = r#"{"kind":"intent_refused","wall_ts_ms":1700000000002,"strategy":1,"symbol":0,"tag":"long_native_entry","client_order_id":"eng-9","code":"below_min_notional","detail":"3.0000 is under the venue's smallest order value (5)"}"#;

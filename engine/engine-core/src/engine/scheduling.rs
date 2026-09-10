@@ -967,15 +967,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             self.host
                 .pending
                 .extend(maintenance.into_iter().map(|action| {
-                    let client_order_id = match &action {
-                        Action::Amend {
-                            client_order_id, ..
-                        }
-                        | Action::Cancel {
-                            client_order_id, ..
-                        } => client_order_id.clone(),
-                        _ => String::new(),
-                    };
+                    let client_order_id = crate::working::worked_order_of(&action);
                     crate::ctx::PendingAction {
                         cause: Some(std::sync::Arc::new(engine_types::DecisionCause {
                             callback_wall_ms,
