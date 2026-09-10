@@ -36,6 +36,7 @@ engine — the execution loop
 
   engine bench [--events N] [--rate PER_SEC] [--every N] [--symbols A,B]
                [--wal PATH] [--fills] [--venue-delay-ms MS]
+               [--contention [--cancel-after N] [--ttl-ms MS]]
       Measure the real loop through a local submit response on this box.
       --venue-delay-ms holds the pretend venue's reply for that long, which is
       the one thing a localhost socket cannot model: whether work on this
@@ -44,6 +45,13 @@ engine — the execution loop
       --fills has that venue fill what it accepts, so the log it writes can be
       read by `engine fills`. Off by default: the published latency table was
       measured without it.
+      --contention rests a post-only entry on each of four symbols and
+      pulls it --cancel-after quotes later, with the pretend venue holding
+      placements and answering pulls at once. It reports how long a
+      risk-reducing cancel waited for the venue task while openings were
+      queued ahead of it, and how many openings --ttl-ms refused unsent for
+      waiting too long. Its own rate, symbols and delay defaults come with the
+      flag; no budget is asserted.
 
   engine replay --wal PATH
       Print the log in words, and what was still in flight at each point.

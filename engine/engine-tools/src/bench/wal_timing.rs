@@ -66,7 +66,7 @@ fn elapsed_ns(start: Instant) -> u64 {
     start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
-fn quantiles(samples: &[u64]) -> Quantiles {
+pub(super) fn quantiles(samples: &[u64]) -> Quantiles {
     let mut sorted = samples.to_vec();
     sorted.sort_unstable();
     let at = |quantile: f64| {

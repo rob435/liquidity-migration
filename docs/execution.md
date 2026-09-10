@@ -14,6 +14,7 @@ Define execution latency qualification, benchmark budgets, and the one-sided cou
 | **Latency Qualification** | Pinned run `34128439094` at source `70f4c557`: 1,981 release tests, zero failed, account/history workloads, and all eight latency cells pass. Candidate median decision p99 / submit p50 is 2,000 / 721,150 ns. Candidate submit p99 is 23.22 ms and max 86.05 ms. |
 | **Current Baseline** | Clean archived `80db33df4b3113c3c75769f22d10237e7d32d37e` source. |
 | **Qualification Target** | Apple M4, 10 CPUs, 16 GiB RAM, macOS 15.7.2 arm64, Rust 1.90.0 release. Local synthetic venue; no funded-service load. |
+| **Risk-Off Contention Probe** | `engine bench --contention [--cancel-after N] [--ttl-ms MS]`. Defaults: 4 000 quotes at 200 Hz, 4 symbols, one post-only entry per symbol pulled after 3 quotes, 200 ms venue delay on placements and none on pulls, `opening_dispatch_ttl_ms` 10 000. Reports, per operation from the run's `VenueTiming` rows, the queue wait a cancel and an opening each served (p50/p99/max), the cancel's own call span net of quota hold, and the openings `--ttl-ms` refused unsent. Local synthetic venue; not live latency. No budget, no pass/fail. |
 
 #### Pinned Latency Budgets
 
