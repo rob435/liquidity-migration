@@ -91,6 +91,11 @@ pub struct SimReport {
     pub notes: Vec<String>,
     pub wal_records: usize,
     pub wal_sha256: String,
+    /// The authenticated fee snapshot the run priced its fills with. It comes
+    /// from `configs/bybit_fee_rates.json`, outside `engine/`, and moves
+    /// `wal_sha256` without changing a single record: a pinned log hash is
+    /// only pinned against this snapshot.
+    pub fee_snapshot_sha256: Option<String>,
 }
 
 impl SimReport {
@@ -176,6 +181,7 @@ struct World {
     deaths: Vec<u64>,
     rtt: Duration,
     private_latency: Duration,
+    fee_snapshot_sha256: Option<String>,
 }
 
 /// How one boot of the engine ended.
@@ -297,6 +303,7 @@ impl World {
                 deaths,
                 rtt,
                 private_latency,
+                fee_snapshot_sha256: fees.snapshot_sha256.clone(),
             },
             clock,
         ))
@@ -560,6 +567,7 @@ pub async fn run_seed(opts: SimOptions) -> Result<SimReport, EngineError> {
         notes,
         wal_records: records.len(),
         wal_sha256,
+        fee_snapshot_sha256: world.fee_snapshot_sha256.clone(),
     };
     if !keep {
         let _ = std::fs::remove_dir_all(&world.paths.dir);
