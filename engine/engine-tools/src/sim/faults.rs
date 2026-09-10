@@ -722,7 +722,8 @@ pub struct Parked {
     due_ns: u64,
     row: SignalObservation,
     /// A withheld row waits for a later row of its own source to be
-    /// delivered, so the engine sees the hole before the row that fills it.
+    /// delivered, so the engine sees the hole before the row that fills it,
+    /// or for the engine to ask for it by name.
     holds_for_successor: bool,
 }
 
@@ -750,6 +751,10 @@ pub struct FaultySignalFeed<'a, F> {
     repeat: Option<SignalObservation>,
     /// The last delivery came from the wrapper's own hand.
     owned: bool,
+    /// The rows the engine is asking for by name. A live spool keeps its
+    /// bytes on disk, so a request always finds the row: nothing the engine
+    /// has asked for may stay withheld.
+    requested: Vec<SignalGapRequest>,
 }
 
 impl<'a, F: SignalFeed> FaultySignalFeed<'a, F> {
@@ -772,6 +777,7 @@ impl<'a, F: SignalFeed> FaultySignalFeed<'a, F> {
             delay_by,
             repeat: None,
             owned: false,
+            requested: Vec::new(),
         }
     }
 
@@ -803,18 +809,32 @@ impl<'a, F: SignalFeed> FaultySignalFeed<'a, F> {
         });
     }
 
+    /// The engine named this row in a gap request. The successor that would
+    /// release a withheld row can never arrive while the request stands — the
+    /// spool serves nothing past the hole — so the request is what ends the
+    /// withhold, exactly as re-reading the file does live.
+    fn requested(&self, row: &SignalObservation) -> bool {
+        self.requested
+            .iter()
+            .any(|gap| gap.next_sequence == row.sequence && gap.source == row.source)
+    }
+
+    fn owed(&self, parked: &Parked) -> bool {
+        !parked.holds_for_successor || self.requested(&parked.row)
+    }
+
     fn take_due(&self, now_ns: u64) -> Option<SignalObservation> {
         let mut parked = lock(&self.parked);
         let index = parked
             .iter()
-            .position(|row| !row.holds_for_successor && row.due_ns <= now_ns)?;
+            .position(|row| self.owed(row) && row.due_ns <= now_ns)?;
         Some(parked.remove(index).row)
     }
 
     fn earliest_due(&self) -> Option<u64> {
         lock(&self.parked)
             .iter()
-            .find(|row| !row.holds_for_successor)
+            .find(|row| self.owed(row))
             .map(|row| row.due_ns)
     }
 
@@ -895,6 +915,10 @@ impl<F: SignalFeed> SignalFeed for FaultySignalFeed<'_, F> {
                     self.owned = false;
                     return Ok(SignalFeedEvent::Observation(row));
                 }
+                SignalFault::Withhold if self.requested(&row) => {
+                    self.owned = false;
+                    return Ok(SignalFeedEvent::Observation(row));
+                }
                 SignalFault::Withhold => {
                     FaultLog::note(&self.log, "signal.withhold");
                     self.inner.acknowledge_last()?;
@@ -909,6 +933,7 @@ impl<F: SignalFeed> SignalFeed for FaultySignalFeed<'_, F> {
         gaps: &[SignalGapRequest],
         blocked_destinations: &[StrategyId],
     ) -> Result<(), SignalError> {
+        self.requested = gaps.to_vec();
         self.inner.set_gap_requests(gaps, blocked_destinations)
     }
 
@@ -941,5 +966,87 @@ impl<F: SignalFeed> SignalFeed for FaultySignalFeed<'_, F> {
                 "the simulated spool advertised readiness where a row was expected".into(),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backtest::signals::SignalReplayFeed;
+    use engine_types::SIGNAL_OBSERVATION_SCHEMA_VERSION;
+
+    fn withhold_always() -> FaultRates {
+        FaultRates {
+            signal_withhold: 1.0,
+            ..FaultRates::NONE
+        }
+    }
+
+    fn row(source: &str, sequence: u64) -> SignalObservation {
+        let mut row = SignalObservation {
+            schema_version: SIGNAL_OBSERVATION_SCHEMA_VERSION,
+            decision_fingerprint: "sim".into(),
+            destination: StrategyId(0),
+            source: source.into(),
+            sequence,
+            observation_id: format!("{source}-{sequence}"),
+            kind: "test".into(),
+            observed_wall_ts_ms: 1,
+            available_wall_ts_ms: 1,
+            subscriptions: Vec::new(),
+            payload: b"{}".to_vec(),
+            content_sha256: String::new(),
+        };
+        row.content_sha256 = crate::signals::content_sha256(&row);
+        row
+    }
+
+    async fn observation<F: SignalFeed>(feed: &mut F) -> SignalObservation {
+        loop {
+            match feed.next_event().await.expect("the spool answers") {
+                SignalFeedEvent::Observation(row) => return row,
+                _ => continue,
+            }
+        }
+    }
+
+    /// A row withheld across a death is a hole the engine learns about from
+    /// the producer's frontier at its next boot, not from a later row: the
+    /// request it then makes is the only thing that can release the row,
+    /// because the spool serves nothing past the hole it is asked to fill.
+    #[tokio::test(start_paused = true)]
+    async fn a_requested_row_leaves_the_withhold() {
+        let scheduler = Scheduler::starting_at(2_000_000);
+        scheduler.open();
+        let mut spool = SignalReplayFeed::from_observations(
+            vec![row("s", 1), row("s", 2), row("s", 3)],
+            scheduler.clone(),
+        );
+        let parked = shared_parked_signals();
+        let mut feed = FaultySignalFeed::new(
+            &mut spool,
+            withhold_always(),
+            shared_rng(Rng::new(7)),
+            scheduler.clone(),
+            FaultLog::shared(),
+            parked.clone(),
+            Duration::from_secs(60),
+        );
+        assert_eq!(observation(&mut feed).await.sequence, 1);
+        feed.acknowledge_last().unwrap();
+        assert_eq!(lock(&parked).len(), 1, "sequence 2 is withheld");
+        feed.set_gap_requests(
+            &[SignalGapRequest {
+                source: "s".into(),
+                next_sequence: 2,
+            }],
+            &[],
+        )
+        .unwrap();
+        let served = tokio::time::timeout(Duration::from_secs(60), observation(&mut feed))
+            .await
+            .expect("the wrapper still owes the engine the row it asked for");
+        assert_eq!(served.sequence, 2);
+        feed.acknowledge_last().unwrap();
     }
 }
