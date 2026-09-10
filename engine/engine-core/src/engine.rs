@@ -714,6 +714,16 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         &self.books.account
     }
 
+    /// Every sleeve reporting a health error, or a latched callback fault, by
+    /// configured name — the heartbeat's own reading, for a stopped engine.
+    pub fn strategy_health(&self) -> Vec<(String, String)> {
+        named_strategy_errors(
+            &self.host.strategies,
+            &self.host.names,
+            &self.host.callbacks.faults,
+        )
+    }
+
     /// Run until shutdown resolves or the market feed closes.
     pub async fn run<M, O, S>(
         &mut self,
