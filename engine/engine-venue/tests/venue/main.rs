@@ -5,6 +5,7 @@ mod support;
 #[path = "../../../test-support/io.rs"]
 mod test_io;
 
+mod adapter_semantics;
 #[cfg(feature = "binance")]
 mod binance_requests;
 mod conformance;

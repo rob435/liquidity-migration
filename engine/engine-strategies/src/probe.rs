@@ -399,6 +399,19 @@ impl Strategy for Probe {
         NAME
     }
 
+    /// One post-only limit with a stop, pulled by id after its rest window,
+    /// and a drain sized off this sleeve's own attributed position.
+    fn execution_requirements(&self) -> Vec<engine_types::Capability> {
+        use engine_types::Capability as C;
+        vec![
+            C::Submit,
+            C::Cancel,
+            C::PostOnly,
+            C::FillAttribution,
+            C::ProtectionPlace,
+        ]
+    }
+
     fn subscriptions(&self) -> Vec<Subscription> {
         [Feed::Quote, Feed::Ticker]
             .into_iter()

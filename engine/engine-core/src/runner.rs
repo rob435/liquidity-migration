@@ -86,6 +86,28 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         .iter()
         .map(|key| key.as_str().to_string())
         .collect();
+
+    // Before the venue is built, so a sleeve that needs something this
+    // adapter does not do ends the run rather than trading with one of its
+    // verbs permanently refused. Still after the log claim: the identity plan
+    // is what names the sleeves.
+    for sleeve in assembly::compatibility(chosen, &strategies, &sleeves)?.sleeves {
+        if sleeve.unproven.is_empty() {
+            continue;
+        }
+        let unproven: Vec<_> = sleeve
+            .unproven
+            .iter()
+            .map(|capability| capability.as_str())
+            .collect();
+        tracing::warn!(
+            sleeve = %sleeve.sleeve,
+            plug = %sleeve.plug,
+            unproven = unproven.join(", "),
+            "forward test: this sleeve's execution requirements hold no current live receipt on this realm"
+        );
+    }
+
     let mut wanted: Vec<_> = strategies
         .iter()
         .flat_map(|strategy| strategy.subscriptions())

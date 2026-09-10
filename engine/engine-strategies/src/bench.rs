@@ -31,6 +31,13 @@ impl Strategy for BenchStrategy {
         "bench"
     }
 
+    /// A market order with a stop and nothing else: the workload never
+    /// cancels, amends, or reads a position back.
+    fn execution_requirements(&self) -> Vec<engine_types::Capability> {
+        use engine_types::Capability as C;
+        vec![C::Submit, C::ProtectionPlace]
+    }
+
     fn subscriptions(&self) -> Vec<Subscription> {
         self.symbols
             .iter()
@@ -68,5 +75,20 @@ impl Strategy for BenchStrategy {
             work: None,
             leverage: None,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_types::Capability as C;
+
+    #[test]
+    fn the_bench_workload_declares_only_the_market_order_and_its_stop() {
+        let bench = BenchStrategy::new(&["BTCUSDT".to_string()], 1);
+        assert_eq!(
+            bench.execution_requirements(),
+            [C::Submit, C::ProtectionPlace]
+        );
     }
 }

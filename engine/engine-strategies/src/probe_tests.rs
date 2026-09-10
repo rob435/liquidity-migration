@@ -417,3 +417,19 @@ fn params_are_strict_and_named() {
     let defaults = toml::from_str::<toml::Value>("symbol = \"CAKEUSDT\"\nevery_s = 900").unwrap();
     assert!(Probe::from_params(StrategyId(0), &defaults).is_ok());
 }
+
+#[test]
+fn the_probe_declares_a_post_only_entry_with_a_stop_and_no_amend() {
+    use engine_types::Capability as C;
+    let probe = Probe::from_params(StrategyId(0), &config("")).unwrap();
+    assert_eq!(
+        probe.execution_requirements(),
+        [
+            C::Submit,
+            C::Cancel,
+            C::PostOnly,
+            C::FillAttribution,
+            C::ProtectionPlace,
+        ]
+    );
+}

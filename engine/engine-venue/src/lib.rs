@@ -27,9 +27,10 @@ pub(crate) use clock::{mono_ns, wall_ms};
 pub use arming::{check_arming, check_arming_with, env_flag, real_money_armed, REAL_MONEY_ENV};
 pub use creds::Credentials;
 pub use registry::{
-    known_venues, InventoryProbe, OrderFeeds, Venue, VenueName, VenueReadiness, BINANCE_MAINNET,
-    BINANCE_TESTNET, BYBIT_DEMO, BYBIT_MAINNET, HYPERLIQUID_MAINNET, HYPERLIQUID_TESTNET,
-    LIGHTER_MAINNET, LIGHTER_TESTNET, MEXC_MAINNET, VARIATIONAL_MAINNET,
+    known_venues, Capability, Evidence, InventoryProbe, OrderFeeds, Venue, VenueName,
+    VenueReadiness, BINANCE_MAINNET, BINANCE_TESTNET, BYBIT_DEMO, BYBIT_MAINNET,
+    HYPERLIQUID_MAINNET, HYPERLIQUID_TESTNET, LIGHTER_MAINNET, LIGHTER_TESTNET, MEXC_MAINNET,
+    VARIATIONAL_MAINNET,
 };
 #[cfg(feature = "binance")]
 pub use venues::binance::{BinanceGateway, BinanceOrderFeed};

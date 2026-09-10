@@ -1614,3 +1614,23 @@ fn a_tiny_partial_reduction_keeps_its_runtime_exit_obligation() {
         "a real partial remainder must survive the strategy's durable process checkpoint"
     );
 }
+
+/// `amend` is this plug's own primitive, which is why it cannot run on a
+/// venue that has none.
+#[test]
+fn the_quoter_declares_the_amend_it_moves_its_quote_with() {
+    use engine_types::Capability as C;
+    use engine_types::Strategy as _;
+    let quoter = Quoter::from_params(engine_types::StrategyId(0), &config()).unwrap();
+    assert_eq!(
+        quoter.execution_requirements(),
+        [
+            C::Submit,
+            C::Cancel,
+            C::PostOnly,
+            C::FillAttribution,
+            C::Amend,
+            C::ProtectionPlace,
+        ]
+    );
+}

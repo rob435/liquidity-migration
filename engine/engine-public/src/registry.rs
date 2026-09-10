@@ -69,67 +69,9 @@ pub enum VenueName {
     VariationalMainnet,
 }
 
-/// One execution behaviour a realm is qualified for on its own evidence.
-///
-/// Evidence is per behaviour because the venue's answers are: a realm that has
-/// been seen accepting and cancelling an order has been seen doing exactly
-/// that, and nothing about fills, protection or recovery follows from it.
-/// [`VenueReadiness`] is a summary of these and never a label of its own.
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
-pub enum Capability {
-    Submit,
-    Cancel,
-    PostOnly,
-    FillAttribution,
-    PartialFill,
-    Amend,
-    ExactQuantity,
-    ReduceBelowMinimum,
-    ProtectionPlace,
-    ProtectionChange,
-    ProtectionTrigger,
-    ReconnectHistoryRecovery,
-    FundingFeeCash,
-}
-
-impl Capability {
-    /// The one list, walked by the completeness checks and by the doc table.
-    pub const ALL: [Capability; 13] = [
-        Capability::Submit,
-        Capability::Cancel,
-        Capability::PostOnly,
-        Capability::FillAttribution,
-        Capability::PartialFill,
-        Capability::Amend,
-        Capability::ExactQuantity,
-        Capability::ReduceBelowMinimum,
-        Capability::ProtectionPlace,
-        Capability::ProtectionChange,
-        Capability::ProtectionTrigger,
-        Capability::ReconnectHistoryRecovery,
-        Capability::FundingFeeCash,
-    ];
-
-    /// Stable spelling: it is a column key in `docs/engine.md` §2 and appears
-    /// in the boot refusal an operator reads.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Submit => "submit",
-            Self::Cancel => "cancel",
-            Self::PostOnly => "post-only",
-            Self::FillAttribution => "fill-attribution",
-            Self::PartialFill => "partial-fill",
-            Self::Amend => "amend",
-            Self::ExactQuantity => "exact-quantity",
-            Self::ReduceBelowMinimum => "reduce-below-minimum",
-            Self::ProtectionPlace => "protection-place",
-            Self::ProtectionChange => "protection-change",
-            Self::ProtectionTrigger => "protection-trigger",
-            Self::ReconnectHistoryRecovery => "reconnect-history-recovery",
-            Self::FundingFeeCash => "funding-fee-cash",
-        }
-    }
-}
+/// The behaviours a venue either does or does not do, defined in
+/// `engine-types` so a strategy can name what its own actions need.
+pub use engine_types::Capability;
 
 /// What is known about one realm doing one thing.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
@@ -678,6 +620,59 @@ impl VenueName {
             },
         }
     }
+
+    /// What every `Observed` cell in the rows above was taken against: a
+    /// sha256 over that venue's whole adapter source.
+    ///
+    /// `engine/engine-venue/tests/venue/adapter_semantics.rs` recomputes it
+    /// from `engine-venue/src/venues/<venue>/` — every `.rs` file that is not
+    /// a test module — and fails on drift, naming the realms of that venue
+    /// whose rows hold a current receipt. Request encoding, order types,
+    /// quantity conversion and fill interpretation all live in those files,
+    /// so a change to any of them is a change to what a receipt means.
+    ///
+    /// `Evidence::Observed { current }` stays a hand flag rather than being
+    /// derived from this pin: a comment edit under `venues/bybit/` would
+    /// otherwise demote `bybit_mainnet` to `live-canary`. The pin's job is to
+    /// make the review happen, not to make the verdict.
+    pub const fn adapter_semantics_fingerprint(self) -> &'static str {
+        match self {
+            Self::BybitDemo | Self::BybitMainnet => Self::BYBIT_SEMANTICS,
+            Self::BinanceTestnet | Self::BinanceMainnet => Self::BINANCE_SEMANTICS,
+            Self::HyperliquidTestnet | Self::HyperliquidMainnet => Self::HYPERLIQUID_SEMANTICS,
+            Self::LighterTestnet | Self::LighterMainnet => Self::LIGHTER_SEMANTICS,
+            Self::MexcMainnet => Self::MEXC_SEMANTICS,
+            Self::VariationalMainnet => Self::VARIATIONAL_SEMANTICS,
+        }
+    }
+
+    /// `gateway.rs`, `private.rs`, `public.rs`, `realm.rs`, `mod.rs`: the v5
+    /// linear order and trading-stop encoding, the amend by `orderLinkId`,
+    /// the qty=0 whole-position close, and the execution stream both funded
+    /// Bybit realms' receipts were read off.
+    const BYBIT_SEMANTICS: &'static str =
+        "dd0edc1a1b482c3941077f0d52e3466838eb2abf40534755a0acfdfafe6d60b1";
+    /// The USDT-M futures REST and user-stream encoding.
+    const BINANCE_SEMANTICS: &'static str =
+        "bf69d5f34759320ca5cd79f808f9151ace4e5eead6314fb06e9b9ded2bb9cecd";
+    /// The signed exchange actions (`order`, `batchModify`, `cancel`), the
+    /// EIP-712 digest, the `cloid` scheme, and the fill and open-order reads
+    /// the funded address's canary receipt was taken against.
+    const HYPERLIQUID_SEMANTICS: &'static str =
+        "1639dd4e14b45214db68450998e3f29460b63d80d738f8ff08fb752372c08929";
+    /// The transaction encoding and the account/history resync, `crypto/`
+    /// included.
+    const LIGHTER_SEMANTICS: &'static str =
+        "7c94f6fc2582c7620dfc7c21b7144db568be0818be9d6613f0f6fbd6b51633e1";
+    /// The contract-API order encoding, the contract-count quantity
+    /// conversion, the position-bound stop record, and the private login and
+    /// `personal.filter` frames the funded account's canary receipt was taken
+    /// against.
+    const MEXC_SEMANTICS: &'static str =
+        "08b22a3dbf54d09b2d918e4b5467c317ece1e763230fa22ee5b0b45403e82f62";
+    /// The public market reads, and the refusal every write returns.
+    const VARIATIONAL_SEMANTICS: &'static str =
+        "a79c459e38b6768d387978c3cbb5d85af56ab5674193ca5577352a473924ac2c";
 
     /// The [`UNATTENDED_PROTECTED_TRADING`] capabilities this realm holds no
     /// current receipt for. Empty is what `live-proven` means.

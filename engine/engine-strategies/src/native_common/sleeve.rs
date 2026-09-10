@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use engine_types::{
-    StrategyCheckpoint, StrategyCheckpointIdentity, StrategyCtx, StrategyId, WorkPolicy,
+    Capability, StrategyCheckpoint, StrategyCheckpointIdentity, StrategyCtx, StrategyId, WorkPolicy,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -123,6 +123,34 @@ impl<C: SleeveConfig, S: SleeveState> SleeveCore<C, S> {
                 self.checkpoint_fingerprint = Some("invalid-checkpoint".to_owned());
             }
         }
+    }
+
+    /// What every native directional sleeve's own actions need of the venue.
+    ///
+    /// One list for all three because they share `emit_effects`: an entry is a
+    /// market order carrying a stop, a restop moves that stop, an exit sends
+    /// the sleeve's own attributed lot as an exact quantity, and a stale
+    /// working order is cancelled. The stop is the sleeve's loss control, so
+    /// its triggering is a requirement and not a convenience.
+    ///
+    /// `Amend` is deliberately absent. A resting entry is repriced by the
+    /// ENGINE's working supervisor, not by the sleeve, and a venue that
+    /// cannot amend refuses that reprice with a Note and leaves the entry
+    /// resting unrepriced until its window ends. LONG runs that way on
+    /// `mexc_mainnet` today; requiring `Amend` here would refuse the boot.
+    pub fn execution_requirements(&self) -> Vec<Capability> {
+        let mut required = vec![Capability::Submit, Capability::Cancel];
+        if self.config.rest_entries() {
+            required.push(Capability::PostOnly);
+        }
+        required.extend([
+            Capability::FillAttribution,
+            Capability::ExactQuantity,
+            Capability::ProtectionPlace,
+            Capability::ProtectionChange,
+            Capability::ProtectionTrigger,
+        ]);
+        required
     }
 
     /// How an entry is worked when the config asks for resting entries.
