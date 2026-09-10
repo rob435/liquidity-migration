@@ -19,13 +19,15 @@ segment_max_mb = 64
 # Frames wait here for the writer. At 5k frames/s this holds about 52 seconds;
 # every overrun loses a frame, reconnects that shard, and re-snapshots its books.
 queue_frames = 262144
-# 30 days is the ceiling; max_disk_gb is what binds on this host, and the two
-# recorders' caps must sum under the filesystem or they race min_free_disk_gb.
-# Bybit is the venue we replay, so it holds the larger share: 60 GB is about
-# three days on disk, and Drive keeps every hour permanently either way.
+# 30 days and max_disk_gb are the backstop for a tape the Drive is not taking:
+# the hourly upload keeps only its --keep-hours window of shipped hours on disk,
+# and Drive keeps every hour permanently. The two recorders' caps must still sum
+# under the filesystem or they race min_free_disk_gb. Under min_free_disk_gb the
+# recorder counts every frame and writes none; scripts/runtime/reclaim_host_storage.py
+# reads the highest such floor under deploy/capture/ and holds its low water above it.
 retention_days = 30
 max_disk_gb = 60
-min_free_disk_gb = 25
+min_free_disk_gb = 12
 status_interval_seconds = 30
 
 [connection]

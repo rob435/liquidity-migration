@@ -1045,6 +1045,24 @@ def test_backup_stamp_ages_into_a_warning(tmp_path: Path) -> None:
     assert "missing" in alerts[0].message
 
 
+def test_reclaim_receipt_ages_into_a_warning(tmp_path: Path) -> None:
+    stamp = tmp_path / "storage-reclaim.last-success"
+    now = time.time()
+    stamp.write_text("reclaimed_at=x\nfree_bytes=1\n")
+    assert liveness.evaluate_reclaim_stamp(stamp_path=stamp, now=now, max_age_hours=3) == []
+    # The reclaimer runs hourly and stamps only a clean run: one failed run
+    # leaves the receipt two hours old at the next tick, two failed runs three.
+    os.utime(stamp, (now - 2 * 3600, now - 2 * 3600))
+    assert liveness.evaluate_reclaim_stamp(stamp_path=stamp, now=now, max_age_hours=3) == []
+    os.utime(stamp, (now - 3 * 3600 - 60, now - 3 * 3600 - 60))
+    alerts = liveness.evaluate_reclaim_stamp(stamp_path=stamp, now=now, max_age_hours=3)
+    assert [(alert.key, alert.severity) for alert in alerts] == [("storage-reclaim", "WARNING")]
+    assert "3.0h old (limit 3h)" in alerts[0].message
+    alerts = liveness.evaluate_reclaim_stamp(stamp_path=tmp_path / "absent", now=now, max_age_hours=3)
+    assert [(alert.key, alert.severity) for alert in alerts] == [("storage-reclaim", "WARNING")]
+    assert "missing" in alerts[0].message
+
+
 def test_state_round_trips_and_tolerates_garbage(tmp_path: Path) -> None:
     state_file = tmp_path / "state.json"
     liveness.save_state(state_file, {"unit:engine": 123.0})
@@ -1183,6 +1201,8 @@ def test_host_liveness_unit_runs_the_host_scope_with_the_box_checks() -> None:
     assert "--host-clock-check" in unit
     assert "--capture-status-file /var/lib/liquidity-migration/forward-market/status.json" in unit
     assert "--upload-stamp-file /var/lib/liquidity-migration/receipts/market-tape-upload.last-success" in unit
+    assert "--reclaim-stamp-file /var/lib/liquidity-migration/receipts/storage-reclaim.last-success" in unit
+    assert "--max-reclaim-age-hours 3" in unit
     demo = (ROOT / "deploy" / "systemd" / "liquidity-migration-demo-liveness.service").read_text(encoding="utf-8")
     assert "--host-clock-check" not in demo, "one cause must page once: the clock is the host scope's"
 

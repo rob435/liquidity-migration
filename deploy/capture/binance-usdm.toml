@@ -29,7 +29,7 @@ retention_days = 30
 # Books are gone, so this tape is a fraction of its old size; the disk it no
 # longer needs goes to the Bybit recorder, whose hours get replayed.
 max_disk_gb = 18
-min_free_disk_gb = 25
+min_free_disk_gb = 12
 status_interval_seconds = 30
 
 [connection]

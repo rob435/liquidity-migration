@@ -806,7 +806,7 @@ def test_the_low_water_clears_the_tape_recorders_free_floor(host: Host) -> None:
     # recorder floor, not only above the reserve.
     two_families(host)
     host.capture_config("bybit-linear", "[storage]\nmin_free_disk_gb = 25\n")
-    host.capture_config("binance-usdm", "[storage]\nmax_disk_gb = 18\n")  # the recorder's default, 25
+    host.capture_config("binance-usdm", "[storage]\nmax_disk_gb = 18\n")  # the recorder's default, 12
     host.capture_config("spare", "[storage]\nmin_free_disk_gb = 18\n")
     settings = MODULE.parse_settings(host.argv(*PRESSURE))
     assert MODULE.tape_free_floor_bytes(settings.tape_floor_configs) == (25 * GIB, [])
@@ -871,8 +871,8 @@ def test_the_flagless_defaults_are_the_ones_the_deployed_unit_relies_on(host: Ho
     assert settings.backup_stage == Path("/var/lib/liquidity-migration/backup/stage")
     assert settings.archive_roots == (Path("/var/lib/liquidity-migration-wal-quarantine"),)
     assert settings.tape_floor_configs == (Path(MODULE.DEFAULT_TAPE_FLOOR_CONFIG),)
-    # Both recorders hold min_free_disk_gb = 25; the deployed low water clears it.
-    assert MODULE.tape_free_floor_bytes(settings.tape_floor_configs) == (25 * GIB, [])
+    # Both recorders hold min_free_disk_gb = 12; the deployed low water clears it.
+    assert MODULE.tape_free_floor_bytes(settings.tape_floor_configs) == (12 * GIB, [])
     assert settings.release_dir == Path("/opt/liquidity-migration-engine")
     assert settings.systemd_dir == Path("/etc/systemd/system")
     assert settings.wal_families == tuple(Path(row.engine_wal) for row in realm_table())
@@ -882,7 +882,7 @@ def test_the_flagless_defaults_are_the_ones_the_deployed_unit_relies_on(host: Ho
     assert (settings.writer_headroom_gib, settings.high_water_days) == (6.0, 2.0)
     assert (settings.high_water_default_gib, settings.archive_min_age_hours) == (10.0, 24.0)
     assert (settings.wal_min_age_hours, settings.wal_keep_newest) == (48.0, 3)
-    assert (settings.release_age_days, settings.lock_timeout_s) == (3.0, 300.0)
+    assert (settings.release_age_days, settings.lock_timeout_s) == (1.0, 300.0)
     assert settings.max_wal_bytes_per_run == 12 * GIB
     assert settings.max_upload_bytes_per_run == 2 * GIB
 

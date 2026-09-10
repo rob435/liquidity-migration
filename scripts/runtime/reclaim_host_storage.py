@@ -304,7 +304,7 @@ def parse_settings(argv: Sequence[str] | None = None) -> Settings:
     )
     parser.add_argument("--release-dir", type=Path, default=_env("RELEASE_DIR", DEFAULT_RELEASE_DIR))
     parser.add_argument("--keep-commit", action="append", default=[])
-    parser.add_argument("--release-age-days", type=_nonneg_float, default=_env("RELEASE_AGE_DAYS", "3"))
+    parser.add_argument("--release-age-days", type=_nonneg_float, default=_env("RELEASE_AGE_DAYS", "1"))
     parser.add_argument("--systemd-dir", type=Path, default=_env("SYSTEMD_DIR", DEFAULT_SYSTEMD_DIR))
     parser.add_argument(
         "--apt-clean", action=argparse.BooleanOptionalAction, default=_env_bool("APT_CLEAN", True)

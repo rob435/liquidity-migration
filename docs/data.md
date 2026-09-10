@@ -127,7 +127,7 @@ cross-venue reference and records no book.
 | :--- | :--- | :--- |
 | `monthly_gb` | 2,400 | 700 |
 | `max_disk_gb` | 60 | 18 |
-| `min_free_disk_gb` | 25 | 25 |
+| `min_free_disk_gb` | 12 | 12 |
 | `retention_days` | 30 (the disk cap binds first) | 30 |
 
 ### Automated Shedding Priority
@@ -182,7 +182,7 @@ because it is the one deep tier no sleeve trades; the pump books are cheap
 manifest.jsonl                                         Atomic receipts: path, row count, byte size, SHA-256
 status.json                                            Watchdog status updated every 30 seconds
 ```
-* **Retention**: 30 days is the ceiling; the disk cap binds first — **60 GB Bybit, 18 GB Binance**, summing under the 118 GB filesystem so neither recorder races the other. That is about three days of Bybit tape locally; the hourly Drive archive is the permanent history. Either recorder stops writing if free space falls below 25 GB.
+* **Retention**: the hourly upload deletes shipped hours older than its 6 h window, so the host holds about 6 h of tape plus whatever has not shipped; the Drive archive is the permanent history. 30 days and the disk caps — **60 GB Bybit, 18 GB Binance**, summing under the 118 GB filesystem so neither recorder races the other — are the backstop for a tape the Drive is not taking. Either recorder stops writing if free space falls below 12 GiB; the storage reclaimer holds its low water above that floor.
 
 ### Google Drive Archive Layout
 Finished hours are tarred and uploaded ten minutes past each hour:

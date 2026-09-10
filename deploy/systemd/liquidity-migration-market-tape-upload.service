@@ -22,7 +22,7 @@ ExecStart=/opt/liquidity-migration/.venv/bin/python -m market_tape pack \
     --remote-base gdrive:LiquidityMigration/market-tape \
     --state-dir /var/lib/liquidity-migration/market-tape-upload \
     --stamp-file /var/lib/liquidity-migration/receipts/market-tape-upload.last-success \
-    --keep-hours 24
+    --keep-hours 6
 KillMode=control-group
 # A legacy day repack can be several gigabytes; still bounded under the hourly
 # cadence so a hung run cannot stack.

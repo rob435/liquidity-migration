@@ -18,7 +18,7 @@ queue_frames = 32768            # frames waiting for the writer before a shard
                                # overruns and reconnects for fresh snapshots
 retention_days = 30
 max_disk_gb = 60
-min_free_disk_gb = 25
+min_free_disk_gb = 12
 
 [connection]
 topics_per_connection = 150
@@ -215,7 +215,7 @@ class StorageSettings:
     fsync_every_records: int = 1_000
     retention_days: int = 30
     max_disk_gb: float = 60.0
-    min_free_disk_gb: float = 25.0
+    min_free_disk_gb: float = 12.0
     queue_frames: int = 32_768
     status_interval_seconds: float = 30.0
 
@@ -450,7 +450,7 @@ def parse_config(data: Mapping[str, Any], *, base_dir: Path, source_path: Path |
         fsync_every_records=int(_positive(storage_table, "fsync_every_records", 1_000, section="storage")),
         retention_days=int(_positive(storage_table, "retention_days", 30, section="storage")),
         max_disk_gb=_positive(storage_table, "max_disk_gb", 60.0, section="storage"),
-        min_free_disk_gb=_positive(storage_table, "min_free_disk_gb", 25.0, section="storage"),
+        min_free_disk_gb=_positive(storage_table, "min_free_disk_gb", 12.0, section="storage"),
         queue_frames=int(_positive(storage_table, "queue_frames", 32_768, section="storage")),
         status_interval_seconds=_positive(storage_table, "status_interval_seconds", 30.0, section="storage"),
     )

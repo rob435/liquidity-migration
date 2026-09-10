@@ -226,7 +226,7 @@ EXPECTED_COMMIT=<40-hex-commit> scripts/ops.sh deploy
 | `liquidity-migration-forward-capture-binance.service`| Global | `liquidity-capture:liquidity-migration` | `independent` (boot) | Continuous Binance tick & L2 capture. |
 | `liquidity-migration-telegram-controls.service` | Global | `liquidity-controls:liquidity-controls` | `multi-user.target` | Interactive Telegram operator bot. |
 | `liquidity-migration-trade-notify.timer` | Global | `liquidity-observer:liquidity-migration` | Timer (every 1m) | Fills and closed-trade alert dispatcher. |
-| `liquidity-migration-market-tape-upload.timer` | Global | `root:root` | Timer (hourly at :10) | Ships finished tape archives to Google Drive, then deletes shipped hours older than `--keep-hours 24` from both tape roots. |
+| `liquidity-migration-market-tape-upload.timer` | Global | `root:root` | Timer (hourly at :10) | Ships finished tape archives to Google Drive, then deletes shipped hours older than `--keep-hours 6` from both tape roots. |
 | `liquidity-migration-backup.timer` | Global | `root:root` | Timer (every 15 min) | Ships engine state & WAL to Google Drive. |
 | `liquidity-migration-storage-reclaim.timer` | Global | `root:root` | Timer (hourly at :41) | Reclaims host storage that has been verified off-box: release directories, the apt cache, the quarantine archive, and sealed WAL segments below the engine's retention floor. |
 
@@ -623,7 +623,7 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 | Data Payload | Schedule | Destination on Google Drive | Retention |
 | :--- | :--- | :--- | :--- |
 | **Engine State & WAL** | Every 15 min (`backup.timer`; completed-copy age alerts after 30 min) | `LiquidityMigration/engine-state/latest/` | 60 days in `history/` |
-| **Market Tape Hours** | Hourly at :10 (`upload.timer`)| `LiquidityMigration/market-tape/<tape>/YYYY/MM/DD/` | Permanent archive; the host keeps a 24 h sliding window of shipped hours ([market_tape/README.md](../market_tape/README.md) §Local Sliding Window) |
+| **Market Tape Hours** | Hourly at :10 (`upload.timer`)| `LiquidityMigration/market-tape/<tape>/YYYY/MM/DD/` | Permanent archive; the host keeps a 6 h sliding window of shipped hours ([market_tape/README.md](../market_tape/README.md) §Local Sliding Window) |
 | **Reclaimed Sealed History** | Hourly at :41 (`storage-reclaim.timer`), only below the low-water mark | `LiquidityMigration/engine-state/sealed/` | Sealed WAL segments and archived quarantine files the host has reclaimed; permanent |
 
 | Local backup stage | Contract |
@@ -645,7 +645,7 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 | Budget term | Value |
 | :--- | :--- |
 | Reserve | `max(12% of capacity, 8 GiB)` |
-| Tape floor | the highest `[storage].min_free_disk_gb` in `deploy/capture/*.toml` (25 GiB); a recorder under it counts every frame and writes none |
+| Tape floor | the highest `[storage].min_free_disk_gb` in `deploy/capture/*.toml` (12 GiB); a recorder under it counts every frame and writes none |
 | Writer headroom | `6 GiB` |
 | Low water | `max(reserve, tape floor)` + writer headroom; below it, sealed-WAL reclamation is permitted, so verified WAL yields before a recorder blocks |
 | High water | low water + two days of measured growth |
@@ -654,7 +654,7 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 
 | Reclaim class | Rule | Keep set | Verification | Destination |
 | :--- | :--- | :--- | :--- | :--- |
-| Release directories and staged tarballs under `/opt/liquidity-migration-engine` | Every run | deployed commit, previous commit, `8c92c964…`, any override-referenced release, anything younger than 3 days | Local: the retained release is the one the fleet runs | Deleted |
+| Release directories and staged tarballs under `/opt/liquidity-migration-engine` | Every run | deployed commit, previous commit, `8c92c964…`, any override-referenced release, anything younger than 1 day | Local: the retained release is the one the fleet runs | Deleted |
 | Apt cache | Every run, `apt-get clean` | — | Rebuildable from the archive | Deleted |
 | Archive roots (`/var/lib/liquidity-migration-wal-quarantine`) | Every run, immutable files only, 2 GiB per run | — | Uploaded, then verified by size and md5 | `engine-state/sealed/`, then deleted |
 | Sealed WAL segments | Only while free space is below low water; oldest first; 12 GiB per run | at or above `retention_floor_segment`, the newest three numbered segments, anything under 48 h old, and segment 1 (`engine.wal`) always | (a) below the engine's floor from `engine-tools wal-retention --json`, (b) not the newest 3, (c) older than 48 h, (d) hard-linked into the backup stage, (e) re-verified against `engine-state/latest/` by size and md5, (f) server-side copied to `engine-state/sealed/` and verified there | `engine-state/sealed/`, then unlinked from source and stage |
@@ -665,7 +665,7 @@ Configured via `/etc/liquidity-migration/rclone.conf`:
 | `/var/lib/liquidity-migration/storage-reclaim/md5-cache.json` | Local md5 of sealed segments keyed by `dev:ino:size:mtime_ns`, so an hourly run does not re-read 40 GB beside the engines |
 | `/var/lib/liquidity-migration/storage-reclaim/ledger.jsonl` | One append-only row per reclaimed file: class, path, bytes, md5, remote destination, timestamp; a `wal` row also carries the deleted inode's `st_dev` and `st_ino`. Written and fsynced before the unlink. The realm watchdogs read it (`reclaimed_wal_identities` in `check_fleet_liveness.py`) so a segment the reclaimer deleted is not a segment the family lost |
 | `/var/lib/liquidity-migration/storage-reclaim/samples.jsonl` | One `statvfs` sample per run; the growth measurement reads this |
-| `/var/lib/liquidity-migration/receipts/storage-reclaim.last-success` | `key=value` receipt written only when every step succeeded, like `backup.last-success` |
+| `/var/lib/liquidity-migration/receipts/storage-reclaim.last-success` | `key=value` receipt written only when every step succeeded, like `backup.last-success`; the host watchdog warns (`storage-reclaim`) when it is older than `--max-reclaim-age-hours 3` or missing |
 
 **Invariants**
 

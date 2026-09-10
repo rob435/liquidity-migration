@@ -15,7 +15,7 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 | Mainnet liveness | `liquidity-migration-mainnet-liveness.timer` | 30 s while armed | Telegram alerts + incident routine | Funded Bybit engine, signal worker, timers, heartbeats, admission |
 | MEXC liveness | `liquidity-migration-mexc-liveness.timer` | 30 s while armed | Telegram alerts + incident routine | MEXC engine, signal worker, timers, heartbeats, admission |
 | Hyperliquid liveness | `liquidity-migration-hyperliquid-liveness.timer` | 30 s while armed | Telegram alerts + incident routine | Hyperliquid engine, signal worker, timers, heartbeats, admission |
-| Host liveness | `liquidity-migration-host-liveness.timer` | 3 min, independent | Telegram alerts + incident routine + external dead-man | Recorders, upload, backup, equity sampler, disk, clock, realm watchdogs |
+| Host liveness | `liquidity-migration-host-liveness.timer` | 3 min, independent | Telegram alerts + incident routine + external dead-man | Recorders, upload, backup, storage reclaimer, equity sampler, disk, clock, realm watchdogs |
 | Operator controls | `liquidity-migration-telegram-controls.service` | Continuous | Telegram main chat | Pause demo, resume demo, pause each running funded realm, status |
 
 ### Severity

@@ -8,9 +8,10 @@ heartbeat-bearing unit's heartbeat file to be fresh, require each signal worker
 to leave its bounded startup and report ready, and alert when an engine reports
 it can no longer open positions or that its rolling-loss trip is on.
 The ``host`` scope watches the units the manifest marks independent — the
-market recorder, its hourly upload, the state backup — plus disk space, the
-off-box backup stamp, the recorder's own status file, the upload receipt, and
-the host clock. It runs whether or not the trading fleet is up.
+market recorder, its hourly upload, the state backup, the storage reclaimer —
+plus disk space, the off-box backup stamp, the recorder's own status file, the
+upload receipt, the reclaimer's receipt, and the host clock. It runs whether or
+not the trading fleet is up.
 
 Severity says who has to act. ``CRITICAL`` is a fault somebody must fix: a dead
 unit, a stale or contract-breaking heartbeat, a degraded worker, a broken route.
@@ -1018,6 +1019,27 @@ def evaluate_backup_stamp(*, stamp_path: Path, now: float, max_age_hours: float)
     return []
 
 
+def evaluate_reclaim_stamp(*, stamp_path: Path, now: float, max_age_hours: float) -> list[Alert]:
+    """The storage reclaimer's receipt, written only by a run that finished every step.
+
+    The reclaimer is what keeps free space above the recorders' floor. When its
+    runs stop completing, nothing frees room and the WAL fills the disk.
+    """
+    try:
+        age_hours = (now - stamp_path.stat().st_mtime) / 3600
+    except OSError:
+        return [Alert("storage-reclaim", "WARNING", f"storage reclaim receipt is missing: {stamp_path}")]
+    if age_hours > max_age_hours:
+        return [
+            Alert(
+                "storage-reclaim",
+                "WARNING",
+                f"last completed storage reclaim is {age_hours:.1f}h old (limit {max_age_hours:g}h)",
+            )
+        ]
+    return []
+
+
 def _stamp_values(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -1228,6 +1250,8 @@ def _incident_units(scope: str, alerts: list[Alert]) -> list[str]:
         units.append("liquidity-migration-market-tape-upload.service")
     if "backup" in keys:
         units.append("liquidity-migration-backup.service")
+    if "storage-reclaim" in keys:
+        units.append("liquidity-migration-storage-reclaim.service")
     if scope == "host" and any(key.startswith("watchdog:") for key in keys):
         for key in keys:
             if key.startswith("watchdog:"):
@@ -1416,6 +1440,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="alert when the last completed backup is older than this",
     )
     p.add_argument(
+        "--reclaim-stamp-file",
+        default=os.environ.get("LIVENESS_RECLAIM_STAMP_FILE") or "",
+        help="receipt the storage reclaimer writes after a completed run ('' skips)",
+    )
+    p.add_argument(
+        "--max-reclaim-age-hours",
+        type=float,
+        default=3.0,
+        help="alert when the last completed storage reclaim is older than this",
+    )
+    p.add_argument(
         "--capture-status-file",
         action="append",
         default=None,
@@ -1537,6 +1572,14 @@ def main() -> int:
                 stamp_path=Path(args.backup_stamp_file),
                 now=now,
                 max_age_hours=args.max_backup_age_hours,
+            )
+        )
+    if args.reclaim_stamp_file:
+        alerts.extend(
+            evaluate_reclaim_stamp(
+                stamp_path=Path(args.reclaim_stamp_file),
+                now=now,
+                max_age_hours=args.max_reclaim_age_hours,
             )
         )
     capture_status_files = args.capture_status_file or (

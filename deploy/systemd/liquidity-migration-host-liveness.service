@@ -1,5 +1,5 @@
 [Unit]
-Description=liquidity-migration host watchdog: the market recorder, its upload, the backup, disk, and clock
+Description=liquidity-migration host watchdog: the market recorder, its upload, the backup, the storage reclaimer, disk, and clock
 Wants=network-online.target
 After=network-online.target
 
@@ -44,7 +44,9 @@ ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/runtime/check_fleet_
     --capture-status-file /var/lib/liquidity-migration/forward-market-binance/status.json \
     --upload-stamp-file /var/lib/liquidity-migration/receipts/market-tape-upload.last-success \
     --backup-stamp-file /var/lib/liquidity-migration/receipts/backup.last-success \
-    --max-backup-age-hours 0.5
+    --max-backup-age-hours 0.5 \
+    --reclaim-stamp-file /var/lib/liquidity-migration/receipts/storage-reclaim.last-success \
+    --max-reclaim-age-hours 3
 SuccessExitStatus=0
 StandardOutput=journal
 StandardError=journal
