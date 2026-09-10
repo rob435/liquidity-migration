@@ -2281,6 +2281,77 @@ fn the_gate_file_is_read_whole_and_an_absent_one_is_nothing() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn a_checked_hour_without_a_candle_is_not_a_hole() {
+    use super::acquisition::first_missing_kline_hour;
+    let worker = SignalWorker::new(checked_demo_config()).unwrap();
+    let mut state = worker.state().clone();
+    let day = 100 * DAY_MS;
+    let klines = state.klines.entry("PONSUSDT".into()).or_default();
+    for open_ts_ms in [day, day + 2 * HOUR_MS] {
+        klines.insert(
+            open_ts_ms,
+            HourlyKline {
+                symbol: "PONSUSDT".into(),
+                open_ts_ms,
+                available_at_ms: open_ts_ms + HOUR_MS,
+                open: 1.0,
+                high: 1.0,
+                low: 1.0,
+                close: 1.0,
+                volume_base: 1.0,
+                turnover_quote: 1.0,
+            },
+        );
+    }
+    // Checked through the first bar only: the second hour is a hole.
+    state.kline_coverage_intervals.insert(
+        "PONSUSDT".into(),
+        vec![CoverageInterval {
+            checked_from_ms: day,
+            checked_through_ms: day + HOUR_MS,
+        }],
+    );
+    assert_eq!(
+        first_missing_kline_hour(&state, "PONSUSDT", day, day + 3 * HOUR_MS),
+        Some(day + HOUR_MS)
+    );
+    // Checked through the third bar: the venue answered that hour with nothing,
+    // and asking again would return the same nothing.
+    state.kline_coverage_intervals.insert(
+        "PONSUSDT".into(),
+        vec![CoverageInterval {
+            checked_from_ms: day,
+            checked_through_ms: day + 3 * HOUR_MS,
+        }],
+    );
+    assert_eq!(
+        first_missing_kline_hour(&state, "PONSUSDT", day, day + 3 * HOUR_MS),
+        None
+    );
+    // Past the checked range a missing hour is still a hole.
+    assert_eq!(
+        first_missing_kline_hour(&state, "PONSUSDT", day, day + 4 * HOUR_MS),
+        Some(day + 3 * HOUR_MS)
+    );
+    // A symbol with no candle at all inside its checked range is venue-empty.
+    state.kline_coverage_intervals.insert(
+        "EMPTYUSDT".into(),
+        vec![CoverageInterval {
+            checked_from_ms: 0,
+            checked_through_ms: HOUR_MS,
+        }],
+    );
+    assert_eq!(
+        first_missing_kline_hour(&state, "EMPTYUSDT", 0, HOUR_MS),
+        None
+    );
+    assert_eq!(
+        first_missing_kline_hour(&state, "EMPTYUSDT", 0, 2 * HOUR_MS),
+        Some(HOUR_MS)
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn live_startup_waits_for_named_destinations_and_the_durable_successor_grant() {
     use engine_types::{

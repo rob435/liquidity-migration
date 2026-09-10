@@ -706,18 +706,23 @@ pub(super) fn align_down(value: i64, alignment: i64) -> i64 {
     value.saturating_sub(value.rem_euclid(alignment))
 }
 
+/// The first hour in `[start_ms, end_ms)` with no candle that the venue has
+/// not been asked for. An hour inside a checked interval that came back
+/// without a candle is one the venue has no bar for (no trade that hour, a
+/// listing pause), not a hole: asking again returns the same nothing, and a
+/// hole that never closes would hold the whole realm's gap open.
 pub(super) fn first_missing_kline_hour(
     state: &crate::worker::WorkerState,
     symbol: &str,
     start_ms: i64,
     end_ms: i64,
 ) -> Option<i64> {
-    let Some(rows) = state.klines.get(symbol) else {
-        return (start_ms < end_ms).then_some(start_ms);
-    };
+    let coverage = state.kline_coverage();
+    let rows = state.klines.get(symbol);
     let mut timestamp = start_ms;
     while timestamp < end_ms {
-        if !rows.contains_key(&timestamp) {
+        let present = rows.is_some_and(|rows| rows.contains_key(&timestamp));
+        if !present && !coverage.contains(symbol, timestamp, timestamp.saturating_add(HOUR_MS)) {
             return Some(timestamp);
         }
         timestamp = timestamp.saturating_add(HOUR_MS);

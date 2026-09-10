@@ -614,6 +614,27 @@ impl LiveRunner {
         Ok(())
     }
 
+    /// The venue's own tables (MEXC's contract table, Hyperliquid's coin
+    /// spellings) live in this process and are filled by an instrument read.
+    /// A restored universe skips `resolve_universe`'s read, and the stream and
+    /// the first kline repair need those tables, so read once before either.
+    /// A venue fault here is retried with backoff rather than left to systemd.
+    async fn read_instruments_before_the_stream(&mut self) -> Result<(), WorkerError> {
+        let mut delay_ms = self.config.live.retry_base_ms.max(500);
+        loop {
+            match self.refresh_instruments().await {
+                Ok(()) => return Ok(()),
+                Err(error) if error.is_lane_local_source_failure() => {
+                    eprintln!("signal-worker: instrument read before the stream failed, retrying: {error}");
+                    self.write_heartbeat("starting", None)?;
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    delay_ms = delay_ms.saturating_mul(2).min(60_000);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     /// A worker with no derived universe cannot own a symbol or publish an
     /// observation, so the first refresh happens before the lanes start. A
     /// venue fault here is retried with backoff rather than left to systemd.
@@ -688,6 +709,7 @@ impl LiveRunner {
             } => result?,
         }
         self.durable.respond_to_readiness_request()?;
+        self.read_instruments_before_the_stream().await?;
         let run_started_at_ms = wall_ms()?;
         let symbols = self.kline_symbols();
         let pending_limit = pending_kline_limit(symbols.len());
