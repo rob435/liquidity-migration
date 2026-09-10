@@ -884,3 +884,94 @@ fn a_durable_binary64_close_on_an_adopted_sleeve_leaves_a_later_fifo_close_reder
         original
     );
 }
+
+/// The venue's own close, as execution-history recovery reads it: no order of
+/// ours, a venue reason, and no exact amounts.
+fn venue_stop_close(quantity: &str) -> WalRecord {
+    let rows = fill("venue-stop", Side::Sell, quantity, false);
+    let WalRecord::OrderUpdate {
+        update:
+            OrderUpdate::Fill {
+                exec_id,
+                symbol,
+                side,
+                qty,
+                px,
+                fee,
+                is_maker,
+                venue_ts_ms,
+                ..
+            },
+        ..
+    } = rows[1].clone()
+    else {
+        unreachable!()
+    };
+    WalRecord::RecoveredFill {
+        callbacks: None,
+        allocation: None,
+        amounts: None,
+        exec_id,
+        client_order_id: String::new(),
+        symbol,
+        side,
+        qty,
+        px,
+        fee,
+        is_maker,
+        forced_close: Some(engine_types::ForcedClose::StopLoss),
+        venue_ts_ms,
+        recovered_wall_ts_ms: 3000,
+    }
+}
+
+/// A venue close of the whole position states the venue's grid quantity,
+/// while the holding it closes is the sum of the binary64 `qty` fields the
+/// fills carried. On a 0.1 grid, 0.6 then 0.1 sums a rounding *below* 0.7, so
+/// resolving only the execution onto the grid makes a full close look larger
+/// than what is owned and leaves the holding in place.
+#[test]
+fn a_venue_close_of_a_binary64_holding_under_its_grid_value_is_charged_to_its_owner() {
+    let mut records = vec![base(&[], 0.0)];
+    add(&mut records, 0, Side::Buy, "0.6", false, 1000);
+    add(&mut records, 0, Side::Buy, "0.1", false, 2000);
+    let claims = Attribution::try_from_records(&records).unwrap();
+    let held = claims.signed_exact(StrategyId(0), SymbolId(0));
+    assert!(held < n("0.7") && held > n("0.69"), "{held:?}");
+
+    let mut recovered = venue_stop_close("0.7");
+    let prepared = claims
+        .prepare_portfolio_recovered_on_grid(
+            None,
+            &["left".into(), "right".into(), "third".into()],
+            &recovered,
+            Some(&n("0.1")),
+        )
+        .expect("a venue close of the whole holding is the holder's own close")
+        .expect("the close belongs to the sleeve that held the position");
+    assert_eq!(
+        prepared
+            .allocation
+            .slices
+            .iter()
+            .map(|slice| (slice.strategy, slice.quantity.clone()))
+            .collect::<Vec<_>>(),
+        vec![(StrategyId(0), n("0.7"))]
+    );
+
+    let WalRecord::RecoveredFill { allocation, .. } = &mut recovered else {
+        unreachable!()
+    };
+    *allocation = Some(Box::new(prepared.allocation));
+    records.push(recovered);
+    assert!(Attribution::try_from_records(&records)
+        .unwrap()
+        .snapshot()
+        .positions
+        .is_empty());
+    let exposure = reconcile::logged_exposure(&records).unwrap();
+    assert!(
+        exposure.values().all(|qty| qty.abs() < 1e-9),
+        "{exposure:?}"
+    );
+}

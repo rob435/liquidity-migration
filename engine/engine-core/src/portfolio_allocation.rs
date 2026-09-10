@@ -10,6 +10,11 @@ pub(crate) struct AllocationInput<'a> {
     pub quantity: &'a Exact,
     pub fee: Option<&'a AssetAmount>,
     pub forced_close: bool,
+    /// The symbol's sleeve holdings on the venue's own quantity grid, when
+    /// `quantity` was resolved onto it. `None` reads the inventory's own
+    /// sums, which is what an execution the venue stated exactly compares
+    /// against.
+    pub owned: Option<&'a std::collections::BTreeMap<StrategyId, Exact>>,
 }
 
 pub(crate) fn allocate(
@@ -24,6 +29,7 @@ pub(crate) fn allocate(
         quantity,
         fee,
         forced_close,
+        owned,
     } = input;
     if !quantity.is_positive() {
         return Err("execution allocation quantity must be positive".into());
@@ -58,23 +64,35 @@ pub(crate) fn allocate(
     if !forced_close {
         return Err("execution has neither an order owner nor a venue forced-close reason".into());
     }
-    let net = inventory.net(symbol);
+    let holdings: Vec<(StrategyId, Exact)> = inventory
+        .rows()
+        .filter(|row| row.symbol == symbol)
+        .map(|row| {
+            let quantity = owned
+                .and_then(|grid| grid.get(&row.strategy))
+                .unwrap_or(&row.signed_qty);
+            (row.strategy, quantity.clone())
+        })
+        .collect();
+    let net = holdings
+        .iter()
+        .fold(Exact::zero(), |sum, (_, quantity)| sum + quantity);
     if net.is_zero() || net.is_positive() == (side == Side::Buy) || quantity > &net.abs() {
         return Err("forced execution does not reduce the owned physical net".into());
     }
-    let mut contributors = inventory
-        .rows()
-        .filter(|row| row.symbol == symbol && row.signed_qty.is_positive() == net.is_positive())
-        .map(|row| name(row.strategy).map(|name| (name, row)))
+    let mut contributors = holdings
+        .iter()
+        .filter(|(_, held)| held.is_positive() == net.is_positive())
+        .map(|(strategy, held)| name(*strategy).map(|name| (name, *strategy, held)))
         .collect::<Result<Vec<_>, _>>()?;
     contributors.sort_by(|a, b| a.0.cmp(&b.0));
     let mut remaining = quantity.clone();
     let mut slices = Vec::new();
-    for (strategy_key, row) in contributors {
+    for (strategy_key, strategy, held) in contributors {
         if remaining.is_zero() {
             break;
         }
-        let qty = remaining.clone().min(row.signed_qty.abs());
+        let qty = remaining.clone().min(held.abs());
         let slice_fee = fee
             .map(|fee| -> Result<AssetAmount, String> {
                 let value = (&fee.amount.value * &qty)
@@ -89,7 +107,7 @@ pub(crate) fn allocate(
             .transpose()?;
         remaining -= &qty;
         slices.push(ExecutionSlice {
-            strategy: row.strategy,
+            strategy,
             strategy_key,
             quantity: qty,
             fee: slice_fee,
@@ -312,6 +330,7 @@ mod tests {
                 quantity: &exact("3"),
                 fee: Some(&fee),
                 forced_close: true,
+                owned: None,
             },
         )
         .unwrap();
@@ -356,6 +375,7 @@ mod tests {
                 quantity: &exact("4"),
                 fee: None,
                 forced_close: true,
+                owned: None,
             },
         )
         .unwrap();
@@ -412,7 +432,8 @@ mod tests {
                     side,
                     quantity: &exact(qty),
                     fee: None,
-                    forced_close: forced
+                    forced_close: forced,
+                    owned: None,
                 }
             )
             .is_err());
