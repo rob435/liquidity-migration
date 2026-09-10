@@ -164,7 +164,10 @@ engine — the execution loop
   engine rebind-native-strategy-state --previous-config PATH --config PATH [--execute]
       Preserve native checkpoint payloads across CARRY metadata changes and
       EXODUS stop tightening; retain probe counters and queued work across
-      offset changes under the stopped WAL lock and account lease.
+      offset changes under the stopped WAL lock and account lease. A sleeve
+      whose decision rules changed while the log attributes it no exposure,
+      no order in flight and no callback work is given its fresh initial
+      checkpoint under the new identity; one that holds anything is refused.
 
   engine retire-legacy-signal-sources --config engine.toml --plan PATH [--execute]
       Read an operator retirement plan for permanently stopped legacy sources.

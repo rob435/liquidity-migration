@@ -1043,17 +1043,40 @@ ensure_native_strategy_state() {
         return 0
     fi
 
-    local deployed previous_config
-    deployed="$(cat "$DEPLOYED_COMMIT_FILE" 2>/dev/null || true)"
-    previous_config="$RELEASE_DIR/checkpoint-configs/$deployed/engine.$realm.toml"
-    if [ -n "$deployed" ] && [ -f "$previous_config" ]; then
+    # The state was written under the config the realm last ran with. That is
+    # the last deployed commit's render only for a realm that ran through every
+    # deploy; a realm that sat stopped kept being re-rendered, so every
+    # retained render is a candidate, newest first, and the engine's dry run
+    # picks the one whose identities match the checkpoints it replays.
+    local candidate
+    for candidate in $(retained_realm_configs "$realm"); do
         run_engine_takeover_command "$realm" "$config" rebind-native-strategy-state \
-            --previous-config "$previous_config" --execute \
+            --previous-config "$candidate" >/dev/null 2>&1 || continue
+        run_engine_takeover_command "$realm" "$config" rebind-native-strategy-state \
+            --previous-config "$candidate" --execute \
             && run_engine_takeover_command "$realm" "$config" verify-native-strategy-state \
-            && return 0
+            && { echo "native-state-ok realm=$realm result=rebound previous=$candidate"; return 0; }
         fail "$realm native checkpoint configuration change is incompatible"
+    done
+    fail "$realm canonical native strategy state is unavailable and no retained render matches its checkpoints; recover retained legacy snapshots with the compatible retained release before deployment"
+}
+
+# Every retained render of one realm's engine config, the last deployed
+# commit's first, then newest first.
+retained_realm_configs() {
+    local realm="$1" deployed deployed_config="" candidate
+    deployed="$(cat "$DEPLOYED_COMMIT_FILE" 2>/dev/null || true)"
+    if [ -n "$deployed" ]; then
+        deployed_config="$RELEASE_DIR/checkpoint-configs/$deployed/engine.$realm.toml"
+        if [ -f "$deployed_config" ]; then echo "$deployed_config"; fi
     fi
-    fail "$realm canonical native strategy state is unavailable; recover retained legacy snapshots with the compatible retained release before deployment"
+    for candidate in "$RELEASE_DIR"/checkpoint-configs/*/"engine.$realm.toml"; do
+        [ -f "$candidate" ] || continue
+        printf '%s\t%s\n' \
+            "$(stat -c %Y "$candidate" 2>/dev/null || stat -f %m "$candidate")" "$candidate"
+    done | sort -rn | cut -f2- | while IFS= read -r candidate; do
+        if [ "$candidate" != "$deployed_config" ]; then echo "$candidate"; fi
+    done
 }
 
 # ------------------------------------------------------------ funded realms

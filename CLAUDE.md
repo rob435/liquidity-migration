@@ -46,7 +46,8 @@ never copy sleeve status or thresholds here.
 | Command | Does |
 | --- | --- |
 | `scripts/dev.sh doctor` | read-only Git, Python, dependency, skill, and deploy-env-toggle diagnostic (`--json` for tools) |
-| `scripts/dev.sh check` | doctor, then Ruff, ShellCheck, mypy, pytest, and the engine's rustfmt, clippy, and tests |
+| `scripts/dev.sh check` | doctor, then Ruff, ShellCheck, mypy, pytest, and the engine's rustfmt, clippy, and tests; prunes the workspace crates' build artifacts first when the target volume has under `LM_TARGET_FREE_GIB` (30) GiB free |
+| `scripts/dev.sh prune` | `cargo clean --profile dev -p` every workspace member and drop `target/debug/incremental`: the tens of GiB repeated gates pile up, with the dependency builds kept |
 | `.venv/bin/python -m pytest -q` | tests |
 | `.venv/bin/python -m ruff check liquidity_migration scripts tests` | lint |
 | `cargo test --manifest-path engine/Cargo.toml --workspace --locked` | engine tests |

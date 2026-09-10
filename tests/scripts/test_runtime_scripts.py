@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import re
 import subprocess
 import sys
@@ -767,8 +768,11 @@ def _native_state_paths(tmp_path: Path, realm: str) -> tuple[Path, list[Path]]:
 def _ensure_native_state(
     tmp_path: Path, realm: str, *, verify_status: int = 1,
     initialize_status: int = 0, final_verify_status: int = 0, rebind_status: int = 0,
+    rebind_refuses: str = "",
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
-    helper = _function(_remote_script(), "ensure_native_strategy_state")
+    helper = _function(_remote_script(), "ensure_native_strategy_state") + "\n" + _function(
+        _remote_script(), "retained_realm_configs"
+    )
     # Relocate the host's absolute state paths; the function's control flow is unchanged.
     helper = helper.replace("/var/lib/", f"{tmp_path}/")
     trace = tmp_path / "native-state.trace"
@@ -789,11 +793,14 @@ def _ensure_native_state(
             "fail() { printf '%s\\n' \"$*\" >&2; exit 1; }",
             "verify_count=0",
             "run_engine_takeover_command() {",
-            "  printf '%s %s %s\\n' \"$1\" \"$2\" \"$3\" >> \"$STATE_TRACE\"",
+            "  printf '%s %s %s%s\\n' \"$1\" \"$2\" \"$3\" \"${5:+ $5}\" >> \"$STATE_TRACE\"",
             '  if [ "$3" = initialize-native-strategy-state ]; then',
             '    return "$INITIALIZE_STATUS"',
             "  fi",
-            '  if [ "$3" = rebind-native-strategy-state ]; then return "$REBIND_STATUS"; fi',
+            '  if [ "$3" = rebind-native-strategy-state ]; then',
+            '    if [ -n "$REBIND_REFUSES" ] && printf "%s" "${5:-}" | grep -qE "$REBIND_REFUSES"; then return 7; fi',
+            '    return "$REBIND_STATUS"',
+            "  fi",
             "  verify_count=$((verify_count + 1))",
             '  if [ "$verify_count" -eq 1 ]; then return "$VERIFY_STATUS"; fi',
             '  return "$FINAL_VERIFY_STATUS"',
@@ -810,6 +817,7 @@ def _ensure_native_state(
             "DEPLOYED_COMMIT_FILE": str(tmp_path / "deployed"),
             "RELEASE_DIR": str(tmp_path / "release"),
             "REBIND_STATUS": str(rebind_status),
+            "REBIND_REFUSES": rebind_refuses,
             "STATE_TRACE": str(trace),
             "VERIFY_STATUS": str(verify_status),
             "INITIALIZE_STATUS": str(initialize_status),
@@ -1488,8 +1496,43 @@ def test_native_rebind_uses_retained_config_without_initializing_state(
     source.write_text("retained source configuration\n")
     result, calls = _ensure_native_state(tmp_path, realm, rebind_status=rebind_status)
     assert (result.returncode == 0) == (rebind_status == 0), result.stderr
+    # A dry run first; only a render the engine accepts is executed and verified.
     assert calls[:2] == [f"{realm} {realm}.toml verify-native-strategy-state",
-                         f"{realm} {realm}.toml rebind-native-strategy-state"]
-    assert len(calls) == (3 if rebind_status == 0 else 2)
+                         f"{realm} {realm}.toml rebind-native-strategy-state {source}"]
+    assert len(calls) == (4 if rebind_status == 0 else 2)
     assert not any("initialize-native" in call for call in calls)
     assert source.read_text() == "retained source configuration\n"
+    if rebind_status == 0:
+        assert f"result=rebound previous={source}" in result.stdout
+
+
+@pytest.mark.parametrize("realm", ["demo", "mainnet"])
+def test_native_rebind_tries_every_retained_render_and_keeps_the_one_the_engine_accepts(
+    tmp_path: Path, realm: str,
+) -> None:
+    # A realm that sat stopped across deploys kept being re-rendered, so the
+    # last deployed commit's render is not the one its state was written under.
+    wal, _ = _native_state_paths(tmp_path, realm)
+    wal.parent.mkdir(parents=True)
+    wal.write_bytes(b"canonical WAL")
+    (tmp_path / "deployed").write_text("a" * 40)
+    now = time.time()
+    renders: dict[str, Path] = {}
+    for name, age in (("a", 0.0), ("b", 60.0), ("c", 120.0)):
+        path = tmp_path / "release/checkpoint-configs" / (name * 40) / f"engine.{realm}.toml"
+        path.parent.mkdir(parents=True)
+        path.write_text(f"render {name}\n")
+        os.utime(path, (now - age, now - age))
+        renders[name] = path
+    result, calls = _ensure_native_state(tmp_path, realm, rebind_refuses="/(a{40}|b{40})/")
+    assert result.returncode == 0, result.stderr
+    assert calls == [
+        f"{realm} {realm}.toml verify-native-strategy-state",
+        f"{realm} {realm}.toml rebind-native-strategy-state {renders['a']}",
+        f"{realm} {realm}.toml rebind-native-strategy-state {renders['b']}",
+        f"{realm} {realm}.toml rebind-native-strategy-state {renders['c']}",
+        f"{realm} {realm}.toml rebind-native-strategy-state {renders['c']}",
+        f"{realm} {realm}.toml verify-native-strategy-state",
+    ]
+    assert f"result=rebound previous={renders['c']}" in result.stdout
+    assert not any("initialize-native" in call for call in calls)

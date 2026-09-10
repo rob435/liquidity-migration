@@ -258,6 +258,68 @@ def test_dev_router_uses_selected_python_and_preserves_arguments(tmp_path: Path)
     ]
 
 
+def test_dev_prune_cleans_each_workspace_member_and_keeps_dependency_builds(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "cargo-arguments.txt"
+    fake_cargo = fake_bin / "cargo"
+    fake_cargo.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = metadata ]; then\n'
+        "  printf '%s' '{\"packages\": [{\"name\": \"engine-types\"}, {\"name\": \"signal-worker\"}]}'\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf \'%s\\n\' "$@" >> "$CAPTURE"\n',
+        encoding="utf-8",
+    )
+    fake_cargo.chmod(0o700)
+    target = tmp_path / "target"
+    (target / "debug" / "incremental").mkdir(parents=True)
+    (target / "debug" / "deps").mkdir()
+    # A PATH with no rustup, so the fake cargo is the one the script finds.
+    environment = {
+        **os.environ,
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "CAPTURE": str(capture),
+        "CARGO_TARGET_DIR": str(target),
+        "PYTHON": sys.executable,
+    }
+
+    completed = subprocess.run(
+        ["bash", str(DEV), "prune"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert capture.read_text(encoding="utf-8").splitlines() == [
+        "clean",
+        "--profile",
+        "dev",
+        "-p",
+        "engine-types",
+        "-p",
+        "signal-worker",
+    ]
+    assert not (target / "debug" / "incremental").exists()
+    assert (target / "debug" / "deps").exists()
+    assert completed.stdout.count("[dev] cargo prune:") == 2
+
+
+def test_dev_check_prunes_under_the_target_volume_floor_before_the_rust_stages() -> None:
+    dev = DEV.read_text(encoding="utf-8")
+    check = dev[dev.index("  check)") :]
+
+    assert 'if [[ "$free_gib" -lt "${LM_TARGET_FREE_GIB:-30}" ]]; then' in check
+    assert check.index("prune_engine_target") < check.index('echo "[dev] cargo fmt"')
+    assert "cargo clean --profile dev" in dev
+    assert "prune" in subprocess.run(
+        ["bash", str(DEV), "help"], check=True, capture_output=True, text=True
+    ).stdout
+
+
 def test_pre_push_reuses_developer_gate_and_preserves_safe_basetemp() -> None:
     hook = PRE_PUSH.read_text(encoding="utf-8")
 

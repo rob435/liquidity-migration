@@ -1,9 +1,15 @@
 use super::*;
 
+/// Whether two renders of one sleeve describe the same decision rules.
+///
+/// `Ok(true)`: the checkpoint carries over under the new fingerprint.
+/// `Ok(false)`: the rules changed, and what happens next depends on whether
+/// the sleeve holds anything. A change of ownership or a wider EXODUS stop is
+/// refused outright.
 fn compatible_config(
     previous: &config::StrategyConfig,
     next: &config::StrategyConfig,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<bool, Box<dyn Error>> {
     if previous.name != next.name || previous.sleeve_name() != next.sleeve_name() {
         return Err("checkpoint rebind changes strategy ownership".into());
     }
@@ -36,14 +42,39 @@ fn compatible_config(
         }
         _ => false,
     };
-    if !compatible {
-        return Err(format!(
-            "checkpoint rebind changes {:?} decision rules",
-            next.sleeve_name()
-        )
-        .into());
+    Ok(compatible)
+}
+
+/// Whether the replayed log attributes this sleeve nothing: no exposure, no
+/// order in flight, no queued callback and no committed process. Such a sleeve
+/// has no state a rule change could orphan, so a fresh initial checkpoint is
+/// exactly what a first start would give it.
+fn holds_nothing(
+    index: usize,
+    replayed: &[WalRecord],
+    strategy_count: usize,
+) -> Result<bool, Box<dyn Error>> {
+    let id = StrategyId(u16::try_from(index)?);
+    let attribution = engine_core::attribution::Attribution::try_from_records(replayed)?;
+    if attribution
+        .rows()
+        .iter()
+        .any(|(strategy, _, _)| *strategy == id)
+    {
+        return Ok(false);
     }
-    Ok(())
+    let orders = engine_core::inflight::LedgerOfOrders::try_from_records(replayed)?;
+    if orders
+        .orders
+        .values()
+        .any(|order| order.request.strategy == id && order.in_flight())
+    {
+        return Ok(false);
+    }
+    let callbacks =
+        engine_core::callback_recovery::state::CallbackState::replay(replayed, strategy_count)?;
+    Ok(!callbacks.committed.contains_key(&id)
+        && !callbacks.inputs.values().any(|input| input.strategy == id))
 }
 
 fn rebind_records(
@@ -109,17 +140,34 @@ fn rebind_records(
             &old_identity,
             &state.checkpoint,
         )?;
-        compatible_config(&previous[index], &next[index])?;
-        let mut checkpoint = state.checkpoint.clone();
-        checkpoint
-            .decision_fingerprint
-            .clone_from(&identity.decision_fingerprint);
+        let (checkpoint, provenance) = if compatible_config(&previous[index], &next[index])? {
+            let mut checkpoint = state.checkpoint.clone();
+            checkpoint
+                .decision_fingerprint
+                .clone_from(&identity.decision_fingerprint);
+            (checkpoint, state.provenance.clone())
+        } else if holds_nothing(index, replayed, new_strategies.len())? {
+            println!(
+                "reinitialized {:?}: decision rules changed while it held no exposure, working orders or callback work",
+                next[index].sleeve_name()
+            );
+            let fresh = strategy
+                .initial_checkpoint()
+                .ok_or("strategy has no canonical initial checkpoint")?;
+            (fresh, None)
+        } else {
+            return Err(format!(
+                "checkpoint rebind changes {:?} decision rules while it holds exposure or pending work",
+                next[index].sleeve_name()
+            )
+            .into());
+        };
         validate_checkpoint_contract(strategy.as_ref(), &identity, &checkpoint)?;
         changes.push(WalRecord::StrategyGlobalCheckpoint {
             wall_ts_ms: clock::wall_ms(),
             strategy: StrategyId(id),
             checkpoint,
-            provenance: state.provenance.clone(),
+            provenance,
         });
     }
     let (callbacks, _) = engine_core::callback_recovery::paging::CallbackPages::replay(
@@ -423,32 +471,122 @@ mod tests {
             .is_empty());
     }
 
+    fn with_rule_change(
+        next: &[config::StrategyConfig],
+        index: usize,
+        field: &str,
+        value: serde_json::Value,
+    ) -> Vec<config::StrategyConfig> {
+        let mut changed = next.to_vec();
+        let mut json: serde_json::Value =
+            serde_json::from_str(changed[index].params["config_json"].as_str().unwrap()).unwrap();
+        json["rule"][field] = value;
+        changed[index]
+            .params
+            .insert("config_json".into(), toml::Value::String(json.to_string()));
+        changed
+    }
+
     #[test]
-    fn rebind_refuses_changed_decisions_and_unknown_source_identities() {
+    fn a_rule_change_on_a_sleeve_that_holds_nothing_reinitialises_its_checkpoint() {
         let (previous, next) = configs();
         let records = source_records(&previous);
         for (index, field, value) in [
-            (0, "enter_bp", 20.0),
-            (2, "cover_minutes_after_settlement", 120.0),
-            (2, "stop_loss_fraction", 0.5),
+            (0, "enter_bp", serde_json::json!(20.0)),
+            (2, "cover_minutes_after_settlement", serde_json::json!(120)),
         ] {
-            let mut changed = next.clone();
-            let mut json: serde_json::Value =
-                serde_json::from_str(changed[index].params["config_json"].as_str().unwrap())
-                    .unwrap();
-            json["rule"][field] = if field == "cover_minutes_after_settlement" {
-                serde_json::json!(120)
-            } else {
-                serde_json::json!(value)
-            };
-            changed[index]
-                .params
-                .insert("config_json".into(), toml::Value::String(json.to_string()));
-            assert!(
-                rebind_records(&previous, &changed, &records).is_err(),
-                "accepted {field}"
-            );
+            let changed = with_rule_change(&next, index, field, value);
+            let strategies = assembly::strategies(&changed).unwrap();
+            let changes = rebind_records(&previous, &changed, &records).unwrap();
+            let fresh = changes
+                .iter()
+                .find_map(|row| match row {
+                    WalRecord::StrategyGlobalCheckpoint {
+                        strategy,
+                        checkpoint,
+                        provenance,
+                        ..
+                    } if usize::from(strategy.0) == index => Some((checkpoint, provenance)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{field}: no checkpoint for sleeve {index}"));
+            let initial = strategies[index].initial_checkpoint().unwrap();
+            assert_eq!(*fresh.0, initial, "{field}");
+            assert!(fresh.1.is_none(), "{field}");
+            let mut result = records.clone();
+            result.extend(changes);
+            verify_records(&configured_names(&changed), &strategies, &result).unwrap();
         }
+        // A wider EXODUS stop is refused whatever the sleeve holds.
+        let widened = with_rule_change(&next, 2, "stop_loss_fraction", serde_json::json!(0.5));
+        assert!(rebind_records(&previous, &widened, &records).is_err());
+    }
+
+    #[test]
+    fn a_rule_change_on_a_sleeve_with_exposure_or_pending_work_is_refused() {
+        use engine_types::strategy_process::{
+            CallbackEvent, CallbackPreparation, StrategyCallbackInput,
+        };
+        let (previous, next) = configs();
+        let changed = with_rule_change(&next, 0, "enter_bp", serde_json::json!(20.0));
+
+        // Exposure the log attributes to the carry sleeve, written the way a
+        // rotation writes it: the snapshot and its rows agree.
+        let mut ledger = engine_core::attribution::Attribution::default();
+        ledger.note(
+            StrategyId(0),
+            engine_types::SymbolId(0),
+            engine_types::Side::Buy,
+            12.0,
+        );
+        let mut held = source_records(&previous);
+        let WalRecord::SegmentBase {
+            attribution,
+            portfolio,
+            ..
+        } = &mut held[0]
+        else {
+            panic!("source base")
+        };
+        *portfolio = Some(ledger.snapshot());
+        *attribution = ledger
+            .rows()
+            .into_iter()
+            .map(|(strategy, symbol, signed_qty)| engine_types::FilledTotal {
+                strategy,
+                symbol,
+                signed_qty,
+            })
+            .collect();
+        let error = rebind_records(&previous, &changed, &held)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exposure or pending work"), "{error}");
+
+        let mut queued = source_records(&previous);
+        let WalRecord::SegmentBase {
+            strategy_callbacks, ..
+        } = &mut queued[0]
+        else {
+            panic!("source base")
+        };
+        strategy_callbacks.push(StrategyCallbackInput {
+            callback_id: 1,
+            strategy: StrategyId(0),
+            order_origin: None,
+            event: CallbackEvent::Boot,
+            preparation: CallbackPreparation::Queued,
+        });
+        let error = rebind_records(&previous, &changed, &queued)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exposure or pending work"), "{error}");
+    }
+
+    #[test]
+    fn rebind_refuses_unknown_source_identities_and_a_reordered_sleeve_table() {
+        let (previous, next) = configs();
+        let records = source_records(&previous);
         let mut unknown = records.clone();
         let WalRecord::SegmentBase {
             strategy_global_checkpoints,

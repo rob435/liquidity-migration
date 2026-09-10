@@ -32,8 +32,12 @@ Quantitative research, market data capture, and low-latency algorithmic trading 
 # Diagnostic environment check
 scripts/dev.sh doctor
 
-# Full codebase verification (formatting, lints, rust tests, python tests)
+# Full codebase verification (formatting, lints, rust tests, python tests);
+# prunes the workspace crates' build artifacts first when the disk is low
 scripts/dev.sh check
+
+# Reclaim the tens of GiB repeated gates leave in engine/target
+scripts/dev.sh prune
 
 # Fast targeted tests
 pytest -q
