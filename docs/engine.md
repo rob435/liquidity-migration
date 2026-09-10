@@ -614,7 +614,7 @@ instruments refuses to let a legacy source make a dependent sleeve ready.
 | `cash_flow_agrees_when_flat` | with no position open, the log's fills as money equal the venue's realized P&L net of every fee |
 | `ledger_agrees_when_flat` | with no position open, the round trips the log closes (as `engine fills` reads them) net to the venue's realized P&L net of closed fees |
 | `numbers_finite` | no NaN or infinity in the venue's books or the engine's account view |
-| `strategies_healthy` | no sleeve reports a health error and no callback fault is latched |
+| `strategies_healthy` | no sleeve reports a health error, and no `intent_refused` record carries `strategy_callback_unavailable` |
 | `signals_consumed_exactly_once` | every row published in time to matter is in the log once, settled once, and no recorded gap is still open |
 | `checkpoint_identity_holds` | each sleeve accepts its own newest durable state, at the block's fingerprint, and no boot rewrote the initial checkpoint |
 | `sleeve_attribution_agrees` | the sleeves' own inventories add up per symbol to the venue's position |

@@ -143,6 +143,8 @@ pub struct SimReport {
     pub signals_rejected: u64,
     /// Every sleeve reporting a health error when the loop stopped.
     pub strategy_errors: Vec<(String, String)>,
+    /// Every `intent_refused` record in the log, by code.
+    pub refusals_by_code: BTreeMap<String, u64>,
     pub orders_by_sleeve: BTreeMap<String, u64>,
     pub fills_by_sleeve: BTreeMap<String, u64>,
     /// The authenticated fee snapshot the run priced its fills with. It comes
@@ -725,6 +727,7 @@ pub async fn run_seed(opts: SimOptions) -> Result<SimReport, EngineError> {
             .as_ref()
             .map(|end| end.strategy_health.clone())
             .unwrap_or_default(),
+        refusals_by_code: invariants::refusals_by_code(&records),
         orders_by_sleeve: by_sleeve.orders,
         fills_by_sleeve: by_sleeve.fills,
         fee_snapshot_sha256: world.fee_snapshot_sha256.clone(),
@@ -781,6 +784,14 @@ impl SweepReport {
                 let faults: Vec<String> =
                     run.faults.iter().map(|(k, v)| format!("{k}={v}")).collect();
                 let _ = writeln!(out, "    injected: {}", faults.join(" "));
+            }
+            if !run.refusals_by_code.is_empty() {
+                let refused: Vec<String> = run
+                    .refusals_by_code
+                    .iter()
+                    .map(|(code, n)| format!("{code}={n}"))
+                    .collect();
+                let _ = writeln!(out, "    refused: {}", refused.join(" "));
             }
             if run.signals_published > 0 {
                 let sleeves: Vec<String> = run

@@ -30,7 +30,7 @@
 //! | `numbers_finite` | no NaN or infinity in the venue's books or the engine's account view |
 //! | `stopped_by_feed_closed` | the loop stopped because the tape ended, not because of an error |
 //! | `engine_ran_clean` | no boot or run returned an error |
-//! | `strategies_healthy` | no sleeve reports a health error and no callback fault is latched |
+//! | `strategies_healthy` | no sleeve reports a health error, and no `intent_refused` record carries `strategy_callback_unavailable` |
 //! | `signals_consumed_exactly_once` | every row published in time to matter is in the log once, settled once, and no recorded gap is still open |
 //! | `checkpoint_identity_holds` | each sleeve accepts its own newest durable state, at the block's fingerprint, and no boot rewrote the initial checkpoint |
 //! | `sleeve_attribution_agrees` | the sleeves' own inventories add up per symbol to the venue's position |

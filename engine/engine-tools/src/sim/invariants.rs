@@ -95,6 +95,17 @@ pub fn signal_counts(records: &[WalRecord]) -> SignalCounts {
     counts
 }
 
+/// Every refusal the engine wrote, by its stable code.
+pub fn refusals_by_code(records: &[WalRecord]) -> BTreeMap<String, u64> {
+    let mut out = BTreeMap::new();
+    for record in records {
+        if let WalRecord::IntentRefused { code, .. } = record {
+            *out.entry(code.clone()).or_insert(0) += 1;
+        }
+    }
+    out
+}
+
 /// Orders and fills charged to each configured sleeve name.
 #[derive(Clone, Debug, Default)]
 pub struct BySleeve {
@@ -488,17 +499,26 @@ fn strategies_healthy(e: &Evidence<'_>) -> Check {
         .iter()
         .map(|(sleeve, error)| format!("{sleeve}: {error}"))
         .collect();
-    // Read from the note's text until workstream C's typed `intent_refused`
-    // record lands; the reason is the log's only statement of it today.
-    if let Some(text) = e.records.iter().find_map(|record| match record {
-        WalRecord::Note { source, text }
-            if source == "engine" && text.contains("strategy_callback_unavailable") =>
-        {
-            Some(text.clone())
-        }
+    // A latched callback fault refuses every later opening with this code;
+    // the record is the log's own statement of it.
+    if let Some((sleeve, tag)) = e.records.iter().find_map(|record| match record {
+        WalRecord::IntentRefused {
+            code,
+            strategy,
+            tag,
+            ..
+        } if code == "strategy_callback_unavailable" => Some((
+            e.judged
+                .iter()
+                .find(|(id, _, _)| id == strategy)
+                .map_or_else(|| strategy.0.to_string(), |(_, name, _)| name.clone()),
+            tag.clone(),
+        )),
         _ => None,
     }) {
-        problems.push(format!("a callback fault reached the log: {text}"));
+        problems.push(format!(
+            "a callback fault reached the log: {sleeve} refused {tag} with strategy_callback_unavailable"
+        ));
     }
     Check::judge(
         name,
