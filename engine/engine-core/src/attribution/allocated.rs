@@ -161,6 +161,30 @@ impl Attribution {
         )
     }
 
+    /// Every sleeve's holding in this symbol on the venue's quantity grid.
+    ///
+    /// A row whose binary64 readings admit no single grid value keeps its
+    /// sum, so an execution that needs one still refuses rather than being
+    /// charged against a guess.
+    fn owned_on_grid(
+        &self,
+        symbol: SymbolId,
+        step: &engine_types::numeric::Exact,
+    ) -> std::collections::BTreeMap<StrategyId, engine_types::numeric::Exact> {
+        self.inventory
+            .rows()
+            .filter(|row| row.symbol == symbol)
+            .map(|row| {
+                let quantity = self
+                    .legacy_quantities
+                    .get(&(row.strategy, symbol))
+                    .and_then(|origin| origin.resolve(&row.signed_qty, step).ok())
+                    .unwrap_or_else(|| row.signed_qty.clone());
+                (row.strategy, quantity)
+            })
+            .collect()
+    }
+
     fn prepare_execution_allocation(
         &self,
         owner: Option<StrategyId>,
@@ -229,6 +253,11 @@ impl Attribution {
             },
             |allocation| allocation.legacy_quantity_step.as_ref(),
         );
+        // The holding this execution is charged against was summed from the
+        // same binary64 readings, so it lands a rounding off the grid the
+        // quantity above was just resolved onto. Both sides are compared and
+        // sliced on that grid or neither is.
+        let owned = legacy_step.map(|step| self.owned_on_grid(execution.symbol, step));
         if let Some(step) = legacy_step {
             if execution.amounts.is_some() || owner.is_some() || !forced {
                 return Err("legacy grid receipt requires a binary64 FIFO execution".into());
@@ -243,6 +272,7 @@ impl Attribution {
                 symbol: execution.symbol,
                 side: execution.side,
                 quantity: &quantity,
+                owned: owned.as_ref(),
                 fee: fee.as_ref(),
                 forced_close: forced,
             },
