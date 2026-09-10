@@ -12,6 +12,7 @@
 //! venue wall-clock milliseconds.
 
 pub mod authority;
+pub mod capability;
 pub mod cause;
 pub mod clock;
 pub mod execution_allocation;
@@ -33,6 +34,7 @@ pub mod wal;
 
 pub use async_trait::async_trait;
 pub use authority::{authority_refusal, AuthorityEpoch, CommandAuthority};
+pub use capability::Capability;
 pub use cause::{Cause, DecisionCause};
 pub use execution_history::{ExecutionHistory, ExecutionHistoryBuilder};
 pub use ids::{StrategyId, Symbol, SymbolId, SymbolTable, TimerId};
