@@ -321,3 +321,23 @@ async fn one_realm_seed_replays_byte_for_byte_under_heavy_faults() {
     assert_eq!(first.faults, second.faults);
     assert_eq!(first.venue, second.venue);
 }
+
+/// A whole trading day's worth of hourly publications, which is where the
+/// engine's first leverage administration per symbol has to survive an
+/// account refresh landing inside its round trip.
+#[tokio::test(start_paused = true)]
+async fn a_realm_day_opens_every_symbol_it_decides_on() {
+    let _alone = ONE_AT_A_TIME.lock().await;
+    let mut opts = realm_options(1, "realm-day", 12);
+    opts.pump_probability = 0.5;
+    opts.crashes = 0;
+    opts.faults = FaultRates::NONE;
+    let report = run_seed(opts).await.expect("the world runs");
+    assert!(report.passed(), "{:#?}", report.failures());
+    assert!(
+        report.fills_by_sleeve.get("long").copied().unwrap_or(0) > 0,
+        "{:?} orders, {:?} fills",
+        report.orders_by_sleeve,
+        report.fills_by_sleeve
+    );
+}
