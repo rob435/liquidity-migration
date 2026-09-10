@@ -63,9 +63,14 @@ fn the_bench_runs_the_real_loop_and_fills_the_histograms() {
         wal_path: path.path().to_path_buf(),
         fills: false,
         venue_delay: std::time::Duration::ZERO,
+        ..BenchOptions::default()
     };
     let result = run(&options);
     assert_eq!(result.events, 100);
+    assert!(
+        result.contention.is_none(),
+        "the plain workload reports no contention section"
+    );
     assert!(
         result.orders > 0 && result.orders <= 100,
         "ready embedded callback produces real measured orders: {}",
@@ -164,6 +169,7 @@ fn the_bench_can_fill_what_it_accepts_and_the_whole_cost_path_runs() {
         wal_path: path.path().to_path_buf(),
         fills: true,
         venue_delay: std::time::Duration::ZERO,
+        ..BenchOptions::default()
     };
     let result = run(&options);
     assert!(result.orders > 0, "no orders, nothing to price");
@@ -219,6 +225,161 @@ fn the_bench_can_fill_what_it_accepts_and_the_whole_cost_path_runs() {
     assert!(
         costs.markout[0].mean().is_some(),
         "the one-second bucket is empty despite {marks} mark(s)"
+    );
+}
+
+/// The `--contention` defaults, shortened: two seconds of quotes and a 20 ms
+/// venue instead of 200 ms. Four symbols, so the engine can have four
+/// placement commands outstanding and the venue task answers one at a time.
+fn contention_options(path: &std::path::Path, ttl_ms: u64) -> BenchOptions {
+    BenchOptions {
+        events: 400,
+        venue_delay: std::time::Duration::from_millis(20),
+        wal_path: path.to_path_buf(),
+        ttl_ms,
+        ..BenchOptions::contention()
+    }
+}
+
+/// How long each `cancel` in the log waited for the venue task.
+fn cancel_waits(records: &[WalRecord]) -> Vec<u64> {
+    records
+        .iter()
+        .filter_map(|record| match record {
+            WalRecord::VenueTiming {
+                operation,
+                queued_ns,
+                task_started_ns,
+                ..
+            } if operation == "cancel" => Some(task_started_ns.saturating_sub(*queued_ns)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn expired_openings(records: &[WalRecord]) -> u64 {
+    records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record,
+                WalRecord::OrderUpdate {
+                    update: engine_types::OrderUpdate::Reject { reason, .. },
+                    ..
+                } if reason.contains("authority: expired")
+            )
+        })
+        .count() as u64
+}
+
+#[test]
+fn a_cancel_behind_a_slow_opening_waits_for_the_gateway_call_in_flight() {
+    if run_parent("a_cancel_behind_a_slow_opening_waits_for_the_gateway_call_in_flight") {
+        return;
+    }
+    let path = temp_path("bench-contention");
+    let options = contention_options(path.path(), 10_000);
+    let result = run(&options);
+    let contention = result.contention.clone().expect("the contention section");
+    assert_eq!(contention.venue_delay_ms, 20);
+    assert_eq!(contention.cancel_after, 3);
+    assert_eq!(contention.symbols, 4);
+    assert!(
+        contention.openings_sent > 10 && contention.cancels_sent > 10,
+        "the workload did not cycle: {} openings, {} cancels",
+        contention.openings_sent,
+        contention.cancels_sent
+    );
+    let delay_ns = 20_000_000u64;
+    // The precondition: openings really did pile up behind each other, so the
+    // ceiling below was measured under contention and not on an idle task.
+    assert!(
+        contention.opening_queue_wait.max_ns * 2 > delay_ns * 3,
+        "no opening waited for more than one venue call ({} ns)",
+        contention.opening_queue_wait.max_ns
+    );
+    // And a cancel really did have to wait for a call in flight.
+    assert!(
+        contention.cancel_queue_wait.max_ns * 4 >= delay_ns * 3,
+        "no cancel waited for a venue call ({} ns)",
+        contention.cancel_queue_wait.max_ns
+    );
+    // The claim: risk-off waits for the one gateway call in flight and never
+    // for the openings queued behind it. The engine holds a symbol busy until
+    // its own command completes, so a cancel reaches the venue task only after
+    // its order's placement was answered -- by which time the task has already
+    // started another symbol's opening. That one call is the whole wait.
+    assert!(
+        contention.cancel_queue_wait.max_ns < delay_ns * 2,
+        "a cancel waited {} ns, past the one call it should have waited for",
+        contention.cancel_queue_wait.max_ns
+    );
+    assert!(
+        contention.opening_queue_wait.max_ns * 2 > contention.cancel_queue_wait.max_ns * 3,
+        "the worst opening wait {} ns is not half again the worst cancel wait {} ns",
+        contention.opening_queue_wait.max_ns,
+        contention.cancel_queue_wait.max_ns
+    );
+    // The pretend venue answers a pull at once; nothing else would let the
+    // wait above be read as the queue rather than the call.
+    assert!(
+        contention.cancel_venue_span.p50_ns < delay_ns,
+        "the pretend venue held a cancel for {} ns",
+        contention.cancel_venue_span.p50_ns
+    );
+    assert!(result.table().contains("cancel wait for the task"));
+    assert!(result.as_json().contains("\"never_sent_expired\":"));
+
+    let (replayed, torn) = engine_wal::replay_scan(path.path()).expect("the log reads back");
+    assert!(!torn);
+    let records: Vec<WalRecord> = replayed.into_iter().map(|(_, r)| r).collect();
+    assert_eq!(
+        contention.never_sent_expired,
+        expired_openings(&records),
+        "the reported expiry count is not the log's"
+    );
+    assert_eq!(
+        contention.never_sent_expired, 0,
+        "a 10 s dispatch TTL expired an opening in a 2 s run"
+    );
+    assert_eq!(
+        contention.cancel_queue_wait.count as usize,
+        cancel_waits(&records).len()
+    );
+}
+
+#[test]
+fn a_dispatch_ttl_under_the_queue_refuses_openings_unsent() {
+    if run_parent("a_dispatch_ttl_under_the_queue_refuses_openings_unsent") {
+        return;
+    }
+    // Three openings queue behind the one the venue is answering, so the
+    // hindmost waits two to three venue calls -- 40 to 60 ms. A 30 ms TTL is
+    // under that and over one call, so some expire and some still go.
+    let path = temp_path("bench-contention-ttl");
+    let options = contention_options(path.path(), 30);
+    let result = run(&options);
+    let contention = result.contention.expect("the contention section");
+    assert_eq!(contention.ttl_ms, 30);
+    assert!(
+        contention.never_sent_expired > 0,
+        "a 30 ms TTL expired nothing behind a 20 ms venue with three openings queued"
+    );
+    assert!(
+        contention.openings_sent > 0,
+        "a 30 ms TTL refused every opening"
+    );
+    let (replayed, _torn) = engine_wal::replay_scan(path.path()).expect("the log reads back");
+    let records: Vec<WalRecord> = replayed.into_iter().map(|(_, r)| r).collect();
+    assert_eq!(
+        contention.never_sent_expired,
+        expired_openings(&records),
+        "the reported expiry count is not the log's"
+    );
+    assert_eq!(
+        contention.openings_sent + contention.never_sent_expired,
+        contention.opening_queue_wait.count,
+        "every placement row is either answered or expired"
     );
 }
 

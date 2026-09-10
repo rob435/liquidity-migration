@@ -24,7 +24,9 @@ use crate::engine::{Engine, EngineError};
 
 use crate::ledger::{pretty, LatencyLedger, Quantiles, Segment};
 
+mod contention;
 mod wal_timing;
+pub use contention::ContentionResult;
 pub use wal_timing::BarrierTiming;
 
 #[derive(Clone, Debug)]
@@ -38,8 +40,17 @@ pub struct BenchOptions {
     pub wal_path: PathBuf,
     /// Fill accepted orders through the private feed.
     pub fills: bool,
-    /// Delay each local venue reply by this duration.
+    /// Delay each local venue reply by this duration. In contention mode only
+    /// placements are held; cancels are answered at once.
     pub venue_delay: Duration,
+    /// Rest a post-only entry per symbol and pull it, instead of crossing
+    /// with a market order, so cancels queue behind slow openings.
+    pub contention: bool,
+    /// Quotes between resting an entry and pulling it. Contention mode only.
+    pub cancel_after: u64,
+    /// `engine.opening_dispatch_ttl_ms` for the run: an opening older than
+    /// this when the venue task reaches it is refused unsent.
+    pub ttl_ms: u64,
 }
 
 impl Default for BenchOptions {
@@ -52,6 +63,34 @@ impl Default for BenchOptions {
             wal_path: PathBuf::from("engine-bench.wal"),
             fills: false,
             venue_delay: Duration::ZERO,
+            contention: false,
+            cancel_after: 3,
+            ttl_ms: 10_000,
+        }
+    }
+}
+
+impl BenchOptions {
+    /// Openings the venue is slow to answer, with a cancel behind them.
+    ///
+    /// The engine holds a symbol busy for the length of its own command, so
+    /// the queue depth a cancel waits behind is one opening per other symbol:
+    /// four symbols put three openings in the venue task's queue while it
+    /// answers the fourth. Every quote is a placement opportunity, so a symbol
+    /// whose order was just pulled re-arms within four quotes — 20 ms at
+    /// 200 Hz, against a 200 ms venue call.
+    pub fn contention() -> Self {
+        BenchOptions {
+            events: 4_000,
+            rate: 200,
+            every_nth: 1,
+            symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+            venue_delay: Duration::from_millis(200),
+            contention: true,
+            ..BenchOptions::default()
         }
     }
 }
@@ -67,6 +106,8 @@ pub struct BenchResult {
     pub completed_latency_windows: u64,
     pub barriers: Vec<BarrierTiming>,
     pub segments: Vec<(Segment, Quantiles)>,
+    /// Present only for a `--contention` run.
+    pub contention: Option<ContentionResult>,
 }
 
 fn segment_name(segment: Segment) -> &'static str {
@@ -138,6 +179,9 @@ impl BenchResult {
                 row.failures
             );
         }
+        if let Some(contention) = &self.contention {
+            out.push_str(&contention_table(contention));
+        }
         out
     }
 
@@ -157,6 +201,21 @@ impl BenchResult {
                 "failures": row.failures,
             })).collect::<Vec<_>>(),
         });
+        if let Some(contention) = &self.contention {
+            output["contention"] = serde_json::json!({
+                "venue_delay_ms": contention.venue_delay_ms,
+                "cancel_after_quotes": contention.cancel_after,
+                "opening_dispatch_ttl_ms": contention.ttl_ms,
+                "symbols": contention.symbols,
+                "openings_sent": contention.openings_sent,
+                "cancels_sent": contention.cancels_sent,
+                "never_sent_expired": contention.never_sent_expired,
+                "cancel_queue_wait": quantiles_json(contention.cancel_queue_wait),
+                "cancel_venue_span": quantiles_json(contention.cancel_venue_span),
+                "opening_queue_wait": quantiles_json(contention.opening_queue_wait),
+                "venue": "local synthetic venue; not live latency",
+            });
+        }
         let cells = self
             .segments
             .iter()
@@ -166,9 +225,57 @@ impl BenchResult {
     }
 }
 
+/// The contention section: the parameters beside the numbers, and no budget.
+fn contention_table(contention: &ContentionResult) -> String {
+    let mut out = String::from(
+        "\n  contention: a post-only entry per symbol, pulled after a few quotes. The pretend\n  \
+         venue holds placements and answers cancels at once, so a cancel queues behind openings.\n",
+    );
+    let _ = writeln!(
+        out,
+        "  parameters: venue delay {} ms on placements; pull after {} quote(s); \
+         opening dispatch TTL {} ms; {} symbol(s)",
+        contention.venue_delay_ms, contention.cancel_after, contention.ttl_ms, contention.symbols,
+    );
+    let _ = writeln!(
+        out,
+        "  openings the venue answered: {}; refused unsent on expired authority: {}; cancels: {}",
+        contention.openings_sent, contention.never_sent_expired, contention.cancels_sent,
+    );
+    out.push_str(
+        "  what waited                    count   typical(p50)  slow 1 in 100      worst\n",
+    );
+    for (what, q) in [
+        ("opening wait for the task", contention.opening_queue_wait),
+        ("cancel wait for the task", contention.cancel_queue_wait),
+        ("cancel call itself", contention.cancel_venue_span),
+    ] {
+        let _ = writeln!(
+            out,
+            "  {:<28} {:>7}  {:>12}  {:>13}  {:>9}",
+            what,
+            q.count,
+            pretty(q.p50_ns),
+            pretty(q.p99_ns),
+            pretty(q.max_ns)
+        );
+    }
+    out.push_str("  Local synthetic venue; not live latency. No budget is asserted here.\n");
+    out
+}
+
 /// Build everything, run the real loop, read the histograms.
 pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
-    let venue_addr = start_mock_venue_with(options.venue_delay)?;
+    let venue_addr = start_mock_venue_delayed(VenueDelays {
+        placement: options.venue_delay,
+        // Risk-off is what the contention run measures waiting; a delay on the
+        // answer would be added to that wait rather than measured beside it.
+        cancel: if options.contention {
+            Duration::ZERO
+        } else {
+            options.venue_delay
+        },
+    })?;
     let settings = EngineSection {
         execution_limits: None,
         wal_path: options.wal_path.clone(),
@@ -179,7 +286,7 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
         // directory fsync into one unlucky sample.
         wal_rotate_mb: 0,
         account_view_max_age_ms: 60_000,
-        opening_dispatch_ttl_ms: 10_000,
+        opening_dispatch_ttl_ms: options.ttl_ms,
         // Wide, so a long low-rate bench never has its later orders refused
         // against the stamps of its own generated quotes.
         max_quote_age_ms: 600_000,
@@ -199,13 +306,22 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
     // The real log, so the measured barrier is the shipping fsync path.
     let (wal, _replayed) = engine_wal::WalWriter::open(&options.wal_path)?;
     let (wal, measurements) = wal_timing::TimedWal::new(wal)?;
-    let strategy = BenchStrategy::new(&options.symbols, options.every_nth);
+    let strategy = if options.contention {
+        BenchStrategy::contending(&options.symbols, options.every_nth, options.cancel_after)
+    } else {
+        BenchStrategy::new(&options.symbols, options.every_nth)
+    };
     let touch = LastTouch::default();
     let (accepted, filled) = tokio::sync::mpsc::unbounded_channel();
+    let (taken, cancelled) = tokio::sync::mpsc::unbounded_channel();
     let mut venue = HttpVenue::new(venue_addr, options.symbols.clone());
     if options.fills {
         venue = venue.filling(accepted);
     }
+    if options.contention {
+        venue = venue.publishing_pulls(taken);
+    }
+    let private_stream = options.fills || options.contention;
     let mut engine = Engine::boot_as_exact(
         &settings,
         &format!("bench-{}-{}", options.events, options.every_nth),
@@ -229,11 +345,11 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
     // method, so the trait is not object-safe and there is no `dyn` to reach
     // for. Two arms is the whole cost.
     let started = std::time::Instant::now();
-    let outcome = if options.fills {
+    let outcome = if private_stream {
         engine
             .run(
                 &mut feed,
-                &mut FillingOrderFeed::new(filled, touch),
+                &mut FillingOrderFeed::new(filled, cancelled, touch),
                 std::future::pending::<()>(),
             )
             .await?
@@ -258,6 +374,22 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
     // Engine::finish writes the final window without resetting its histogram.
     result.completed_latency_windows = latency_records.saturating_sub(1);
     result.barriers = barriers;
+    if options.contention {
+        // Read back out of the log rather than out of a side channel: the
+        // stamps are already durable and this is the same pass `engine
+        // latency` makes over a production log.
+        engine.wal.flush()?;
+        let (records, _torn) = engine_wal::replay_scan(&options.wal_path)
+            .map_err(|error| EngineError::State(error.to_string()))?;
+        let records: Vec<WalRecord> = records.into_iter().map(|(_, record)| record).collect();
+        result.contention = Some(contention::read(
+            &records,
+            options.venue_delay.as_millis().min(u128::from(u64::MAX)) as u64,
+            options.cancel_after,
+            options.ttl_ms,
+            options.symbols.len(),
+        ));
+    }
     engine.wal.append(&WalRecord::Note {
         source: "bench".into(),
         text: result.as_json(),
@@ -292,6 +424,7 @@ fn summarise(ledger: &LatencyLedger, events: u64, orders: u64, every_nth: u64) -
         completed_latency_windows: 0,
         barriers: Vec::new(),
         segments,
+        contention: None,
     }
 }
 
@@ -372,32 +505,56 @@ impl MarketFeed for ScriptedFeed {
     }
 }
 
-/// The private stream the `--fills` bench gets: everything the venue accepted
-/// comes back filled at the touch it would have crossed.
+/// The private stream the `--fills` and `--contention` benches get:
+/// everything the venue accepted comes back filled at the touch it would have
+/// crossed, and everything it pulled comes back cancelled.
 ///
 /// One fill per order, at the far touch and never partial. That is not what a
 /// real venue does, and it does not need to be -- what this exists to drive is
 /// the engine's own path from a fill to a priced one, which a bench whose
-/// venue never fills leaves entirely unrun.
+/// venue never fills leaves entirely unrun. The cancellation half is not a
+/// nicety either: a pull is only terminal when the private stream says so, and
+/// a workload that keeps resting new orders needs the old ones to end.
 pub struct FillingOrderFeed {
     orders: tokio::sync::mpsc::UnboundedReceiver<OrderRequest>,
+    pulled: tokio::sync::mpsc::UnboundedReceiver<String>,
     touch: LastTouch,
 }
 
 impl FillingOrderFeed {
     pub fn new(
         orders: tokio::sync::mpsc::UnboundedReceiver<OrderRequest>,
+        pulled: tokio::sync::mpsc::UnboundedReceiver<String>,
         touch: LastTouch,
     ) -> Self {
-        FillingOrderFeed { orders, touch }
+        FillingOrderFeed {
+            orders,
+            pulled,
+            touch,
+        }
     }
 }
 
 impl OrderFeed for FillingOrderFeed {
     async fn next_update(&mut self) -> Result<OrderUpdate, FeedError> {
         // `recv` is cancel-safe, which the loop's `select!` requires: it drops
-        // the futures of every branch that did not win.
-        let Some(request) = self.orders.recv().await else {
+        // the futures of every branch that did not win, this `select!`
+        // included.
+        let taken = tokio::select! {
+            biased;
+            pulled = self.pulled.recv() => {
+                return match pulled {
+                    Some(client_order_id) => Ok(OrderUpdate::Cancelled {
+                        client_order_id,
+                        recv_ns: clock::now_ns(),
+                    }),
+                    // Both senders live in the venue for the run's whole life.
+                    None => std::future::pending().await,
+                }
+            }
+            request = self.orders.recv() => request,
+        };
+        let Some(request) = taken else {
             return std::future::pending().await;
         };
         let (bid, ask) = self.touch.get();
@@ -476,6 +633,8 @@ pub use engine_strategies::bench::BenchStrategy;
 pub struct HttpVenue {
     /// Where accepted orders go to be filled, when the bench asked for fills.
     accepted: Option<tokio::sync::mpsc::UnboundedSender<OrderRequest>>,
+    /// Where pulled orders go to be published as cancelled.
+    pulled: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     addr: SocketAddr,
     stream: Option<tokio::net::TcpStream>,
     buf: Vec<u8>,
@@ -551,6 +710,7 @@ impl HttpVenue {
     pub fn new(addr: SocketAddr, symbols: Vec<Symbol>) -> Self {
         HttpVenue {
             accepted: None,
+            pulled: None,
             addr,
             stream: None,
             buf: Vec::with_capacity(8 * 1024),
@@ -563,6 +723,13 @@ impl HttpVenue {
     /// Send every order this venue accepts to a feed that will fill it.
     pub fn filling(mut self, to: tokio::sync::mpsc::UnboundedSender<OrderRequest>) -> Self {
         self.accepted = Some(to);
+        self
+    }
+
+    /// Publish every pull this venue takes, the way a venue's private stream
+    /// does. Without it a cancelled order never reaches a terminal state.
+    pub fn publishing_pulls(mut self, to: tokio::sync::mpsc::UnboundedSender<String>) -> Self {
+        self.pulled = Some(to);
         self
     }
 
@@ -682,8 +849,13 @@ impl VenueGateway for HttpVenue {
 
     async fn cancel_order(&mut self, _symbol: SymbolId, id: &str) -> Result<(), VenueError> {
         self.call("/v5/order/cancel", &format!("{{\"orderLinkId\":\"{id}\"}}"))
-            .await
-            .map(|_| ())
+            .await?;
+        // After the answer and never before it, the same order the accepted
+        // placement observes above.
+        if let Some(pulled) = &self.pulled {
+            let _ = pulled.send(id.to_string());
+        }
+        Ok(())
     }
 
     async fn amend_order(
@@ -818,7 +990,42 @@ pub fn start_mock_venue() -> Result<SocketAddr, EngineError> {
     start_mock_venue_with(Duration::ZERO)
 }
 
+/// Every reply held for the same length of time.
 pub fn start_mock_venue_with(delay: Duration) -> Result<SocketAddr, EngineError> {
+    start_mock_venue_delayed(VenueDelays {
+        placement: delay,
+        cancel: delay,
+    })
+}
+
+/// How long the pretend venue holds each kind of reply. A venue that answers
+/// a pull as slowly as a placement cannot show what a cancel waits for.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VenueDelays {
+    /// `/v5/order/cancel`.
+    pub cancel: Duration,
+    /// Everything else, placements included.
+    pub placement: Duration,
+}
+
+impl VenueDelays {
+    /// Bybit's own path for a pull, which the bench's client writes verbatim.
+    const CANCEL_PATH: &'static [u8] = b"/v5/order/cancel";
+
+    fn of(&self, head: &[u8]) -> Duration {
+        let request_line = head.split(|byte| *byte == b'\r').next().unwrap_or_default();
+        if request_line
+            .windows(Self::CANCEL_PATH.len())
+            .any(|window| window == Self::CANCEL_PATH)
+        {
+            self.cancel
+        } else {
+            self.placement
+        }
+    }
+}
+
+pub fn start_mock_venue_delayed(delays: VenueDelays) -> Result<SocketAddr, EngineError> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
         .map_err(|e| EngineError::Boot(format!("cannot open the bench venue socket: {e}")))?;
     let addr = listener
@@ -839,7 +1046,7 @@ pub fn start_mock_venue_with(delay: Duration) -> Result<SocketAddr, EngineError>
                 loop {
                     match listener.accept().await {
                         Ok((socket, _)) => {
-                            tokio::spawn(serve(socket, delay));
+                            tokio::spawn(serve(socket, delays));
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "bench venue accept failed");
@@ -853,16 +1060,17 @@ pub fn start_mock_venue_with(delay: Duration) -> Result<SocketAddr, EngineError>
     Ok(addr)
 }
 
-async fn serve(mut socket: tokio::net::TcpStream, delay: Duration) {
+async fn serve(mut socket: tokio::net::TcpStream, delays: VenueDelays) {
     let _ = socket.set_nodelay(true);
     let mut buf = Vec::with_capacity(8 * 1024);
     let mut orders = 0u64;
     loop {
         buf.clear();
-        let request = match read_http_body(&mut socket, &mut buf).await {
-            Ok(body) => body,
+        let (head, request) = match read_http_message(&mut socket, &mut buf).await {
+            Ok(message) => message,
             Err(_) => return,
         };
+        let delay = delays.of(&head);
         orders += 1;
         let link = serde_json::from_slice::<serde_json::Value>(&request)
             .ok()
@@ -896,15 +1104,28 @@ async fn read_http_body(
     socket: &mut tokio::net::TcpStream,
     buf: &mut Vec<u8>,
 ) -> Result<Vec<u8>, VenueError> {
+    read_http_message(socket, buf)
+        .await
+        .map(|(_head, body)| body)
+}
+
+/// One HTTP message split into its head and its body. The pretend venue reads
+/// the head because the request line names the path, and the path is what
+/// decides how long it holds the reply.
+async fn read_http_message(
+    socket: &mut tokio::net::TcpStream,
+    buf: &mut Vec<u8>,
+) -> Result<(Vec<u8>, Vec<u8>), VenueError> {
     let mut chunk = [0u8; 4096];
     loop {
         if let Some(head_end) = find_head_end(buf) {
             let length = content_length(&buf[..head_end]);
             let total = head_end + length;
             if buf.len() >= total {
+                let head = buf[..head_end].to_vec();
                 let body = buf[head_end..total].to_vec();
                 buf.drain(..total);
-                return Ok(body);
+                return Ok((head, body));
             }
         }
         let read = socket
@@ -1024,6 +1245,36 @@ mod tests {
         assert_eq!(find_head_end(head), Some(head.len()));
         assert_eq!(content_length(head), 17);
     }
+
+    #[test]
+    fn only_the_cancel_path_gets_the_cancel_delay() {
+        let delays = VenueDelays {
+            cancel: Duration::from_millis(1),
+            placement: Duration::from_millis(200),
+        };
+        let head = |path: &str| format!("POST {path} HTTP/1.1\r\nHost: bench\r\n\r\n");
+        assert_eq!(
+            delays.of(head("/v5/order/cancel").as_bytes()),
+            delays.cancel
+        );
+        for path in [
+            "/v5/order/create",
+            "/v5/order/amend",
+            "/v5/position/trading-stop",
+            "/v5/account/wallet-balance",
+            "/v5/market/instruments-info",
+        ] {
+            assert_eq!(
+                delays.of(head(path).as_bytes()),
+                delays.placement,
+                "{path} was answered on the cancel clock"
+            );
+        }
+        // The body is not the request line: a cancel's own id in a later
+        // header or in the body must not decide the wait.
+        let disguised = "POST /v5/order/create HTTP/1.1\r\nX-Note: /v5/order/cancel\r\n\r\n";
+        assert_eq!(delays.of(disguised.as_bytes()), delays.placement);
+    }
 }
 
 #[cfg(test)]
@@ -1043,7 +1294,7 @@ mod recovery_client_tests {
             loop {
                 let (socket, _) = listener.accept().await.unwrap();
                 seen.fetch_add(1, Ordering::SeqCst);
-                tokio::spawn(serve(socket, Duration::ZERO));
+                tokio::spawn(serve(socket, VenueDelays::default()));
             }
         });
         let mut venue = HttpVenue::new(address, vec!["BTCUSDT".into()]);

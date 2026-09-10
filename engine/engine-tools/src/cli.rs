@@ -530,7 +530,20 @@ pub(super) fn parse_sim_options(
 }
 
 pub(super) fn parse_bench_options(args: &[String]) -> Result<BenchOptions, Box<dyn Error>> {
-    let mut options = BenchOptions::default();
+    // The contention workload's rate, symbols and venue delay are chosen
+    // together to keep openings queued, so it starts from its own defaults and
+    // the flags below narrow them.
+    let mut options = if args.iter().any(|a| a == "--contention") {
+        BenchOptions::contention()
+    } else {
+        BenchOptions::default()
+    };
+    if let Some(v) = value(args, "--cancel-after") {
+        options.cancel_after = v.parse()?;
+    }
+    if let Some(v) = value(args, "--ttl-ms") {
+        options.ttl_ms = v.parse()?;
+    }
     if let Some(v) = value(args, "--events") {
         options.events = v.parse()?;
     }
@@ -681,5 +694,40 @@ mod tests {
         assert_eq!(options.wal_path, PathBuf::from("sample.wal"));
         assert!(options.fills);
         assert_eq!(options.venue_delay, std::time::Duration::from_millis(7));
+        assert!(!options.contention, "off unless asked");
+        assert_eq!(options.ttl_ms, 10_000, "the engine's own default");
+    }
+
+    #[test]
+    fn the_contention_flag_brings_its_own_defaults_and_the_flags_narrow_them() {
+        let options = parse_bench_options(&args(&["bench", "--contention"])).unwrap();
+        assert!(options.contention);
+        assert_eq!(options.rate, 200);
+        assert_eq!(options.every_nth, 1);
+        assert_eq!(options.cancel_after, 3);
+        assert_eq!(options.venue_delay, std::time::Duration::from_millis(200));
+        assert_eq!(
+            options.symbols.len(),
+            4,
+            "three openings queue behind the one being answered"
+        );
+        let narrowed = parse_bench_options(&args(&[
+            "bench",
+            "--contention",
+            "--cancel-after",
+            "5",
+            "--ttl-ms",
+            "250",
+            "--events",
+            "800",
+            "--venue-delay-ms",
+            "20",
+        ]))
+        .unwrap();
+        assert_eq!(narrowed.cancel_after, 5);
+        assert_eq!(narrowed.ttl_ms, 250);
+        assert_eq!(narrowed.events, 800);
+        assert_eq!(narrowed.venue_delay, std::time::Duration::from_millis(20));
+        assert_eq!(narrowed.rate, 200, "the contention default survives");
     }
 }
