@@ -51,6 +51,10 @@ pub struct BenchOptions {
     /// `engine.opening_dispatch_ttl_ms` for the run: an opening older than
     /// this when the venue task reaches it is refused unsent.
     pub ttl_ms: u64,
+    /// Contention mode only: the quote feed closes once this many pulls have
+    /// come back answered, `events` staying the ceiling. `None` runs every
+    /// quote.
+    pub pulls: Option<u64>,
 }
 
 impl Default for BenchOptions {
@@ -66,6 +70,7 @@ impl Default for BenchOptions {
             contention: false,
             cancel_after: 3,
             ttl_ms: 10_000,
+            pulls: None,
         }
     }
 }
@@ -339,7 +344,11 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
         .iter()
         .filter_map(|name| engine.market().table.get(name))
         .collect();
+    let pulls = PullsAnswered::default();
     let mut feed = ScriptedFeed::sharing(symbols, options.events, options.rate, touch.clone());
+    if let Some(target) = options.pulls.filter(|_| options.contention) {
+        feed = feed.closing_after_pulls(pulls.clone(), target);
+    }
 
     // Branched rather than boxed: `OrderFeed::next_update` is an async trait
     // method, so the trait is not object-safe and there is no `dyn` to reach
@@ -349,7 +358,7 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
         engine
             .run(
                 &mut feed,
-                &mut FillingOrderFeed::new(filled, cancelled, touch),
+                &mut FillingOrderFeed::new(filled, cancelled, touch).counting_pulls(pulls),
                 std::future::pending::<()>(),
             )
             .await?
@@ -435,6 +444,8 @@ fn summarise(ledger: &LatencyLedger, events: u64, orders: u64, every_nth: u64) -
 /// land at a price that means something. Both feeds live on the engine's own
 /// thread, which is what makes a plain `Rc<Cell<_>>` the right sharing here.
 pub type LastTouch = Rc<Cell<(f64, f64)>>;
+/// Pulls the private stream has reported cancelled, shared the same way.
+pub type PullsAnswered = Rc<Cell<u64>>;
 
 pub struct ScriptedFeed {
     touch: LastTouch,
@@ -444,6 +455,7 @@ pub struct ScriptedFeed {
     gap: Option<Duration>,
     start: Option<tokio::time::Instant>,
     px: f64,
+    close_after_pulls: Option<(PullsAnswered, u64)>,
 }
 
 impl ScriptedFeed {
@@ -464,13 +476,24 @@ impl ScriptedFeed {
             },
             start: None,
             px: 30_000.0,
+            close_after_pulls: None,
         }
+    }
+
+    /// Close once `target` pulls have come back, `events` staying the ceiling.
+    pub fn closing_after_pulls(mut self, answered: PullsAnswered, target: u64) -> Self {
+        self.close_after_pulls = Some((answered, target));
+        self
     }
 }
 
 impl MarketFeed for ScriptedFeed {
     async fn next_event(&mut self) -> Result<MarketEvent, FeedError> {
-        if self.remaining == 0 || self.symbols.is_empty() {
+        let pulled_enough = self
+            .close_after_pulls
+            .as_ref()
+            .is_some_and(|(answered, target)| answered.get() >= *target);
+        if self.remaining == 0 || self.symbols.is_empty() || pulled_enough {
             return Err(FeedError::Closed);
         }
         if let Some(gap) = self.gap {
@@ -519,6 +542,7 @@ pub struct FillingOrderFeed {
     orders: tokio::sync::mpsc::UnboundedReceiver<OrderRequest>,
     pulled: tokio::sync::mpsc::UnboundedReceiver<String>,
     touch: LastTouch,
+    answered_pulls: Option<PullsAnswered>,
 }
 
 impl FillingOrderFeed {
@@ -531,7 +555,13 @@ impl FillingOrderFeed {
             orders,
             pulled,
             touch,
+            answered_pulls: None,
         }
+    }
+
+    pub fn counting_pulls(mut self, into: PullsAnswered) -> Self {
+        self.answered_pulls = Some(into);
+        self
     }
 }
 
@@ -544,10 +574,15 @@ impl OrderFeed for FillingOrderFeed {
             biased;
             pulled = self.pulled.recv() => {
                 return match pulled {
-                    Some(client_order_id) => Ok(OrderUpdate::Cancelled {
-                        client_order_id,
-                        recv_ns: clock::now_ns(),
-                    }),
+                    Some(client_order_id) => {
+                        if let Some(answered) = &self.answered_pulls {
+                            answered.set(answered.get() + 1);
+                        }
+                        Ok(OrderUpdate::Cancelled {
+                            client_order_id,
+                            recv_ns: clock::now_ns(),
+                        })
+                    }
                     // Both senders live in the venue for the run's whole life.
                     None => std::future::pending().await,
                 }

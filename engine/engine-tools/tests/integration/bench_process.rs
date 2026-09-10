@@ -228,15 +228,20 @@ fn the_bench_can_fill_what_it_accepts_and_the_whole_cost_path_runs() {
     );
 }
 
-/// The `--contention` defaults, shortened: two seconds of quotes and a 20 ms
-/// venue instead of 200 ms. Four symbols, so the engine can have four
-/// placement commands outstanding and the venue task answers one at a time.
+/// Answered pulls that end a contention run. The run is measured in cycles,
+/// not seconds: a box that answers slowly takes longer and still gets here.
+const PULLS: u64 = 12;
+
+/// The `--contention` defaults, the 200 ms venue included, ended after
+/// `PULLS` answered pulls; `events` is the ceiling a run that never cycles
+/// hits. Four symbols, so the engine can have four placement commands
+/// outstanding and the venue task answers one at a time.
 fn contention_options(path: &std::path::Path, ttl_ms: u64) -> BenchOptions {
     BenchOptions {
-        events: 400,
-        venue_delay: std::time::Duration::from_millis(20),
+        events: 20_000,
         wal_path: path.to_path_buf(),
         ttl_ms,
+        pulls: Some(PULLS),
         ..BenchOptions::contention()
     }
 }
@@ -281,16 +286,19 @@ fn a_cancel_behind_a_slow_opening_waits_for_the_gateway_call_in_flight() {
     let options = contention_options(path.path(), 10_000);
     let result = run(&options);
     let contention = result.contention.clone().expect("the contention section");
-    assert_eq!(contention.venue_delay_ms, 20);
+    assert_eq!(contention.venue_delay_ms, 200);
     assert_eq!(contention.cancel_after, 3);
     assert_eq!(contention.symbols, 4);
+    // The run ends on the last answered pull, whose own timing row can still
+    // be on its way to the log; every pull follows an answered opening.
     assert!(
-        contention.openings_sent > 10 && contention.cancels_sent > 10,
+        contention.cancels_sent + 1 >= PULLS
+            && contention.openings_sent >= contention.cancels_sent,
         "the workload did not cycle: {} openings, {} cancels",
         contention.openings_sent,
         contention.cancels_sent
     );
-    let delay_ns = 20_000_000u64;
+    let delay_ns = 200_000_000u64;
     // The precondition: openings really did pile up behind each other, so the
     // ceiling below was measured under contention and not on an idle task.
     assert!(
@@ -340,7 +348,7 @@ fn a_cancel_behind_a_slow_opening_waits_for_the_gateway_call_in_flight() {
     );
     assert_eq!(
         contention.never_sent_expired, 0,
-        "a 10 s dispatch TTL expired an opening in a 2 s run"
+        "a 10 s dispatch TTL expired an opening behind three 200 ms calls"
     );
     assert_eq!(
         contention.cancel_queue_wait.count as usize,
@@ -354,20 +362,20 @@ fn a_dispatch_ttl_under_the_queue_refuses_openings_unsent() {
         return;
     }
     // Three openings queue behind the one the venue is answering, so the
-    // hindmost waits two to three venue calls -- 40 to 60 ms. A 30 ms TTL is
-    // under that and over one call, so some expire and some still go.
+    // hindmost waits two to three venue calls -- 400 to 600 ms. A 300 ms TTL
+    // is under that and over one call, so some expire and some still go.
     let path = temp_path("bench-contention-ttl");
-    let options = contention_options(path.path(), 30);
+    let options = contention_options(path.path(), 300);
     let result = run(&options);
     let contention = result.contention.expect("the contention section");
-    assert_eq!(contention.ttl_ms, 30);
+    assert_eq!(contention.ttl_ms, 300);
     assert!(
         contention.never_sent_expired > 0,
-        "a 30 ms TTL expired nothing behind a 20 ms venue with three openings queued"
+        "a 300 ms TTL expired nothing behind a 200 ms venue with three openings queued"
     );
     assert!(
         contention.openings_sent > 0,
-        "a 30 ms TTL refused every opening"
+        "a 300 ms TTL refused every opening"
     );
     let (replayed, _torn) = engine_wal::replay_scan(path.path()).expect("the log reads back");
     let records: Vec<WalRecord> = replayed.into_iter().map(|(_, r)| r).collect();
