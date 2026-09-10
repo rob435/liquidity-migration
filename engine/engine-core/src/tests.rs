@@ -88,6 +88,7 @@ fn kind_of(record: &WalRecord) -> String {
         WalRecord::SignalProducerLifecycle { .. } => "signal_producer_lifecycle",
         WalRecord::Boot { .. } => "boot",
         WalRecord::Intent { .. } => "intent",
+        WalRecord::IntentRefused { .. } => "intent_refused",
         WalRecord::Verdict { .. } => "verdict",
         WalRecord::OrderSent { .. } => "order_sent",
         WalRecord::OrderUpdate { .. } => "order_update",
@@ -210,6 +211,25 @@ fn note_saying(records: &Rc<RefCell<Vec<WalRecord>>>, needle: &str) -> String {
             _ => None,
         })
         .unwrap_or_else(|| panic!("no note containing {needle:?}"))
+}
+
+/// Every typed refusal in the log: code, detail, and the order id when the
+/// refusal came after an allow verdict.
+fn refusals_of(records: &Rc<RefCell<Vec<WalRecord>>>) -> Vec<(String, String, Option<String>)> {
+    records
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|record| match record {
+            WalRecord::IntentRefused {
+                code,
+                detail,
+                client_order_id,
+                ..
+            } => Some((code.clone(), detail.clone(), client_order_id.clone())),
+            _ => None,
+        })
+        .collect()
 }
 
 fn appends(tape: &Tape) -> Vec<String> {

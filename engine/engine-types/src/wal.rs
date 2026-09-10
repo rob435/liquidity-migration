@@ -95,6 +95,34 @@ pub enum WalRecord {
     },
     Intent {
         intent: Intent,
+        /// The callback this decision came out of. Absent on engine-originated
+        /// intents and on logs written before the field existed, which read
+        /// back as a decision with no recorded cause rather than a wrong one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<Box<crate::cause::DecisionCause>>,
+    },
+    /// One intent the engine refused before it became an order, typed. The
+    /// free-text `Note` beside it is suppressed for 60 s per (strategy,
+    /// symbol, tag); this record is written every time, so a refusal storm is
+    /// countable.
+    ///
+    /// `code` is a `String` and not an enum on purpose: a variant added later
+    /// would stop the incumbent binary's reader dead at boot.
+    IntentRefused {
+        wall_ts_ms: i64,
+        strategy: StrategyId,
+        symbol: SymbolId,
+        tag: String,
+        /// `Some` means refused after an Allow verdict, before the wire.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_order_id: Option<String>,
+        /// Stable snake_case, bounded: what a report groups refusals by. Never
+        /// carries a number.
+        code: String,
+        /// The sentence behind the code, with the one order's numbers in it.
+        /// Empty when the code says everything.
+        #[serde(default)]
+        detail: String,
     },
     Verdict {
         client_order_id: Option<String>,
@@ -1050,6 +1078,125 @@ pub trait Wal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact bytes a live log holds for an intent decided before the
+    /// cause field existed.
+    const INTENT_WITHOUT_A_CAUSE: &str = r#"{"kind":"intent","intent":{"strategy":1,"symbol":0,"side":"Buy","qty":1.0,"kind":"Market","stop":null,"reduce_only":false,"tag":"long_native_entry","decided_ns":7,"work":null,"leverage":null}}"#;
+
+    #[test]
+    fn an_intent_written_before_the_cause_field_reads_back_with_no_cause() {
+        let record: WalRecord = serde_json::from_str(INTENT_WITHOUT_A_CAUSE).unwrap();
+        let WalRecord::Intent { intent, cause } = &record else {
+            panic!("intent record");
+        };
+        assert_eq!(
+            cause, &None,
+            "an old frame states no cause, and none is invented"
+        );
+        assert_eq!(intent.decided_ns, 7);
+        assert_eq!(
+            serde_json::to_string(&record).unwrap(),
+            INTENT_WITHOUT_A_CAUSE,
+            "a cause-less intent must serialize back to the bytes it came from"
+        );
+    }
+
+    #[test]
+    fn an_intent_with_a_cause_round_trips() {
+        let record: WalRecord = serde_json::from_str(INTENT_WITHOUT_A_CAUSE).unwrap();
+        let WalRecord::Intent { intent, .. } = record else {
+            panic!("intent record");
+        };
+        let with_cause = WalRecord::Intent {
+            intent,
+            cause: Some(Box::new(crate::cause::DecisionCause {
+                callback_wall_ms: 1_700_000_000_001,
+                callback_id: Some(11),
+                causes: vec![crate::cause::Cause::Signal {
+                    source: "worker.long".into(),
+                    sequence: 4,
+                    observation_id: "obs-4".into(),
+                }],
+            })),
+        };
+        let text = serde_json::to_string(&with_cause).unwrap();
+        assert!(
+            text.contains(r#""cause":{"callback_wall_ms":1700000000001"#),
+            "{text}"
+        );
+        assert_eq!(
+            serde_json::from_str::<WalRecord>(&text).unwrap(),
+            with_cause
+        );
+    }
+
+    /// The reader boundary. A binary older than the writer meets `cause` as a
+    /// field it has never heard of; no variant here sets
+    /// `deny_unknown_fields`, so it skips the field and replays the intent.
+    /// The new `intent_refused` KIND is the half that does not survive: an
+    /// unknown `kind` fails deserialization.
+    #[test]
+    fn an_unknown_field_on_an_intent_frame_is_skipped_and_an_unknown_kind_is_not() {
+        let mut newer: serde_json::Value = serde_json::from_str(INTENT_WITHOUT_A_CAUSE).unwrap();
+        newer["a_field_from_a_later_writer"] = serde_json::json!({"anything": 1});
+        let record: WalRecord = serde_json::from_value(newer).unwrap();
+        assert_eq!(
+            serde_json::to_string(&record).unwrap(),
+            INTENT_WITHOUT_A_CAUSE
+        );
+
+        let unknown = serde_json::json!({"kind": "a_record_from_a_later_writer"});
+        assert!(
+            serde_json::from_value::<WalRecord>(unknown).is_err(),
+            "an unknown record kind must refuse rather than replay as something else"
+        );
+    }
+
+    #[test]
+    fn a_typed_refusal_frame_reads_back_and_round_trips() {
+        let frame = r#"{"kind":"intent_refused","wall_ts_ms":1700000000002,"strategy":1,"symbol":0,"tag":"long_native_entry","client_order_id":"eng-9","code":"below_min_notional","detail":"3.0000 is under the venue's smallest order value (5)"}"#;
+        let record: WalRecord = serde_json::from_str(frame).unwrap();
+        let WalRecord::IntentRefused {
+            wall_ts_ms,
+            strategy,
+            symbol,
+            tag,
+            client_order_id,
+            code,
+            detail,
+        } = &record
+        else {
+            panic!("intent_refused record");
+        };
+        assert_eq!(*wall_ts_ms, 1_700_000_000_002);
+        assert_eq!(*strategy, StrategyId(1));
+        assert_eq!(*symbol, SymbolId(0));
+        assert_eq!(tag, "long_native_entry");
+        assert_eq!(client_order_id.as_deref(), Some("eng-9"));
+        assert_eq!(code, "below_min_notional");
+        assert!(detail.contains("smallest order value"));
+        assert_eq!(serde_json::to_string(&record).unwrap(), frame);
+    }
+
+    #[test]
+    fn a_typed_refusal_before_the_wire_omits_the_order_id_and_defaults_its_detail() {
+        let frame = r#"{"kind":"intent_refused","wall_ts_ms":5,"strategy":1,"symbol":0,"tag":"t","code":"unreal_number"}"#;
+        let record: WalRecord = serde_json::from_str(frame).unwrap();
+        let WalRecord::IntentRefused {
+            client_order_id,
+            detail,
+            ..
+        } = &record
+        else {
+            panic!("intent_refused record");
+        };
+        assert_eq!(client_order_id, &None);
+        assert_eq!(detail, "", "an absent detail is empty, never invented");
+        assert_eq!(
+            serde_json::to_string(&record).unwrap(),
+            r#"{"kind":"intent_refused","wall_ts_ms":5,"strategy":1,"symbol":0,"tag":"t","code":"unreal_number","detail":""}"#
+        );
+    }
 
     #[test]
     fn legacy_latency_rows_keep_p999_unmeasured_and_preserve_known_zero() {

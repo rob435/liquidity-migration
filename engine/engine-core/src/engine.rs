@@ -672,6 +672,8 @@ mod physical_exposure_tests;
 mod portfolio_routes;
 #[cfg(test)]
 mod portfolio_routes_tests;
+#[cfg(test)]
+mod refusal_code_tests;
 mod scheduling;
 mod signal_intake;
 mod signal_routes;

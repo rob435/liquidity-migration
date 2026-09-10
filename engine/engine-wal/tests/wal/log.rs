@@ -43,6 +43,24 @@ fn every_variant() -> Vec<WalRecord> {
                 work: Some(engine_types::WorkPolicy::default()),
                 leverage: None,
             },
+            cause: Some(Box::new(engine_types::DecisionCause {
+                callback_wall_ms: 1_770_000_000_001,
+                callback_id: Some(3),
+                causes: vec![engine_types::Cause::Signal {
+                    source: "worker.long".to_string(),
+                    sequence: 12,
+                    observation_id: "obs-12".to_string(),
+                }],
+            })),
+        },
+        WalRecord::IntentRefused {
+            wall_ts_ms: 1_770_000_000_002,
+            strategy: StrategyId(2),
+            symbol: SymbolId(11),
+            tag: "entry".to_string(),
+            client_order_id: Some("eng-0001".to_string()),
+            code: "stop_would_loosen_position".to_string(),
+            detail: "stop 3200 would loosen the whole Sell position from 3210".to_string(),
         },
         WalRecord::Verdict {
             client_order_id: Some("eng-0001".to_string()),
@@ -317,7 +335,11 @@ fn current_tags_encode_checkpoints_and_unknown_fees_without_rewrites() {
 
 #[test]
 fn an_old_order_record_defaults_to_an_ordinary_order() {
-    let mut old = serde_json::to_value(&every_variant()[4]).unwrap();
+    let sent = every_variant()
+        .into_iter()
+        .find(|record| matches!(record, WalRecord::OrderSent { .. }))
+        .expect("the fixture holds an order record");
+    let mut old = serde_json::to_value(&sent).unwrap();
     old["request"]
         .as_object_mut()
         .unwrap()

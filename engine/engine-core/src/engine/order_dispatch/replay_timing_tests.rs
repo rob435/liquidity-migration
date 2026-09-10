@@ -66,7 +66,7 @@ async fn replayed_effect_does_not_sample_a_previous_process_decision() {
         "replay invented a source duration"
     );
     assert!(records.lock().unwrap().iter().any(|row| matches!(row,
-        WalRecord::Intent { intent } if intent.tag == "replayed-clock-exit" && intent.decided_ns == old_decided
+        WalRecord::Intent { intent, .. } if intent.tag == "replayed-clock-exit" && intent.decided_ns == old_decided
     )), "the historical intent must remain intact");
     assert_eq!(engine.ledger.quantiles(Segment::VenueTask).count, 1);
 }

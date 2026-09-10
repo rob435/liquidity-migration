@@ -449,3 +449,46 @@ fn a_late_cancel_confirmation_does_not_revive_an_expired_cross() {
     assert!(one_pass(&mut working, &ledger, &market(100.0, 102.0), late).is_empty());
     assert!(working.is_empty());
 }
+
+/// `Cause::Working` on the log has to name the resting order the supervisor's
+/// own action continues. An amend and a cancel carry the id; a crossed
+/// remainder is a fresh order and carries its predecessor in its tag.
+#[test]
+fn every_action_this_supervisor_emits_names_the_order_it_continues() {
+    let amend = Action::Amend {
+        symbol: SYMBOL,
+        client_order_id: "a".into(),
+        spec: engine_types::AmendSpec {
+            exact_terms: None,
+            px: Some(100.0),
+            qty: None,
+        },
+    };
+    assert_eq!(worked_order_of(&amend), "a");
+    assert_eq!(
+        worked_order_of(&Action::Cancel {
+            symbol: SYMBOL,
+            client_order_id: "a".into(),
+        }),
+        "a"
+    );
+
+    let (_, ledger) = working_one();
+    let remainder = cross_remainder(
+        ledger.orders.get("a").expect("the worked order"),
+        &market(100.0, 102.0),
+        SECOND,
+    )
+    .expect("a readable book leaves a crossable remainder");
+    assert_eq!(remainder.tag, cross_tag("a"));
+    assert_eq!(worked_order_of(&Action::Place(remainder)), "a");
+
+    // A strategy's own placement is not this supervisor's work.
+    assert_eq!(
+        worked_order_of(&Action::SetStop {
+            symbol: SYMBOL,
+            trigger_px: 1.0
+        }),
+        ""
+    );
+}

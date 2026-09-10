@@ -8,11 +8,13 @@
 //! it fires replaces the old one.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::Arc;
 
 use engine_types::{
-    AccountView, Action, EngineEvent, InstrumentRule, MarketState, PositionView, Quote,
-    RestingOrder, Strategy, StrategyAccountSummary, StrategyCheckpoint, StrategyCtx, StrategyEvent,
-    StrategyGlobalCheckpointState, StrategyId, StrategyPositionFacts, SymbolId, Ticker, TimerId,
+    AccountView, Action, Cause, DecisionCause, EngineEvent, InstrumentRule, MarketState,
+    PositionView, Quote, RestingOrder, Strategy, StrategyAccountSummary, StrategyCheckpoint,
+    StrategyCtx, StrategyEvent, StrategyGlobalCheckpointState, StrategyId, StrategyPositionFacts,
+    SymbolId, Ticker, TimerId,
 };
 
 use crate::attribution::Attribution;
@@ -184,6 +186,9 @@ pub struct PendingAction {
     pub(crate) effect: Option<crate::effects::EffectKey>,
     pub(crate) callback_id: Option<u64>,
     pub(crate) timing: Option<CallbackTiming>,
+    /// What woke the reducer that emitted this action, shared by every action
+    /// of one callback. `None` for an action the engine itself originated.
+    pub(crate) cause: Option<Arc<DecisionCause>>,
 }
 
 impl From<Action> for PendingAction {
@@ -194,6 +199,7 @@ impl From<Action> for PendingAction {
             effect: None,
             callback_id: None,
             timing: None,
+            cause: None,
         }
     }
 }
@@ -274,7 +280,8 @@ impl StrategyHost {
             self.fault(books, sid, error);
             return false;
         }
-        let accepted = self.capture_actions(sid, &mut actions, now_ns);
+        let cause = Cause::from(event);
+        let accepted = self.capture_actions(sid, &mut actions, now_ns, cause);
         self.callback_actions = actions;
         accepted
     }
@@ -305,6 +312,7 @@ impl StrategyHost {
                     effect: None,
                     callback_id: None,
                     timing: None,
+                    cause: None,
                 }),
         );
     }
@@ -314,6 +322,7 @@ impl StrategyHost {
         sid: StrategyId,
         actions: &mut VecDeque<Action>,
         now_ns: u64,
+        cause: Cause,
     ) -> bool {
         if actions.is_empty() {
             return true;
@@ -439,6 +448,11 @@ impl StrategyHost {
             self.effects.next_id = callback_id
                 .checked_add(1)
                 .expect("strategy callback id exhausted");
+            let cause = Some(Arc::new(DecisionCause {
+                callback_wall_ms: crate::clock::wall_ms(),
+                callback_id: Some(callback_id),
+                causes: vec![cause],
+            }));
             self.pending
                 .extend(actions.drain(..).map(|action| PendingAction {
                     caller: Some(sid),
@@ -446,10 +460,16 @@ impl StrategyHost {
                     effect: None,
                     callback_id: Some(callback_id),
                     timing,
+                    cause: cause.clone(),
                 }));
             return true;
         }
         let transition_id = self.effects.capture(sid, actions.iter().cloned().collect());
+        let cause = Some(Arc::new(DecisionCause {
+            callback_wall_ms: crate::clock::wall_ms(),
+            callback_id: Some(transition_id),
+            causes: vec![cause],
+        }));
         self.pending.extend(
             actions
                 .drain(..)
@@ -463,6 +483,7 @@ impl StrategyHost {
                     }),
                     callback_id: Some(transition_id),
                     timing,
+                    cause: cause.clone(),
                 }),
         );
         true

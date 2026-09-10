@@ -5,6 +5,7 @@ type PlacementEffect = (
     Intent,
     Option<EffectKey>,
     Option<crate::ctx::CallbackTiming>,
+    Option<std::sync::Arc<engine_types::DecisionCause>>,
 );
 type CancellationEffect = (SymbolId, String, Option<EffectKey>);
 
@@ -140,7 +141,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         let mut intents = Vec::with_capacity(pending.len());
         let mut completed = Vec::with_capacity(pending.len());
-        for (intent, effect, timing) in pending {
+        for (intent, effect, timing, cause) in pending {
             let order_id = effect.and_then(|key| {
                 self.host
                     .effects
@@ -156,7 +157,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 self.complete_effect(effect)?;
                 continue;
             }
-            intents.push((intent, order_id, timing));
+            intents.push((intent, order_id, timing, cause));
             completed.push(effect);
         }
         let sent = self.process_intents(intents, origin_ns).await?;
@@ -200,6 +201,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         }),
                         callback_id: Some(transition.id),
                         timing: None,
+                        cause: Some(std::sync::Arc::new(engine_types::DecisionCause {
+                            callback_wall_ms: clock::wall_ms(),
+                            callback_id: Some(transition.id),
+                            causes: vec![engine_types::Cause::Restored],
+                        })),
                     });
                 }
             }

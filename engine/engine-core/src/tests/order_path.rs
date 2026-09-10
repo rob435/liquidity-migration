@@ -332,6 +332,46 @@ async fn the_verdict_record_names_the_order_it_approved() {
     );
 }
 
+/// The join a report needs: which callback decided this order. Without it a
+/// source row can only be charged to whichever order happens to follow it.
+#[tokio::test(start_paused = true)]
+async fn an_intent_record_names_the_callback_it_was_decided_in() {
+    let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
+    let (mut engine, h) = build(allow_all(), vec![Box::new(buyer)], &["BTCUSDT"], &[]).await;
+    let symbol = engine.market().table.get("BTCUSDT").unwrap();
+    engine
+        .run(
+            &mut ScriptFeed::quotes(symbol, 1, true),
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+
+    let records = h.records.lock().unwrap();
+    let cause = records
+        .iter()
+        .find_map(|record| match record {
+            WalRecord::Intent { cause, .. } => Some(cause.clone()),
+            _ => None,
+        })
+        .expect("an intent record")
+        .expect("the decision came out of a strategy callback");
+    assert_eq!(
+        cause.immediate(),
+        Some(&engine_types::Cause::Market { symbol }),
+        "this buyer decides on a quote"
+    );
+    assert!(
+        cause.callback_id.is_some(),
+        "the callback that decided it is identified"
+    );
+    assert!(
+        cause.callback_wall_ms > 0,
+        "engine realtime ms at delivery, beside the intent's monotonic decided_ns"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_refusal_stops_before_the_order_is_written() {
     let (buyer, _heard) = Buyer::new("BTCUSDT", 1, 0.01);
@@ -393,12 +433,23 @@ async fn a_size_below_the_venue_minimum_is_refused_with_a_note() {
             "intent",
             "verdict",
             "note",
+            "intent_refused",
             "latency_ledger"
         ]
     );
     assert!(h.sends.lock().unwrap().is_empty());
     let note = note_saying(&h.records, "not sent");
     assert!(note.contains("smallest tradable size"), "{note}");
+    let refusals = refusals_of(&h.records);
+    let [(code, detail, order_id)] = &refusals[..] else {
+        panic!("one typed refusal: {refusals:?}");
+    };
+    assert_eq!(code, "below_minimum_size");
+    assert!(detail.contains("smallest tradable size"), "{detail}");
+    assert!(
+        order_id.is_some(),
+        "a refusal after the allow verdict names the order it would have been"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -426,6 +477,21 @@ async fn a_doomed_order_re_proposed_on_every_quote_is_recorded_once() {
         kinds.iter().filter(|k| *k == "note").count(),
         2,
         "twelve identical refusals must not write twelve notes: {kinds:?}"
+    );
+    // The note is suppressed; the typed record is not, so the population is
+    // countable however long the condition lasts.
+    assert_eq!(
+        kinds.iter().filter(|k| *k == "intent_refused").count(),
+        12,
+        "every refusal must leave a typed record: {kinds:?}"
+    );
+    let refusals = refusals_of(&h.records);
+    assert_eq!(refusals.len(), 12);
+    assert!(
+        refusals
+            .iter()
+            .all(|(code, _, _)| code == "below_minimum_size"),
+        "{refusals:?}"
     );
 }
 
@@ -2078,7 +2144,7 @@ async fn a_refused_retired_maker_exit_retries_on_a_later_wake_without_hitting_th
                     .filter(|record| {
                         matches!(
                             record,
-                            WalRecord::Intent { intent } if intent.tag == "quote-drain"
+                            WalRecord::Intent { intent, .. } if intent.tag == "quote-drain"
                         )
                     })
                     .count();
@@ -2108,7 +2174,7 @@ async fn a_refused_retired_maker_exit_retries_on_a_later_wake_without_hitting_th
             .unwrap()
             .iter()
             .filter_map(|record| match record {
-                WalRecord::Intent { intent } if intent.tag == "quote-drain" => {
+                WalRecord::Intent { intent, .. } if intent.tag == "quote-drain" => {
                     Some(intent.decided_ns)
                 }
                 _ => None,
@@ -2336,7 +2402,7 @@ async fn a_venue_rejected_native_long_exit_retries_only_after_its_timer() {
             .unwrap()
             .iter()
             .filter_map(|record| match record {
-                WalRecord::Intent { intent }
+                WalRecord::Intent { intent, .. }
                     if intent.tag == "long-native" && intent.reduce_only =>
                 {
                     Some(intent.decided_ns)
