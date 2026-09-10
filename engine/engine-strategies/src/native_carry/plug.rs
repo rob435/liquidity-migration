@@ -948,6 +948,10 @@ impl Strategy for NativeCarry {
         self.core.config.entries_enabled
     }
 
+    fn execution_requirements(&self) -> Vec<engine_types::Capability> {
+        self.core.execution_requirements()
+    }
+
     fn on_boot(&mut self, ctx: &mut dyn StrategyCtx) {
         self.replan_with_mode(ReplanMode::BootRecovery, ctx);
     }
@@ -1676,5 +1680,30 @@ pub(crate) mod tests {
             .unwrap_err()
             .contains("outer and inner"));
         assert_eq!(restart_ctx.emitted.len(), emitted_before);
+    }
+
+    #[test]
+    fn a_resting_carry_needs_post_only_and_never_an_amend() {
+        use engine_types::Capability as C;
+        let mut cfg = config();
+        cfg.rest_entries = true;
+        let plug = NativeCarry::new(cfg.clone(), SleeveState::default()).unwrap();
+        assert_eq!(
+            plug.execution_requirements(),
+            [
+                C::Submit,
+                C::Cancel,
+                C::PostOnly,
+                C::FillAttribution,
+                C::ExactQuantity,
+                C::ProtectionPlace,
+                C::ProtectionChange,
+                C::ProtectionTrigger,
+            ]
+        );
+        cfg.rest_entries = false;
+        let crossing = NativeCarry::new(cfg, SleeveState::default()).unwrap();
+        assert!(!crossing.execution_requirements().contains(&C::PostOnly));
+        assert!(!crossing.execution_requirements().contains(&C::Amend));
     }
 }

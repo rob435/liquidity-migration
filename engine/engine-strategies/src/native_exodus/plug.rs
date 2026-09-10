@@ -381,6 +381,10 @@ impl Strategy for NativeExodus {
         self.core.config.entries_enabled
     }
 
+    fn execution_requirements(&self) -> Vec<engine_types::Capability> {
+        self.core.execution_requirements()
+    }
+
     fn on_boot(&mut self, ctx: &mut dyn StrategyCtx) {
         self.replan(ctx);
     }
@@ -901,6 +905,25 @@ pub(crate) mod tests {
         assert!(
             exits[0].reduce_only,
             "terminal entry throttle cannot block cover"
+        );
+    }
+
+    /// Exodus crosses in the templates, so post-only is not one of its needs.
+    #[test]
+    fn a_crossing_exodus_needs_neither_post_only_nor_an_amend() {
+        use engine_types::Capability as C;
+        let plug = NativeExodus::new(config(), SleeveState::default()).unwrap();
+        assert_eq!(
+            plug.execution_requirements(),
+            [
+                C::Submit,
+                C::Cancel,
+                C::FillAttribution,
+                C::ExactQuantity,
+                C::ProtectionPlace,
+                C::ProtectionChange,
+                C::ProtectionTrigger,
+            ]
         );
     }
 }

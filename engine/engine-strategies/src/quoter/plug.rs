@@ -739,6 +739,22 @@ impl Strategy for Quoter {
         NAME
     }
 
+    /// `Amend` is this plug's own primitive: it moves its resting quote
+    /// rather than cancelling and replacing it, so a venue that cannot amend
+    /// in place cannot run it. `stop_loss_fraction` is a required positive
+    /// parameter, so every opening quote carries a stop.
+    fn execution_requirements(&self) -> Vec<engine_types::Capability> {
+        use engine_types::Capability as C;
+        vec![
+            C::Submit,
+            C::Cancel,
+            C::PostOnly,
+            C::FillAttribution,
+            C::Amend,
+            C::ProtectionPlace,
+        ]
+    }
+
     fn subscriptions(&self) -> Vec<Subscription> {
         self.symbol_names
             .iter()

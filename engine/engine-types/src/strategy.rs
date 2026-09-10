@@ -1,3 +1,4 @@
+use crate::capability::Capability;
 use crate::ids::{StrategyId, SymbolId, TimerId};
 use crate::market::{Depth, MarketEvent, Quote, Subscription, Ticker, TradeFlow};
 use crate::orders::{
@@ -696,6 +697,20 @@ pub trait Strategy {
     }
 
     fn input_dependencies(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The venue behaviours this strategy's own actions need.
+    ///
+    /// Asked of the built instance, so a requirement that follows from config
+    /// — a resting entry needs post-only, a market entry does not — is
+    /// answered by the sleeve that is actually configured rather than by a
+    /// static list per plug. Checked against the realm's capability row at
+    /// boot: a capability the adapter does not do refuses the run before any
+    /// credential or socket is opened. Name only what an action of this
+    /// strategy's own reaches for; the engine's own machinery declares its
+    /// own needs where it has them.
+    fn execution_requirements(&self) -> Vec<Capability> {
         Vec::new()
     }
 

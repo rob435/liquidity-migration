@@ -830,6 +830,10 @@ impl Strategy for NativeLong {
         self.core.config.entries_enabled
     }
 
+    fn execution_requirements(&self) -> Vec<engine_types::Capability> {
+        self.core.execution_requirements()
+    }
+
     fn on_boot(&mut self, ctx: &mut dyn StrategyCtx) {
         self.replan_with_mode(ReplanMode::BootRecovery, ctx);
     }
@@ -1645,5 +1649,33 @@ pub(crate) mod tests {
         let runtime = plug.runtime_state().unwrap().unwrap();
         let restored = crate::runtime::restore(&runtime).unwrap();
         assert_eq!(restored.runtime_state().unwrap().unwrap(), runtime);
+    }
+
+    /// The set the funded realms boot against. `amend` is absent on purpose:
+    /// the reprice belongs to the engine's working supervisor, and MEXC
+    /// refuses it without stopping the sleeve.
+    #[test]
+    fn a_resting_long_needs_post_only_and_never_an_amend() {
+        use engine_types::Capability as C;
+        let mut cfg = config();
+        cfg.rest_entries = true;
+        let plug = NativeLong::new(cfg.clone(), SleeveState::default()).unwrap();
+        assert_eq!(
+            plug.execution_requirements(),
+            [
+                C::Submit,
+                C::Cancel,
+                C::PostOnly,
+                C::FillAttribution,
+                C::ExactQuantity,
+                C::ProtectionPlace,
+                C::ProtectionChange,
+                C::ProtectionTrigger,
+            ]
+        );
+        cfg.rest_entries = false;
+        let crossing = NativeLong::new(cfg, SleeveState::default()).unwrap();
+        assert!(!crossing.execution_requirements().contains(&C::PostOnly));
+        assert!(!crossing.execution_requirements().contains(&C::Amend));
     }
 }
