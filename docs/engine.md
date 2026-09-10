@@ -661,12 +661,8 @@ engine/target/release/engine-tools sim --seed 100 --seeds 24 --faults light --tw
 # of one seed can take different paths.
 engine/target/release/engine-tools sim --strategies mexc --hours 3 --pump 1.0 \
   --crashes 0 --faults none --keep --out /tmp/sim-mexc --report /tmp/sim-mexc/report.json
-engine/target/release/engine-tools sim --strategies mexc --hours 2 --pump 1.0 --shock off \
+engine/target/release/engine-tools sim --strategies mexc --hours 2 --pump 1.0 \
   --seed 1 --seeds 6 --crashes 1 --faults light
-
-# Open fault: a death across a venue stop fill livelocks the engine's route
-# maintenance, so --shock and --crashes are exercised separately.
-engine/target/release/engine-tools sim --strategies mexc --hours 2 --pump 1.0 --crashes 1
 
 # Convert a stopped, complete copied WAL family into a new directory.
 engine/target/release/engine-tools wal-convert-v5 \

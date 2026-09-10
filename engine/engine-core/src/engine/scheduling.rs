@@ -1015,6 +1015,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let mut cancellations = Vec::new();
         let mut handled_this_turn = 0;
         loop {
+            let mut blocked_in_a_row = 0;
             if self.host.pending.is_empty() {
                 self.load_ready_wake(&mut progress);
             }
@@ -1052,6 +1053,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     {
                         self.host.pending.push_back(pending);
                         handled_this_turn += 1;
+                        blocked_in_a_row += 1;
+                        // The transition being waited on can itself be parked
+                        // in `ready_actions`, which only loads when this queue
+                        // empties. A queue that has rotated whole without
+                        // progressing must resume a parked wake, or the two
+                        // wait on each other forever.
+                        if blocked_in_a_row >= self.host.pending.len()
+                            && !self.ready_actions.is_empty()
+                        {
+                            blocked_in_a_row = 0;
+                            self.load_ready_wake(&mut progress);
+                        }
                         if handled_this_turn >= MAX_INTENTS_PER_WAKE * 4 {
                             self.flush_placements(
                                 std::mem::take(&mut placements),
@@ -1065,6 +1078,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                         continue;
                     }
                 }
+                blocked_in_a_row = 0;
                 if let Some(key) = pending.effect {
                     self.journal_transition(key.transition_id)?;
                 }
@@ -1621,6 +1635,72 @@ mod dispatch_budget_tests {
             engine.host.pending.len(),
             1,
             "the suffix survives the same wait"
+        );
+    }
+
+    /// A journaled transition parked in `ready_actions` while later actions
+    /// from the same strategy sit in `host.pending`: the pending actions wait
+    /// on the transition and the transition waits on the queue emptying.
+    #[tokio::test(start_paused = true)]
+    async fn a_parked_transition_runs_before_the_later_actions_that_wait_on_it() {
+        let (mut engine, _) = crate::tests::callback_test_fixture(Vec::new()).await;
+        let symbol = SymbolId(0);
+        let consume = Action::ConsumeStrategyEvent {
+            source: StrategyId(0),
+            destination: StrategyId(0),
+            event_id: "already-consumed".into(),
+        };
+        let parked = engine
+            .host
+            .effects
+            .capture(StrategyId(0), vec![consume.clone()]);
+        engine.ready_actions.push_back((
+            PendingAction {
+                caller: Some(StrategyId(0)),
+                action: consume,
+                effect: Some(crate::effects::EffectKey {
+                    transition_id: parked,
+                    index: 0,
+                }),
+                callback_id: Some(parked),
+                timing: None,
+                cause: None,
+            },
+            2,
+        ));
+        engine.host.pending.push_back(PendingAction {
+            caller: Some(StrategyId(0)),
+            action: Action::Cancel {
+                symbol,
+                client_order_id: "later".into(),
+            },
+            effect: None,
+            callback_id: Some(parked + 1),
+            timing: None,
+            cause: None,
+        });
+
+        engine.drain(1).await.unwrap();
+
+        assert!(
+            engine.host.effects.transitions.is_empty(),
+            "transition {parked} never ran: {:?}",
+            engine.host.effects.transitions.keys().collect::<Vec<_>>()
+        );
+        assert!(engine.ready_actions.is_empty(), "the parked wake never ran");
+        assert!(
+            engine.host.pending.is_empty(),
+            "{:?}",
+            engine
+                .host
+                .pending
+                .iter()
+                .map(|queued| queued.callback_id)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            engine.drain_progress.is_none(),
+            "the drain never reached the end of its queue"
         );
     }
 }
