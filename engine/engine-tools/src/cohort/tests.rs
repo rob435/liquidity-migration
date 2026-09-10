@@ -2,8 +2,8 @@ use super::*;
 
 use engine_types::order_dispatch::QueuedOrderDispatch;
 use engine_types::{
-    DenyReason, Intent, OrderKind, OrderRequest, OrderUpdate, RiskVerdict, Side, SignalObservation,
-    StrategyId, SymbolId, SIGNAL_OBSERVATION_SCHEMA_VERSION,
+    Cause, DecisionCause, DenyReason, Intent, OrderKind, OrderRequest, OrderUpdate, RiskVerdict,
+    Side, SignalObservation, StrategyId, SymbolId, SIGNAL_OBSERVATION_SCHEMA_VERSION,
 };
 
 const DESTINATION: StrategyId = StrategyId(1);
@@ -91,6 +91,70 @@ fn intent(decided_ns: u64) -> Intent {
 fn intent_record(decided_ns: u64) -> WalRecord {
     WalRecord::Intent {
         intent: intent(decided_ns),
+        cause: None,
+    }
+}
+
+/// An intent the log says came out of one source row's callback.
+fn caused_intent(decided_ns: u64, sequence: u64, callback_wall_ms: i64) -> WalRecord {
+    WalRecord::Intent {
+        intent: intent(decided_ns),
+        cause: Some(Box::new(DecisionCause {
+            callback_wall_ms,
+            callback_id: Some(sequence),
+            causes: vec![Cause::Signal {
+                source: "worker.long".into(),
+                sequence,
+                observation_id: format!("long_feature_batch-{sequence}"),
+            }],
+        })),
+    }
+}
+
+/// An intent woken by a timer: a real cause that names no source row.
+fn timer_intent(decided_ns: u64, callback_wall_ms: i64) -> WalRecord {
+    WalRecord::Intent {
+        intent: intent(decided_ns),
+        cause: Some(Box::new(DecisionCause {
+            callback_wall_ms,
+            callback_id: Some(1),
+            causes: vec![Cause::Timer {
+                id: engine_types::TimerId(4),
+            }],
+        })),
+    }
+}
+
+fn refused(code: &str, client_order_id: Option<&str>) -> WalRecord {
+    WalRecord::IntentRefused {
+        wall_ts_ms: 1_000,
+        strategy: DESTINATION,
+        symbol: SymbolId(0),
+        tag: "long_native_entry".into(),
+        client_order_id: client_order_id.map(str::to_owned),
+        code: code.into(),
+        detail: String::new(),
+    }
+}
+
+fn fill(id: &str) -> WalRecord {
+    WalRecord::OrderUpdate {
+        callbacks: None,
+        update: OrderUpdate::Fill {
+            allocation: None,
+            amounts: None,
+            exec_id: format!("exec-{id}"),
+            client_order_id: id.into(),
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 1.0,
+            px: 100.0,
+            fee: None,
+            is_maker: false,
+            forced_close: None,
+            venue_ts_ms: 1,
+            recv_ns: 1,
+        },
     }
 }
 
@@ -256,7 +320,7 @@ fn every_opportunity_lands_in_one_bucket_and_the_totals_add_up() {
     assert_eq!(cohort.order_lane.unresolved, 1);
     assert_eq!(
         cohort.order_lane.rejected_by_reason,
-        BTreeMap::from([("StaleQuote".to_string(), 1)])
+        BTreeMap::from([("stale_quote".to_string(), 1)])
     );
     assert_eq!(
         cohort.order_lane.expired_by_reason,
@@ -303,8 +367,8 @@ fn every_opportunity_lands_in_one_bucket_and_the_totals_add_up() {
 #[test]
 fn the_ages_are_the_stamps_the_log_actually_has() {
     let cohort = of_log(&mixed_log());
-    let [source, join, wire] = &cohort.ages[..] else {
-        panic!("three intervals");
+    let [source, join, source_to_decision, wire] = &cohort.ages[..] else {
+        panic!("four intervals");
     };
 
     // 100, 300 and 1000 ms, nearest-rank over three samples.
@@ -316,7 +380,6 @@ fn the_ages_are_the_stamps_the_log_actually_has() {
     assert_eq!(source.p999_ms, Some(1_000.0));
     assert_eq!(source.max_ms, Some(1_000.0));
     assert_eq!(source.stamped_backwards, 0);
-    assert!(source.unmeasurable.is_none());
 
     // The same three samples again, each under the kind of row it came from.
     let by_kind = &cohort.source_ages_by_kind;
@@ -335,13 +398,15 @@ fn the_ages_are_the_stamps_the_log_actually_has() {
         .fold(0.0_f64, f64::max);
     assert_eq!(Some(longest), source.max_ms);
 
+    // No intent in the mixed log carries a cause, so both engine-side
+    // intervals are absent rather than zero.
     assert_eq!(join.name, "engine consume to decision");
     assert_eq!(join.count, 0);
-    assert_eq!(join.p50_ms, None, "an unmeasurable interval is not zero");
-    assert!(join
-        .unmeasurable
-        .expect("the join has no stamps")
-        .contains("no id joins a source row to an intent"));
+    assert_eq!(join.p50_ms, None, "an absent interval is not zero");
+    assert_eq!(join.without_a_stamp, 4);
+    assert_eq!(source_to_decision.name, "source stamp to decision");
+    assert_eq!(source_to_decision.count, 0);
+    assert_eq!(source_to_decision.without_a_stamp, 4);
 
     // 1.0 and 2.5 ms.
     assert_eq!(wire.name, "decision to wire");
@@ -352,10 +417,13 @@ fn the_ages_are_the_stamps_the_log_actually_has() {
     assert_eq!(wire.without_a_stamp, 0);
 
     let text = cohort.table();
-    assert!(text.contains("UNMEASURABLE:"), "{text}");
     assert!(
         text.contains("two processes' realtime clocks"),
         "the source interval must say it crosses processes: {text}"
+    );
+    assert!(
+        text.contains("4 unit(s) carry no such stamp at all"),
+        "an absent stamp is a named count, not a zero quantile: {text}"
     );
 }
 
@@ -388,9 +456,10 @@ fn an_order_sent_with_no_dispatch_has_no_decision_stamp() {
         },
     ];
     let cohort = of_log(&records);
-    assert_eq!(cohort.ages[2].count, 0);
-    assert_eq!(cohort.ages[2].without_a_stamp, 1);
-    assert_eq!(cohort.ages[2].p50_ms, None);
+    assert_eq!(cohort.ages[3].name, "decision to wire");
+    assert_eq!(cohort.ages[3].count, 0);
+    assert_eq!(cohort.ages[3].without_a_stamp, 1);
+    assert_eq!(cohort.ages[3].p50_ms, None);
     assert_eq!(cohort.order_lane.admitted, 1);
 }
 
@@ -417,8 +486,11 @@ fn an_amend_reverdict_does_not_take_an_intents_place() {
     assert_eq!(cohort.intent_records, 1);
 }
 
+/// A log written before `intent_refused` existed. Its notes are suppressed
+/// for 60 s per (strategy, symbol, tag), so counting them would undercount the
+/// population: the refusals stay unresolved and the footer says why.
 #[test]
-fn a_refusal_the_engine_wrote_only_as_a_note_is_not_read_as_unresolved() {
+fn a_log_whose_refusals_are_only_notes_counts_them_unresolved_and_says_so() {
     let records = vec![
         intent_record(1_000_000),
         note("intent long_native_entry refused: same-symbol sibling batch asks for conflicting leverage values"),
@@ -427,22 +499,178 @@ fn a_refusal_the_engine_wrote_only_as_a_note_is_not_read_as_unresolved() {
         note("eng-9 not sent (long_native_entry): the intent carries a stop and this venue keeps none (and 3 more like it)"),
     ];
     let cohort = of_log(&records);
+    assert_eq!(cohort.order_lane.rejected, 0);
+    assert_eq!(cohort.order_lane.unresolved, 2);
+    assert_eq!(cohort.order_lane.admitted, 0);
+    assert!(cohort.refusals_predate_typed_records);
+    assert!(cohort.balanced());
+    assert!(
+        cohort
+            .table()
+            .contains("This log predates typed refusal records"),
+        "{}",
+        cohort.table()
+    );
+}
+
+/// Both refusal classes, typed. Neither is read from a note, and one typed
+/// record in the log is enough to stop calling the log old.
+#[test]
+fn a_typed_refusal_closes_the_intent_before_the_verdict_and_the_order_after_it() {
+    let records = vec![
+        intent_record(1_000_000),
+        note("intent long_native_entry refused: same-symbol sibling batch asks for conflicting leverage values"),
+        refused("batch_leverage_conflict", None),
+        intent_record(2_000_000),
+        allow("eng-9"),
+        note("eng-9 not sent (long_native_entry): the intent carries a stop and this venue keeps none"),
+        refused("venue_keeps_no_stop", Some("eng-9")),
+    ];
+    let cohort = of_log(&records);
     assert_eq!(cohort.order_lane.rejected, 2);
     assert_eq!(cohort.order_lane.unresolved, 0);
     assert_eq!(cohort.order_lane.admitted, 0);
+    assert_eq!(cohort.unattached_refusals, 0);
+    assert!(!cohort.refusals_predate_typed_records);
     assert_eq!(
         cohort.order_lane.rejected_by_reason,
         BTreeMap::from([
-            (
-                "same-symbol sibling batch asks for conflicting leverage values".to_string(),
-                1
-            ),
-            (
-                "the intent carries a stop and this venue keeps none".to_string(),
-                1
-            ),
+            ("batch_leverage_conflict".to_string(), 1),
+            ("venue_keeps_no_stop".to_string(), 1),
         ])
     );
+    assert!(cohort.balanced());
+}
+
+/// The suppression is on the note, not on the record: the population is the
+/// records.
+#[test]
+fn a_hundred_refusals_inside_one_suppression_window_all_count() {
+    let mut records = vec![row("long_feature_batch", 1, 1_000)];
+    for step in 0..100u64 {
+        records.push(caused_intent(1_000_000 + step, 1, 2_000 + step as i64));
+        if step == 0 {
+            records.push(note(
+                "intent long_native_entry refused: below the venue's smallest order value",
+            ));
+        }
+        records.push(refused("below_minimum_notional", None));
+    }
+    let cohort = of_log(&records);
+    assert_eq!(cohort.order_lane.rejected, 100);
+    assert_eq!(cohort.order_lane.unresolved, 0);
+    assert_eq!(
+        cohort.order_lane.rejected_by_reason,
+        BTreeMap::from([("below_minimum_notional".to_string(), 100)])
+    );
+    assert_eq!(
+        cohort.not_an_opportunity.get("note"),
+        Some(&1),
+        "one note for a hundred refusals is the suppression working"
+    );
+    assert_eq!(cohort.funnel.rows, 1);
+    assert_eq!(cohort.funnel.intents, 100, "one row, a hundred decisions");
+    assert_eq!(cohort.funnel.allowed, 0);
+    assert!(cohort.balanced());
+}
+
+/// The whole chain, joined by the id the intent's own cause carries.
+#[test]
+fn a_source_row_is_followed_to_its_order_and_its_fill() {
+    let records = vec![
+        row("long_feature_batch", 1, 1_000),
+        consumed("long_feature_batch", 1, 1_100),
+        caused_intent(1_000_000, 1, 1_250),
+        allow("eng-1"),
+        sent("eng-1", 1_000_000, 3_500_000),
+        fill("eng-1"),
+    ];
+    let cohort = of_log(&records);
+    assert_eq!(
+        cohort.funnel,
+        Funnel {
+            rows: 1,
+            intents: 1,
+            allowed: 1,
+            wire: 1,
+            filled: 1,
+        }
+    );
+    assert_eq!(
+        cohort.funnel_by_source.get("worker.long"),
+        Some(&cohort.funnel)
+    );
+    assert_eq!(
+        cohort.intents_by_cause,
+        BTreeMap::from([("signal".to_string(), 1)])
+    );
+
+    // 150 ms from the source stamp to the decision, of which 50 ms is after
+    // the engine consumed the row.
+    let by_name = |name: &str| {
+        cohort
+            .ages
+            .iter()
+            .find(|age| age.name == name)
+            .expect(name)
+            .clone()
+    };
+    let consume = by_name("engine consume to decision");
+    assert_eq!(consume.count, 1);
+    assert_eq!(consume.p50_ms, Some(150.0));
+    assert_eq!(consume.without_a_stamp, 0);
+    assert_eq!(consume.clocks, "one process's realtime clock, read twice");
+    let source = by_name("source stamp to decision");
+    assert_eq!(source.count, 1);
+    assert_eq!(source.p50_ms, Some(250.0));
+    assert!(source.clocks.contains("two processes' realtime clocks"));
+
+    let text = cohort.table();
+    assert!(text.contains("rows to fills"), "{text}");
+    assert!(text.contains("all sources"), "{text}");
+}
+
+/// A timer wake is a cause, and it names no source row. It belongs in the
+/// census under `timer`, never charged to whichever row came before it.
+#[test]
+fn a_decision_no_source_row_caused_is_named_and_not_charged_to_one() {
+    let records = vec![
+        row("long_feature_batch", 1, 1_000),
+        consumed("long_feature_batch", 1, 1_100),
+        timer_intent(1_000_000, 1_250),
+        allow("eng-1"),
+        sent("eng-1", 1_000_000, 2_000_000),
+        intent_record(2_000_000),
+        allow("eng-2"),
+        sent("eng-2", 2_000_000, 3_000_000),
+    ];
+    let cohort = of_log(&records);
+    assert_eq!(cohort.funnel.rows, 1);
+    assert_eq!(cohort.funnel.intents, 0);
+    assert_eq!(
+        cohort.intents_by_cause,
+        BTreeMap::from([("timer".to_string(), 1), ("none".to_string(), 1)])
+    );
+    for name in ["engine consume to decision", "source stamp to decision"] {
+        let age = cohort.ages.iter().find(|age| age.name == name).expect(name);
+        assert_eq!(age.count, 0, "{name}");
+        assert_eq!(age.without_a_stamp, 2, "{name}");
+    }
+    assert!(cohort.balanced());
+}
+
+/// A refusal for an intent this reader is not holding is reported, not folded
+/// into a lane that would then be wrong.
+#[test]
+fn a_refusal_naming_no_held_intent_is_reported() {
+    let records = vec![refused("engine_latched", None)];
+    let cohort = of_log(&records);
+    assert_eq!(cohort.unattached_refusals, 1);
+    assert_eq!(cohort.order_lane.total(), 0);
+    assert!(cohort.balanced());
+    assert!(cohort
+        .table()
+        .contains("named neither an allowed order nor the intent"));
 }
 
 #[test]
@@ -534,11 +762,16 @@ fn the_json_report_names_every_bucket_and_every_interval() {
         assert!(value[lane]["rejected_by_reason"].is_object(), "{lane}");
         assert!(value[lane]["expired_by_reason"].is_object(), "{lane}");
     }
-    assert_eq!(value["order_lane"]["rejected_by_reason"]["StaleQuote"], 1);
     assert_eq!(value["not_an_opportunity"]["signal:funding_update"], 1);
+    assert_eq!(value["order_lane"]["rejected_by_reason"]["stale_quote"], 1);
+    assert_eq!(value["intents_by_cause"]["none"], 4);
+    assert_eq!(value["refusals_predate_typed_records"], false);
+    for field in ["rows", "intents", "allowed", "wire", "filled"] {
+        assert!(value["funnel"][field].is_u64(), "funnel.{field}");
+    }
 
-    let ages = value["ages"].as_array().expect("three intervals");
-    assert_eq!(ages.len(), 3);
+    let ages = value["ages"].as_array().expect("four intervals");
+    assert_eq!(ages.len(), 4);
     assert_eq!(ages[0]["name"], "source stamp to engine consume");
     assert_eq!(ages[0]["count"], 3);
     assert_eq!(ages[0]["p50_ms"], 300.0);
@@ -548,9 +781,10 @@ fn the_json_report_names_every_bucket_and_every_interval() {
     );
     assert!(ages[0]["clocks"].is_string());
     assert_eq!(ages[1]["name"], "engine consume to decision");
-    assert!(ages[1]["unmeasurable"].is_string());
+    assert_eq!(ages[1]["to_stamp"], "intent.cause.callback_wall_ms");
     assert_eq!(ages[1]["p50_ms"], serde_json::Value::Null);
-    assert_eq!(ages[2]["name"], "decision to wire");
-    assert_eq!(ages[2]["p50_ms"], 1.0);
-    assert_eq!(ages[2]["unmeasurable"], serde_json::Value::Null);
+    assert_eq!(ages[1]["without_a_stamp"], 4);
+    assert_eq!(ages[2]["name"], "source stamp to decision");
+    assert_eq!(ages[3]["name"], "decision to wire");
+    assert_eq!(ages[3]["p50_ms"], 1.0);
 }
