@@ -273,10 +273,6 @@ async fn realm_signal_faults_and_a_death_leave_the_log_and_the_sleeves_agreeing(
         let mut opts = realm_options(seed, "realm-faulty", 2);
         opts.crashes = 1;
         opts.faults = FaultRates::LIGHT;
-        // A death across a venue stop fill livelocks the engine's route
-        // maintenance; the shock and a death are exercised separately until
-        // that is understood.
-        opts.shock = false;
         let report = run_seed(opts).await.expect("the world runs");
         assert!(report.passed(), "seed {seed}: {:#?}", report.failures());
         assert!(
@@ -312,7 +308,6 @@ async fn one_realm_seed_replays_byte_for_byte_under_heavy_faults() {
     let mut opts = realm_options(7, "realm-heavy", 2);
     opts.crashes = 2;
     opts.faults = FaultRates::HEAVY;
-    opts.shock = false;
     let first = run_seed(opts.clone()).await.expect("the world runs");
     assert!(first.passed(), "{:#?}", first.failures());
     assert_eq!(first.crashes_injected, 2);
