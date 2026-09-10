@@ -8,7 +8,7 @@ use serde_json::json;
 
 use super::scorer::{
     score_decision, CarryDecision, CarryFeatureRow, CarryRuleConfig, ScorerState, DAY_MS,
-    UNIVERSE_TOO_THIN,
+    MIN_DECISION_SYMBOLS, REPLAY_BELOW_FLOOR, UNIVERSE_TOO_THIN,
 };
 use crate::native_common::{
     checkpoint_payload, config_fingerprint, hex_digest, order_effects, valid_sha256, valid_symbol,
@@ -413,16 +413,29 @@ fn decision_can_wait(config: &StrategyConfig, holds_nothing: bool) -> bool {
     !config.entries_enabled && holds_nothing
 }
 
-fn thin_universe_skip(rows: &[CarryFeatureRow], decision_ts_ms: i64) -> Skipped {
-    let symbols = rows
-        .iter()
+fn decision_universe(rows: &[CarryFeatureRow], decision_ts_ms: i64) -> usize {
+    rows.iter()
         .filter(|row| row.bar_ts_ms == decision_ts_ms)
         .map(|row| row.symbol.as_str())
         .collect::<BTreeSet<_>>()
-        .len();
+        .len()
+}
+
+/// Whether the scorer's refusal says only that the day's universe cannot carry
+/// a decision. The replay floor belongs here because consuming a thin day
+/// leaves the scorer unadvanced, and the worker sends its replay window once
+/// per cold start: the next day's batch is one day long against a scorer that
+/// has never decided. A short window over a full universe stays an error, so a
+/// lost checkpoint on a wide realm is still visible.
+fn nothing_to_decide(error: &str, rows: &[CarryFeatureRow], decision_ts_ms: i64) -> bool {
+    matches!(error, UNIVERSE_TOO_THIN | REPLAY_BELOW_FLOOR)
+        && decision_universe(rows, decision_ts_ms) < MIN_DECISION_SYMBOLS
+}
+
+fn thin_universe_skip(rows: &[CarryFeatureRow], decision_ts_ms: i64) -> Skipped {
     Skipped::DecisionUniverseBelowMinimum {
         symbol: "*".to_owned(),
-        symbols,
+        symbols: decision_universe(rows, decision_ts_ms),
     }
 }
 
@@ -464,7 +477,10 @@ pub fn reduce_scorer_catchup(
     let (source, sequence, observation_id) = input.signal_receipt;
     let scorer = match scored {
         Ok((_, scorer)) => scorer,
-        Err(UNIVERSE_TOO_THIN) if decision_can_wait(config, input.holds_nothing) => {
+        Err(error)
+            if nothing_to_decide(error, &input.rows, input.decision_ts_ms)
+                && decision_can_wait(config, input.holds_nothing) =>
+        {
             return Ok(ScorerCatchupOutput {
                 execution: ExecutionOutput {
                     effects: vec![Effect::ConsumeSignal {
@@ -522,7 +538,10 @@ pub fn reduce_signal(
         &config.rule,
     ) {
         Ok(scored) => scored,
-        Err(UNIVERSE_TOO_THIN) if decision_can_wait(config, holds_nothing) => {
+        Err(error)
+            if nothing_to_decide(error, &batch.rows, batch.decision_ts_ms)
+                && decision_can_wait(config, holds_nothing) =>
+        {
             let mut effects = Vec::new();
             if let Some((source, sequence, observation_id)) = input.signal_receipt {
                 effects.push(Effect::ConsumeSignal {
@@ -1255,6 +1274,7 @@ mod daily_hold_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native_carry::scorer::MIN_REPLAY_DAYS;
     use crate::position_plan::Held;
 
     const FIXTURE: &str = include_str!(concat!(
@@ -1917,6 +1937,104 @@ mod tests {
         ));
         assert_eq!(catchup(false, &off).unwrap_err(), UNIVERSE_TOO_THIN);
         assert_eq!(catchup(true, &config()).unwrap_err(), UNIVERSE_TOO_THIN);
+    }
+
+    /// The worker sends the replay window once per cold start and one day per
+    /// batch after it, so a consumed thin day leaves the next batch one day
+    /// long against a scorer that never advanced.
+    #[test]
+    fn the_day_after_a_consumed_thin_day_carries_one_day_and_is_consumed_too() {
+        let day = 100;
+        let thin = |bar_days: std::ops::RangeInclusive<i64>, decision_day: i64| {
+            let mut rows = scorer_rows(*bar_days.start(), *bar_days.end());
+            rows.retain(|row| row.symbol.as_str() < "S004USDT");
+            CarrySignalBatch {
+                schema_version: 1,
+                decision_ts_ms: decision_day * DAY_MS,
+                rows,
+                upcoming_rows: Vec::new(),
+                settled_funding: Vec::new(),
+                presettlement: Vec::new(),
+                marks: Vec::new(),
+                rejections: Vec::new(),
+            }
+        };
+        let input = |decision_day: i64, sequence: u64| ReducerInput {
+            now_ms: decision_day * DAY_MS + 1,
+            decision: CarryDecision {
+                schema_version: 1,
+                decision_ts_ms: decision_day * DAY_MS,
+                weights: BTreeMap::new(),
+                universe_size: 0,
+                replay_days: 0,
+                gross: 0.0,
+            },
+            upcoming_decision: None,
+            settled_funding: Vec::new(),
+            presettlement: Vec::new(),
+            durable_fires: Vec::new(),
+            trail_by_symbol: BTreeMap::new(),
+            entry_blockers: BTreeMap::new(),
+            account_healthy: true,
+            equity_usdt: 52.0,
+            upcoming_sizing_equity_usdt: None,
+            facts: PlannerFacts::default(),
+            owned_working_symbols: BTreeSet::new(),
+            owned_opening_order_ids: BTreeMap::new(),
+            checkpoint_fingerprint: None,
+            signal_receipt: Some(("worker".into(), sequence, format!("thin-{sequence}"))),
+        };
+        let state = SleeveState {
+            schema_version: DIRECTIONAL_CHECKPOINT_SCHEMA_VERSION,
+            ..SleeveState::default()
+        };
+        let mut off = config();
+        off.entries_enabled = false;
+
+        let first = reduce_signal(
+            thin(day - MIN_REPLAY_DAYS - 1..=day, day),
+            input(day, 9),
+            state.clone(),
+            &off,
+        )
+        .expect("the cold start's replay window is consumed");
+        assert_eq!(first.next_state.scorer.last_decision_ts_ms, 0);
+
+        // The next day, one day long. The scorer's replay floor is the term
+        // that refuses it, and the day still has nothing to decide.
+        let next = reduce_signal(
+            thin(day + 1..=day + 1, day + 1),
+            input(day + 1, 10),
+            first.next_state,
+            &off,
+        )
+        .expect("a one-day batch on a thin universe is consumed too");
+        assert!(matches!(
+            next.execution.effects.as_slice(),
+            [Effect::ConsumeSignal { sequence: 10, .. }]
+        ));
+        assert!(matches!(
+            next.execution.skipped.as_slice(),
+            [Skipped::DecisionUniverseBelowMinimum { symbols: 4, .. }]
+        ));
+
+        // Entries on, or a full universe on a short window, keeps the refusal.
+        assert_eq!(
+            reduce_signal(
+                thin(day + 1..=day + 1, day + 1),
+                input(day + 1, 10),
+                state.clone(),
+                &config()
+            )
+            .unwrap_err(),
+            REPLAY_BELOW_FLOOR
+        );
+        let mut wide = thin(day + 1..=day + 1, day + 1);
+        wide.rows = scorer_rows(day + 1, day + 1);
+        assert_eq!(
+            reduce_signal(wide, input(day + 1, 10), state, &off).unwrap_err(),
+            REPLAY_BELOW_FLOOR
+        );
     }
 
     #[test]

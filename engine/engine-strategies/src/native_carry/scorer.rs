@@ -13,6 +13,9 @@ pub const MIN_REPLAY_DAYS: i64 = 45;
 pub const MIN_DECISION_SYMBOLS: usize = 50;
 /// The scorer's answer to a decision universe under [`MIN_DECISION_SYMBOLS`].
 pub const UNIVERSE_TOO_THIN: &str = "CARRY decision universe has fewer than 50 symbols";
+/// The scorer's answer to a first decision whose batch carries fewer than
+/// [`MIN_REPLAY_DAYS`] of daily history.
+pub const REPLAY_BELOW_FLOOR: &str = "CARRY replay is below the 45-day floor";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -291,7 +294,7 @@ pub fn score_decision(
     }
     let replay_days = (decision_ts_ms - first) / DAY_MS;
     if prior.last_decision_ts_ms == 0 && replay_days < MIN_REPLAY_DAYS {
-        return Err("CARRY replay is below the 45-day floor");
+        return Err(REPLAY_BELOW_FLOOR);
     }
     if prior.last_decision_ts_ms == decision_ts_ms {
         return Ok((

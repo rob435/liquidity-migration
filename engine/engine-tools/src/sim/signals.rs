@@ -62,8 +62,8 @@ const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 86_400_000;
 /// Availability lags the decision clock by this many seconds, drawn per row.
 const AVAILABLE_LAG_S: (f64, f64) = (5.0, 90.0);
-/// Days of daily history a `carry_feature_batch` carries, one over the
-/// scorer's `MIN_REPLAY_DAYS` floor.
+/// Days of daily history the cold start's `carry_feature_batch` carries, one
+/// over the scorer's `MIN_REPLAY_DAYS` floor. Later batches carry one day.
 const CARRY_REPLAY_DAYS: i64 = 46;
 
 /// A hash-shaped value for an artifact this producer has none of. Every
@@ -477,6 +477,7 @@ pub fn publish(
                 "payload": payload,
             })
         };
+        let mut replayed = false;
         if let Some(first) = hours.first() {
             let available = first + lag(&mut rng);
             out.push(pen.write(
@@ -546,14 +547,18 @@ pub fn publish(
             }
             if hour % DAY_MS == 0 {
                 let available = hour + lag(&mut rng);
-                // The scorer refuses a first decision with less than
-                // MIN_REPLAY_DAYS of daily history in the batch itself, so the
-                // batch carries the days before the tape at the opening price.
+                // `SignalWorker::publish` builds the replay window only while
+                // `last_carry_decision_ts_ms` is None, so the cold start's
+                // batch carries MIN_REPLAY_DAYS + 1 days -- priced before the
+                // tape at the opening price -- and every later batch carries
+                // the decision day alone.
+                let back_days = if replayed { 0 } else { CARRY_REPLAY_DAYS };
+                replayed = true;
                 let rows: Vec<serde_json::Value> = names
                     .iter()
                     .flat_map(|name| {
                         let rank = ranks.get(name).copied().unwrap_or(1.0) as u32;
-                        (0..=CARRY_REPLAY_DAYS).rev().map(move |back| {
+                        (0..=back_days).rev().map(move |back| {
                             let bar_ts_ms = hour - back * DAY_MS;
                             let close = tape.mid_at_ms(name, bar_ts_ms).unwrap_or(0.0);
                             json!({
@@ -674,6 +679,40 @@ mod tests {
             assert!(key > previous, "{key:?} after {previous:?}");
             previous = key;
         }
+    }
+
+    #[test]
+    fn only_the_cold_start_s_carry_batch_carries_the_replay_window() {
+        let loaded = realm_config(Realm::Mexc);
+        let mut producer = Producer::bind(&loaded.config.strategies).unwrap();
+        producer.long = None;
+        let mut plan = MarketPlan::new(3, 80 * 3_600);
+        plan.step_s = 600;
+        let directory = crate::testpath::temp_path("sim-producer-replay");
+        std::fs::create_dir_all(directory.path()).unwrap();
+        let tape_path = directory.path().join("tape.jsonl");
+        let tape = crate::sim::market::write_tape(&tape_path, &plan, Rng::new(3)).unwrap();
+        std::fs::remove_dir_all(directory.path()).unwrap();
+
+        let mut windows = Vec::new();
+        for row in publish(Rng::new(3), &plan, &tape, &producer) {
+            if row.kind != "carry_feature_batch" {
+                continue;
+            }
+            let envelope: serde_json::Value = serde_json::from_slice(&row.payload).unwrap();
+            let decision_ts_ms = envelope["payload"]["decision_ts_ms"].as_i64().unwrap();
+            let days: BTreeSet<i64> = envelope["payload"]["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["bar_ts_ms"].as_i64().unwrap())
+                .collect();
+            assert_eq!(days.iter().next_back(), Some(&decision_ts_ms));
+            windows.push(days.len() as i64);
+        }
+        assert_eq!(windows.first(), Some(&(CARRY_REPLAY_DAYS + 1)));
+        assert!(windows.len() > 1, "{windows:?}");
+        assert!(windows[1..].iter().all(|days| *days == 1), "{windows:?}");
     }
 
     #[test]
