@@ -4,7 +4,7 @@ use engine_types::{
     SignalProducerReport, SignalReadinessRequest, SignalReadinessResponse, SignalSourceFrontier,
 };
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerSignalLifecycle {
     pub epoch: Option<u64>,

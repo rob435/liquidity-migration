@@ -2633,29 +2633,45 @@ impl DurableSignalWorker {
         let spool = SpoolWriter::new(spool_dir.as_ref())?;
         let mut checkpoint_writes_session = 0_u64;
         // A checkpoint written under another public source, its journal and
-        // any pending transaction on it are one lineage, and nothing in them
-        // carries to this source. Archive them beside the state and start as
-        // a first boot would, rather than exit until an operator does it.
-        if let Some(previous) = checkpoint.load::<WorkerState>()? {
-            let current = source_history_hash(&config);
-            if previous.source_contract_sha256 != current {
-                let archive = archive_drifted_source_state(
-                    state_dir.as_ref(),
-                    &previous.source_contract_sha256,
-                )?;
-                eprintln!(
-                    "signal-worker: state: checkpoint public source contract drifted from {} to {current}; archived {} and cold-starting",
-                    previous.source_contract_sha256,
-                    archive.display()
-                );
+        // any pending transaction on it are one lineage: the history and the
+        // features in them came from another venue's data. Archive them beside
+        // the state and rebuild, rather than exit until an operator does it.
+        // The producer identity is not the worker's to reset: the engine's
+        // registry keys this realm's signal sources by generation, epoch and
+        // published sequence, so those continue and only the history restarts.
+        let drifted = match checkpoint.load::<WorkerState>()? {
+            Some(previous) if previous.source_contract_sha256 != source_history_hash(&config) => {
+                Some(previous)
             }
+            _ => None,
+        };
+        if let Some(previous) = &drifted {
+            let archive =
+                archive_drifted_source_state(state_dir.as_ref(), &previous.source_contract_sha256)?;
+            eprintln!(
+                "signal-worker: state: checkpoint public source contract drifted from {} to {}; archived {} and rebuilding the history under producer generation {}",
+                previous.source_contract_sha256,
+                source_history_hash(&config),
+                archive.display(),
+                previous.source_generation
+            );
         }
         if !checkpoint.path().exists() {
-            let initial = SignalWorker::new_with_source_generation(
-                config.clone(),
-                universe,
-                random_source_generation()?,
-            )?;
+            let generation = match &drifted {
+                Some(previous) => previous.source_generation.clone(),
+                None => random_source_generation()?,
+            };
+            let mut initial =
+                SignalWorker::new_with_source_generation(config.clone(), universe, generation)?;
+            if let Some(previous) = drifted {
+                initial.state.destination_sleeves = previous.destination_sleeves;
+                initial.state.signal_lifecycle = previous.signal_lifecycle;
+                initial.state.long_destination = previous.long_destination;
+                initial.state.carry_destination = previous.carry_destination;
+                initial.state.last_input_sequence = previous.last_input_sequence;
+                initial.state.long_output_sequence = previous.long_output_sequence;
+                initial.state.carry_output_sequence = previous.carry_output_sequence;
+            }
             checkpoint.save(initial.state())?;
             checkpoint_writes_session = checkpoint_writes_session.saturating_add(1);
         }

@@ -1216,6 +1216,20 @@ fn a_checkpoint_from_another_public_source_is_archived_and_the_worker_cold_start
     .unwrap();
     let first_generation = first.worker.state.source_generation.clone();
     let first_contract = first.worker.state.source_contract_sha256.clone();
+    // A producer the engine has granted and read from: the identity the
+    // registry keys its sources by.
+    let mut granted = first.worker.clone();
+    granted.state.signal_lifecycle = Some(WorkerSignalLifecycle {
+        epoch: Some(1),
+        sealed: false,
+    });
+    granted.state.long_output_sequence = 20;
+    granted.state.carry_output_sequence = 179;
+    granted.state.last_input_sequence = 33_527;
+    granted.state.last_long_feature_ts_ms = Some(7 * DAY_MS);
+    AtomicJsonStore::new(state_dir.join("checkpoint.json"))
+        .save(granted.state())
+        .unwrap();
     drop(first);
     std::fs::write(state_dir.join("hot-input-journal.jsonl"), b"").unwrap();
 
@@ -1235,8 +1249,20 @@ fn a_checkpoint_from_another_public_source_is_archived_and_the_worker_cold_start
         second.worker.state.source_contract_sha256,
         source_history_hash(&moved)
     );
-    assert_ne!(second.worker.state.source_generation, first_generation);
-    assert_eq!(second.worker.state.last_input_sequence, 0);
+    // The producer identity and its sequence chain continue; the history and
+    // the features start over.
+    assert_eq!(second.worker.state.source_generation, first_generation);
+    assert_eq!(
+        second.worker.state.signal_lifecycle,
+        Some(WorkerSignalLifecycle {
+            epoch: Some(1),
+            sealed: false,
+        })
+    );
+    assert_eq!(second.worker.state.long_output_sequence, 20);
+    assert_eq!(second.worker.state.carry_output_sequence, 179);
+    assert_eq!(second.worker.state.last_input_sequence, 33_527);
+    assert_eq!(second.worker.state.last_long_feature_ts_ms, None);
     let second_generation = second.worker.state.source_generation.clone();
     let archives = std::fs::read_dir(&state_dir)
         .unwrap()
