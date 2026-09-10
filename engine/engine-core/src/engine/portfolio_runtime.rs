@@ -439,6 +439,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     origin_ns: Some(origin_ns),
                     decided_ns: clock::now_ns(),
                 }),
+                // The engine's own exit, not a reducer decision.
+                None,
                 &mut protection,
             )
             .await?
@@ -1108,6 +1110,7 @@ mod tests {
                 None,
                 clock::now_ns(),
                 None,
+                None,
                 &mut HashMap::new(),
             )
             .await
@@ -1322,7 +1325,14 @@ mod tests {
                 leverage: None,
             };
             let prepared = engine
-                .prepare_intent(intent, None, clock::now_ns(), None, &mut HashMap::new())
+                .prepare_intent(
+                    intent,
+                    None,
+                    clock::now_ns(),
+                    None,
+                    None,
+                    &mut HashMap::new(),
+                )
                 .await
                 .unwrap()
                 .unwrap();
@@ -1367,7 +1377,14 @@ mod tests {
             leverage: None,
         };
         let prepared = engine
-            .prepare_intent(intent, None, clock::now_ns(), None, &mut HashMap::new())
+            .prepare_intent(
+                intent,
+                None,
+                clock::now_ns(),
+                None,
+                None,
+                &mut HashMap::new(),
+            )
             .await
             .unwrap()
             .unwrap();
@@ -1404,7 +1421,14 @@ mod tests {
             leverage: None,
         };
         assert!(engine
-            .prepare_intent(intent, None, clock::now_ns(), None, &mut HashMap::new())
+            .prepare_intent(
+                intent,
+                None,
+                clock::now_ns(),
+                None,
+                None,
+                &mut HashMap::new()
+            )
             .await
             .unwrap()
             .is_none());

@@ -1312,7 +1312,7 @@ mod tests {
         };
         engine
             .process_intents(
-                vec![(intent, Some("atomic-unsent".into()), None)],
+                vec![(intent, Some("atomic-unsent".into()), None, None)],
                 clock::now_ns(),
             )
             .await
@@ -1531,6 +1531,7 @@ mod portfolio_tests {
                 },
                 Some("eng-exit-recheck".into()),
                 clock::now_ns(),
+                None,
                 None,
                 &mut HashMap::new(),
             )

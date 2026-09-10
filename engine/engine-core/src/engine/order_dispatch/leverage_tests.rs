@@ -47,6 +47,7 @@ async fn prepare() -> Fixture {
             Some("leverage-owned".into()),
             clock::now_ns(),
             None,
+            None,
             &mut HashMap::new(),
         ),
     )
@@ -325,6 +326,7 @@ async fn a_ready_order_is_submitted_before_a_conflicting_leverage_administration
             intent,
             Some("leverage-second".into()),
             clock::now_ns(),
+            None,
             None,
             &mut HashMap::new(),
         )

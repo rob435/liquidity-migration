@@ -211,14 +211,38 @@ pub fn one_line(record: &WalRecord, names: &LogNames) -> String {
             },
             &config_sha256[..config_sha256.len().min(12)]
         ),
-        WalRecord::Intent { intent } => format!(
-            "wants      {} {:?} {} of {} {} [{}]",
+        WalRecord::Intent { intent, cause } => format!(
+            "wants      {} {:?} {} of {} {} [{}] {}",
             names.strategy(intent.strategy),
             intent.side,
             intent.qty,
             names.symbol(intent.symbol),
             kind_words(&intent.kind),
-            intent.tag
+            intent.tag,
+            cause_words(cause.as_deref())
+        ),
+        WalRecord::IntentRefused {
+            strategy,
+            symbol,
+            tag,
+            client_order_id,
+            code,
+            detail,
+            ..
+        } => format!(
+            "refused    {} {} [{}] {code}{}{}",
+            names.strategy(*strategy),
+            names.symbol(*symbol),
+            tag,
+            client_order_id
+                .as_deref()
+                .map(|id| format!(" after allow, order {id}"))
+                .unwrap_or_default(),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
         ),
         WalRecord::Verdict {
             client_order_id,
@@ -613,6 +637,41 @@ fn optional(value: Option<f64>, digits: usize) -> String {
     value
         .map(|number| format!("{number:+.*}", digits))
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// What woke the reducer that decided this order, as one phrase.
+fn cause_words(cause: Option<&engine_types::DecisionCause>) -> String {
+    use engine_types::Cause;
+    let Some(cause) = cause else {
+        return "(no cause recorded)".to_string();
+    };
+    let what = match cause.immediate() {
+        None => "no cause".to_string(),
+        Some(Cause::Boot) => "boot".to_string(),
+        Some(Cause::Market { symbol }) => format!("market {}", symbol.0),
+        Some(Cause::FeedReset) => "feed reset".to_string(),
+        Some(Cause::Timer { id }) => format!("timer {}", id.0),
+        Some(Cause::Order { client_order_id }) if client_order_id.is_empty() => {
+            "order news (no id)".to_string()
+        }
+        Some(Cause::Order { client_order_id }) => format!("order {client_order_id}"),
+        Some(Cause::Signal {
+            source,
+            sequence,
+            observation_id,
+        }) => format!("signal {source}#{sequence} {observation_id}"),
+        Some(Cause::StrategyEvent { source, event_id }) => {
+            format!("event {event_id} from strategy {}", source.0)
+        }
+        Some(Cause::IntentRefused { symbol }) => format!("its own refusal on {}", symbol.0),
+        Some(Cause::EntryPermission { request_id }) => format!("entry permission {request_id}"),
+        Some(Cause::FlattenDirectional { request_id }) => format!("flatten {request_id}"),
+        Some(Cause::Working { client_order_id }) => {
+            format!("working supervisor on {client_order_id}")
+        }
+        Some(Cause::Restored) => "an effect replayed at boot".to_string(),
+    };
+    format!("after {what} at {}", cause.callback_wall_ms)
 }
 
 fn kind_words(kind: &OrderKind) -> String {

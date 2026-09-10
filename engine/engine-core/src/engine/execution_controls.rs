@@ -3,6 +3,21 @@ use engine_types::numeric::Exact;
 use engine_types::orders::IntentPrices;
 use engine_types::StopSpec;
 
+use super::intent_admission::code;
+
+/// The `intent_refused.code` for a refusal one of the two controls below
+/// produced. Every sentence they write starts with the control's own name; a
+/// number one of them cannot read does not, and is its own code.
+pub(super) fn control_refusal_code(reason: &str) -> &'static str {
+    if reason.starts_with("price_collar") {
+        code::PRICE_COLLAR
+    } else if reason.starts_with("stop cap") {
+        code::ENTRY_STOP_DISTANCE_CAP
+    } else {
+        code::EXECUTION_CONTROL_UNREADABLE_NUMBER
+    }
+}
+
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub(super) fn symbol_stop_distance_cap(
         &self,
@@ -265,6 +280,7 @@ mod tests {
                     None,
                     clock::now_ns(),
                     None,
+                    None,
                     &mut Default::default(),
                 )
                 .await
@@ -300,6 +316,7 @@ mod tests {
                     request,
                     None,
                     clock::now_ns(),
+                    None,
                     None,
                     &mut Default::default(),
                 )

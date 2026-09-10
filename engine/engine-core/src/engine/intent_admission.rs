@@ -76,6 +76,100 @@ impl std::fmt::Display for OpeningRefusal {
     }
 }
 
+/// `intent_refused.code`: the engine's own refusal vocabulary, beside the two
+/// that carry their own (`OpeningRefusal::as_str`, `DenyReason::code`). One
+/// block so the whole wire vocabulary is readable at once, and so no call
+/// site spells a grouping key by hand.
+pub(crate) mod code {
+    pub(crate) const UNREAL_NUMBER: &str = "unreal_number";
+    pub(crate) const INVALID_EXACT_PRICES: &str = "invalid_exact_prices";
+    pub(crate) const INVALID_EXACT_QUANTITY: &str = "invalid_exact_quantity";
+    /// The same word `DenyReason::StaleQuote` carries: one condition, one code,
+    /// whether the engine or the kernel caught it.
+    pub(crate) const STALE_QUOTE: &str = "stale_quote";
+    pub(crate) const WAKE_ACTION_LIMIT: &str = "wake_action_limit";
+    pub(crate) const BATCH_LEVERAGE_CONFLICT: &str = "batch_leverage_conflict";
+    pub(crate) const PRICE_COLLAR: &str = "price_collar";
+    pub(crate) const ENTRY_STOP_DISTANCE_CAP: &str = "entry_stop_distance_cap";
+    pub(crate) const EXECUTION_CONTROL_UNREADABLE_NUMBER: &str =
+        "execution_control_unreadable_number";
+    pub(crate) const VENUE_KEEPS_NO_STOP: &str = "venue_keeps_no_stop";
+    pub(crate) const EXACT_INSTRUMENT_METADATA_UNAVAILABLE: &str =
+        "exact_instrument_metadata_unavailable";
+    /// The legacy non-exact quantize path is a test fixture only; a funded
+    /// binary reaches `quantize_exact_order` and never writes these.
+    #[cfg(test)]
+    pub(crate) const NO_INSTRUMENT_RULE: &str = "no_instrument_rule";
+    #[cfg(test)]
+    pub(crate) const BELOW_MINIMUM_SIZE: &str = "below_minimum_size";
+    #[cfg(test)]
+    pub(crate) const BELOW_MINIMUM_NOTIONAL: &str = "below_minimum_notional";
+    pub(crate) const EXACT_INSTRUMENT_ILLEGAL: &str = "exact_instrument_illegal";
+    pub(crate) const PHYSICAL_PROTECTION: &str = "physical_protection";
+    pub(crate) const CLOSE_DOES_NOT_REDUCE: &str = "close_does_not_reduce";
+    pub(crate) const LEVERAGE_UNSUPPORTED: &str = "leverage_unsupported";
+    pub(crate) const STOP_WOULD_LOOSEN_POSITION: &str = "stop_would_loosen_position";
+}
+
+/// One refusal in the three shapes the engine needs at once.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Refused<'a> {
+    /// `intent_refused.code`. Bounded and never carrying a number.
+    code: &'static str,
+    /// `EngineEvent::IntentRefused.reason`, exactly. Strategies match on it.
+    reason: &'a str,
+    /// The sentence behind the code, numbers included. Empty when the code
+    /// says everything.
+    detail: &'a str,
+}
+
+impl<'a> Refused<'a> {
+    /// The strategy hears the code itself.
+    pub(crate) fn plain(code: &'static str) -> Self {
+        Self {
+            code,
+            reason: code,
+            detail: "",
+        }
+    }
+
+    /// The strategy hears the code; the log keeps the sentence.
+    pub(crate) fn logged(code: &'static str, detail: &'a str) -> Self {
+        Self {
+            code,
+            reason: code,
+            detail,
+        }
+    }
+
+    /// The strategy hears the sentence, which is also the log's detail.
+    pub(crate) fn detailed(code: &'static str, detail: &'a str) -> Self {
+        Self {
+            code,
+            reason: detail,
+            detail,
+        }
+    }
+
+    fn opening(refusal: OpeningRefusal) -> Self {
+        Self {
+            code: refusal.as_str(),
+            reason: refusal.as_str(),
+            detail: refusal.detail(),
+        }
+    }
+}
+
+/// One placement on its way through admission: what the strategy asked for,
+/// the id a replayed transition already minted for it, the callback's timing,
+/// and the callback's cause.
+pub(super) type AdmittedIntent = (
+    Intent,
+    Option<String>,
+    Option<crate::ctx::CallbackTiming>,
+    Option<std::sync::Arc<engine_types::DecisionCause>>,
+);
+
 struct RiskApprovedIntent {
     intent: Intent,
     client_order_id: String,
@@ -157,6 +251,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         client_order_id: Option<String>,
         origin_ns: u64,
         timing: Option<crate::ctx::CallbackTiming>,
+        cause: Option<&engine_types::DecisionCause>,
         batch_protection: &mut std::collections::HashMap<(SymbolId, Side), f64>,
     ) -> Result<Option<PreparedOrder>, EngineError> {
         let mut intent = intent;
@@ -187,7 +282,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
         }
 
-        if !self.journal_and_admit_intent(&intent, client_order_id.as_deref())? {
+        if !self.journal_and_admit_intent(&intent, client_order_id.as_deref(), cause)? {
             return Ok(None);
         }
         self.retain_portfolio_reduction(&intent)?;
@@ -472,6 +567,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         };
         self.wal.append(&WalRecord::Intent {
             intent: intent.clone(),
+            cause: None,
         })?;
         self.wal.append(&WalRecord::Verdict {
             client_order_id: Some(client_order_id.clone()),
@@ -504,24 +600,31 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         &mut self,
         intent: &Intent,
         client_order_id: Option<&str>,
+        cause: Option<&engine_types::DecisionCause>,
     ) -> Result<bool, EngineError> {
         // A non-finite number would be written to the log as null and stop
         // the next boot's replay dead, so it is refused before any append.
         if let Some(what) = unreal_number(intent) {
+            let detail = format!("{what} is not a finite number");
             self.wal.append(&WalRecord::Note {
                 source: "engine".into(),
-                text: format!(
-                    "intent {} refused: {what} is not a finite number",
-                    intent.tag
-                ),
+                text: format!("intent {} refused: {detail}", intent.tag),
             })?;
             tracing::error!(tag = %intent.tag, what, "intent carries an unreal number");
-            self.tell_refused(intent, "unreal_number", client_order_id)?;
+            self.tell_refused(
+                intent,
+                Refused::logged(code::UNREAL_NUMBER, &detail),
+                client_order_id,
+            )?;
             return Ok(false);
         }
 
         if intent.validate_price_projection().is_err() {
-            self.tell_refused(intent, "invalid_exact_prices", client_order_id)?;
+            self.tell_refused(
+                intent,
+                Refused::plain(code::INVALID_EXACT_PRICES),
+                client_order_id,
+            )?;
             return Ok(false);
         }
         if intent.exact_quantity.is_some() && intent.quantity().is_err() {
@@ -532,7 +635,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     intent.tag
                 ),
             })?;
-            self.tell_refused(intent, "invalid_exact_quantity", client_order_id)?;
+            self.tell_refused(
+                intent,
+                Refused::plain(code::INVALID_EXACT_QUANTITY),
+                client_order_id,
+            )?;
             return Ok(false);
         }
 
@@ -540,6 +647,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // touches anything.
         self.wal.append(&WalRecord::Intent {
             intent: intent.clone(),
+            cause: cause.cloned().map(Box::new),
         })?;
 
         // The engine's own reasons an entry may not open, checked before the
@@ -612,7 +720,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     never_quoted = quote_ns == 0,
                     "refused: the quote this entry was decided against is too old to open on"
                 );
-                self.tell_refused(intent, "stale_quote", client_order_id)?;
+                self.tell_refused(intent, Refused::plain(code::STALE_QUOTE), client_order_id)?;
                 return Ok(false);
             }
         }
@@ -644,7 +752,14 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     },
                 },
             })?;
-            self.tell_refused(&intent, &reason, client_order_id.as_deref())?;
+            self.tell_refused(
+                &intent,
+                Refused::detailed(
+                    super::execution_controls::control_refusal_code(&reason),
+                    &reason,
+                ),
+                client_order_id.as_deref(),
+            )?;
             return Ok(None);
         }
 
@@ -685,13 +800,18 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     .map_err(|error| EngineError::State(error.to_string()))?,
             ),
             RiskVerdict::Deny { reason } => {
+                let code = reason.code();
                 let reason = format!("{reason:?}");
                 self.wal.append(&WalRecord::Verdict {
                     client_order_id: None,
                     verdict,
                 })?;
                 tracing::info!(tag = %intent.tag, reason, "risk refused the order");
-                self.tell_refused(&intent, &reason, client_order_id.as_deref())?;
+                self.tell_refused(
+                    &intent,
+                    Refused::detailed(code, &reason),
+                    client_order_id.as_deref(),
+                )?;
                 return Ok(None);
             }
         };
@@ -736,6 +856,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // An exit sheds its stop below in any case, so it is not held back.
         if intent.stop.is_some() && !intent.reduce_only && !self.venue.caps().native_position_stop {
             self.refuse(
+                code::VENUE_KEEPS_NO_STOP,
                 client_order_id,
                 intent,
                 "the intent carries a stop and this venue keeps none",
@@ -751,6 +872,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             return self.quantize_legacy_order_fixture(approval, allowed_qty);
         }
         self.refuse(
+            code::EXACT_INSTRUMENT_METADATA_UNAVAILABLE,
             client_order_id,
             intent,
             "exact instrument metadata is unavailable for this symbol",
@@ -777,6 +899,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .flatten()
         else {
             self.refuse(
+                code::NO_INSTRUMENT_RULE,
                 client_order_id,
                 intent,
                 "no instrument rule for this symbol",
@@ -832,6 +955,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             qty
         } else {
             self.refuse(
+                code::BELOW_MINIMUM_SIZE,
                 client_order_id,
                 intent,
                 &format!(
@@ -845,6 +969,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             let notional = qty * reference_px;
             if notional + 1e-9 < rule.min_notional && !close_position {
                 self.refuse(
+                    code::BELOW_MINIMUM_NOTIONAL,
                     client_order_id,
                     intent,
                     &format!(
@@ -998,6 +1123,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             Ok(terms) => terms,
             Err(error) => {
                 self.refuse(
+                    code::EXACT_INSTRUMENT_ILLEGAL,
                     &approval.client_order_id,
                     intent,
                     &format!("exact instrument legality: {error}"),
@@ -1056,6 +1182,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             Ok(plan) => plan,
             Err(reason) => {
                 self.refuse(
+                    code::PHYSICAL_PROTECTION,
                     &approval.client_order_id,
                     &approval.intent,
                     &format!("physical protection: {reason}"),
@@ -1066,6 +1193,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         request.reduce_only = plan.reduce_only;
         if request.close_position && !request.reduce_only {
             self.refuse(
+                code::CLOSE_DOES_NOT_REDUCE,
                 &approval.client_order_id,
                 &approval.intent,
                 "whole-position close does not certainly reduce the physical position",
@@ -1209,7 +1337,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         if !intent.reduce_only {
             if let Some(want) = intent.leverage {
                 if let Err(reason) = self.validate_leverage_request(want) {
-                    self.refuse(client_order_id, intent, &reason)?;
+                    self.refuse(code::LEVERAGE_UNSUPPORTED, client_order_id, intent, &reason)?;
                     return Ok(None);
                 }
             }
@@ -1232,6 +1360,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             if let Some(protected) = batch_protection.get(&key).copied() {
                 if stop_is_looser(request.side, stop.trigger_px, protected, tolerance) {
                     self.refuse(
+                        code::STOP_WOULD_LOOSEN_POSITION,
                         client_order_id,
                         intent,
                         &format!(
@@ -1361,7 +1490,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     pub(super) async fn process_intents(
         &mut self,
-        intents: Vec<(Intent, Option<String>, Option<crate::ctx::CallbackTiming>)>,
+        intents: Vec<AdmittedIntent>,
         origin_ns: u64,
     ) -> Result<bool, EngineError> {
         if intents.len() > MAX_ORDERS_PER_BATCH {
@@ -1378,7 +1507,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         // that symbol. Reduce-only exits still flow and never change leverage.
         let mut leverage_by_symbol = std::collections::HashMap::new();
         let mut leverage_conflicts = std::collections::HashSet::new();
-        for (intent, _, _) in &intents {
+        for (intent, _, _, _) in &intents {
             let Some(want) = intent
                 .leverage
                 .filter(|value| value.is_finite() && *value > 0.0)
@@ -1420,7 +1549,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 })
                 .or_insert(position.stop_px);
         }
-        for (mut intent, client_order_id, timing) in intents {
+        for (mut intent, client_order_id, timing, cause) in intents {
             let origin_ns = if let Some(timing) = timing {
                 intent.decided_ns = timing.decided_ns;
                 timing.origin_ns.unwrap_or(origin_ns)
@@ -1435,6 +1564,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             {
                 self.wal.append(&WalRecord::Intent {
                     intent: intent.clone(),
+                    cause: cause.as_deref().cloned().map(Box::new),
                 })?;
                 let reason = "same-symbol sibling batch asks for conflicting leverage values";
                 self.wal.append(&WalRecord::Note {
@@ -1448,7 +1578,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 );
                 self.tell_refused(
                     &intent,
-                    "batch_leverage_conflict",
+                    Refused::detailed(code::BATCH_LEVERAGE_CONFLICT, reason),
                     client_order_id.as_deref(),
                 )?;
                 continue;
@@ -1459,6 +1589,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     client_order_id,
                     origin_ns,
                     timing,
+                    cause.as_deref(),
                     &mut batch_protection,
                 )
                 .await?
@@ -1496,12 +1627,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             reason = refusal.as_str(),
             "refused: this strategy cannot open exposure"
         );
-        self.tell_refused(intent, refusal.as_str(), client_order_id)?;
+        self.tell_refused(intent, Refused::opening(refusal), client_order_id)?;
         Ok(())
     }
 
     fn refuse(
         &mut self,
+        code: &'static str,
         client_order_id: &str,
         intent: &Intent,
         why: &str,
@@ -1515,7 +1647,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             if let Some(last) = self.refusals.get_mut(&key) {
                 last.suppressed += 1;
             }
-            self.tell_refused(intent, why, Some(client_order_id))?;
+            self.tell_refused(intent, Refused::detailed(code, why), Some(client_order_id))?;
             return Ok(());
         }
         let suppressed = self
@@ -1540,7 +1672,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             source: "engine".into(),
             text: format!("{client_order_id} not sent ({}): {why}{also}", intent.tag),
         })?;
-        self.tell_refused(intent, why, Some(client_order_id))?;
+        self.tell_refused(intent, Refused::detailed(code, why), Some(client_order_id))?;
         Ok(())
     }
 
@@ -1551,7 +1683,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub(super) fn tell_refused(
         &mut self,
         intent: &Intent,
-        reason: &str,
+        refused: Refused<'_>,
         client_order_id: Option<&str>,
     ) -> Result<(), EngineError> {
         // Bookkeeping first, so the strategy woken below already reads the
@@ -1561,10 +1693,21 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.books
             .covers
             .intent_refused(intent.strategy, intent.symbol, intent.reduce_only);
+        // Before the wake, so the record precedes anything the strategy does
+        // about it. Written every time; the `Note` beside it is suppressed.
+        self.wal.append(&WalRecord::IntentRefused {
+            wall_ts_ms: clock::wall_ms(),
+            strategy: intent.strategy,
+            symbol: intent.symbol,
+            tag: intent.tag.clone(),
+            client_order_id: client_order_id.map(str::to_owned),
+            code: refused.code.to_string(),
+            detail: refused.detail.to_string(),
+        })?;
         let event = EngineEvent::IntentRefused {
             symbol: intent.symbol,
             reduce_only: intent.reduce_only,
-            reason: reason.to_string(),
+            reason: refused.reason.to_string(),
         };
         self.deliver_callback_source(intent.strategy, event, client_order_id.map(str::to_owned))
     }

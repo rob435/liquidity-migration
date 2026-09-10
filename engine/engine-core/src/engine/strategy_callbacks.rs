@@ -131,8 +131,12 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
             self.validate_callback_actions(strategy, actions.make_contiguous())
                 .map_err(EngineError::Boot)?;
-            self.host
-                .capture_actions(strategy, &mut actions, snapshot.now_ns);
+            self.host.capture_actions(
+                strategy,
+                &mut actions,
+                snapshot.now_ns,
+                engine_types::Cause::from(&event),
+            );
             for timer in timers {
                 let remaining_ms = timer
                     .deadline_wall_ms

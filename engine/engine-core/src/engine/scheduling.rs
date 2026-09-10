@@ -963,9 +963,28 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 &self.books.orders,
                 &mut maintenance,
             );
+            let callback_wall_ms = clock::wall_ms();
             self.host
                 .pending
-                .extend(maintenance.into_iter().map(Into::into));
+                .extend(maintenance.into_iter().map(|action| {
+                    let client_order_id = match &action {
+                        Action::Amend {
+                            client_order_id, ..
+                        }
+                        | Action::Cancel {
+                            client_order_id, ..
+                        } => client_order_id.clone(),
+                        _ => String::new(),
+                    };
+                    crate::ctx::PendingAction {
+                        cause: Some(std::sync::Arc::new(engine_types::DecisionCause {
+                            callback_wall_ms,
+                            callback_id: None,
+                            causes: vec![engine_types::Cause::Working { client_order_id }],
+                        })),
+                        ..action.into()
+                    }
+                }));
         }
         // Through the ordinary queue, so the flood cap counts these too.
         self.drain(now).await
@@ -1097,6 +1116,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     effect,
                     callback_id,
                     timing,
+                    cause,
                 } = pending;
                 let Some(action) = self.handle_durable_action(action)? else {
                     self.complete_effect(effect)?;
@@ -1114,6 +1134,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     if let Action::Place(intent) = &action {
                         self.wal.append(&WalRecord::Intent {
                             intent: intent.clone(),
+                            cause: cause.as_deref().cloned().map(Box::new),
                         })?;
                         let order_id = effect.and_then(|key| {
                             self.host
@@ -1124,7 +1145,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                                 .cloned()
                                 .flatten()
                         });
-                        self.tell_refused(intent, "wake_action_limit", order_id.as_deref())?;
+                        self.tell_refused(
+                            intent,
+                            super::intent_admission::Refused::plain(
+                                super::intent_admission::code::WAKE_ACTION_LIMIT,
+                            ),
+                            order_id.as_deref(),
+                        )?;
                     }
                     self.complete_effect(effect)?;
                     continue;
@@ -1141,6 +1168,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             effect,
                             callback_id,
                             timing,
+                            cause,
                         },
                         progress.origin_ns,
                     );
@@ -1149,7 +1177,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
                 match action {
                     Action::Place(intent) => {
-                        placements.push((intent, effect, timing));
+                        placements.push((intent, effect, timing, cause));
                         if placements.len() == MAX_ORDERS_PER_BATCH {
                             let sent = self
                                 .flush_placements(
@@ -1526,6 +1554,7 @@ mod dispatch_budget_tests {
                     effect: None,
                     callback_id: None,
                     timing: None,
+                    cause: None,
                 },
                 1,
             );
