@@ -227,6 +227,7 @@ struct World {
     opts: SimOptions,
     paths: Paths,
     loaded: LoadedConfig,
+    config_identity: String,
     settings: EngineSection,
     sleeves: Vec<String>,
     scheduler: Scheduler,
@@ -301,6 +302,15 @@ impl World {
             .map_err(io)?;
 
         let loaded = config::load(&paths.config).map_err(|e| boot(format!("config: {e}")))?;
+        // The Boot record's config identity. The written config names this
+        // seed's scratch directory in `operational_profile_path`, and two runs
+        // of one seed live in two directories, so the identity is taken with
+        // that path abstracted: `--twice` compares what the seed decided.
+        let config_identity = {
+            let text = std::fs::read_to_string(&paths.config).map_err(io)?;
+            let dir = paths.dir.display().to_string();
+            hex::encode(Sha256::digest(text.replace(&dir, "<dir>").as_bytes()))
+        };
         let mut settings = loaded.config.engine.clone();
         settings.wal_path = paths.wal.clone();
         settings.trades_path = Some(paths.trades.clone());
@@ -419,6 +429,7 @@ impl World {
                 opts,
                 paths,
                 loaded,
+                config_identity,
                 settings,
                 sleeves,
                 scheduler,
@@ -491,7 +502,7 @@ impl World {
         let pump_task = tokio::spawn(pump(self.cursor.clone(), self.scheduler.clone()));
         let mut engine = match Engine::boot_as_exact(
             &self.settings,
-            &self.loaded.sha256,
+            &self.config_identity,
             wal,
             risk,
             gateway,

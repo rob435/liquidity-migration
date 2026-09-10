@@ -656,9 +656,9 @@ engine/target/release/engine-tools sim --seed 4 --seconds 300 --crashes 1 --faul
 engine/target/release/engine-tools sim --seed 100 --seeds 24 --faults light --twice
 
 # The funded forward test: the mexc template's own blocks against the producer.
-# Byte identity holds under a paused clock, which is where the suite checks it;
-# the engine's dispatch and drain deadlines read the wall clock, so two CLI runs
-# of one seed can take different paths.
+# Two runs of one seed write one log, from the CLI as from the paused-clock
+# suite: the Boot record's config identity is taken with the seed's scratch
+# directory abstracted out of `operational_profile_path`.
 engine/target/release/engine-tools sim --strategies mexc --hours 3 --pump 1.0 \
   --crashes 0 --faults none --keep --out /tmp/sim-mexc --report /tmp/sim-mexc/report.json
 engine/target/release/engine-tools sim --strategies mexc --hours 2 --pump 1.0 --shock off \
