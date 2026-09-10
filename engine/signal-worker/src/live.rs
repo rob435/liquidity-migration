@@ -181,6 +181,7 @@ struct LaneState {
     funding_ready: bool,
     repair_failure_count: usize,
     repair_failure_samples: Vec<(String, String)>,
+    repair_restated: Vec<(String, i64)>,
 }
 
 enum LaneCompletion {
@@ -399,23 +400,35 @@ fn validate_whale_source_against_state(
     Ok(())
 }
 
-fn validate_kline_source_against_state(
+/// Drop the rows a fetch restates for hours this process already holds, and
+/// name them. A candle closed on the stream can be provisional by the last
+/// trades of its hour, so the venue's settled row later disagrees; history is
+/// first seen, first kept, and a repair that refused such a row would run
+/// again every pass and never close the gap. A fetch that contradicts itself
+/// is still refused.
+fn reconcile_kline_source_against_state(
     state: &crate::worker::WorkerState,
-    fetched: &FetchedKlineJobs,
-) -> Result<(), WorkerError> {
+    fetched: &mut FetchedKlineJobs,
+) -> Result<Vec<(String, i64)>, WorkerError> {
+    let mut restated = Vec::new();
     let mut seen = BTreeMap::new();
-    for (symbol, batch) in &fetched.batches {
-        for row in normalize_kline_rows(symbol, batch.available_at_ms, &batch.rows)? {
+    for (symbol, batch) in &mut fetched.batches {
+        let mut kept = Vec::with_capacity(batch.rows.len());
+        for raw in std::mem::take(&mut batch.rows) {
+            let Some(row) =
+                normalize_kline_rows(symbol, batch.available_at_ms, std::slice::from_ref(&raw))?
+                    .pop()
+            else {
+                continue;
+            };
             if let Some(existing) = state
                 .klines
                 .get(&row.symbol)
                 .and_then(|history| history.get(&row.open_ts_ms))
             {
                 if !same_kline_value(existing, &row) {
-                    return Err(WorkerError::input(format!(
-                        "kline history rewrote timestamp {}",
-                        row.open_ts_ms
-                    )));
+                    restated.push((row.symbol.clone(), row.open_ts_ms));
+                    continue;
                 }
             }
             let key = (row.symbol.clone(), row.open_ts_ms);
@@ -427,9 +440,20 @@ fn validate_kline_source_against_state(
                     )));
                 }
             }
+            kept.push(raw);
         }
+        batch.rows = kept;
     }
-    Ok(())
+    Ok(restated)
+}
+
+fn restated_summary(restated: &[(String, i64)]) -> String {
+    restated
+        .iter()
+        .take(3)
+        .map(|(symbol, open_ts_ms)| format!("{symbol}@{open_ts_ms}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn same_kline_value(left: &crate::model::HourlyKline, right: &crate::model::HourlyKline) -> bool {
@@ -1017,6 +1041,23 @@ impl LiveRunner {
             batch
                 .rows
                 .sort_by_key(|row| wire_i64(row.first(), "Bybit WebSocket kline timestamp").ok());
+        }
+        let mut fetched = FetchedKlineJobs {
+            batches: grouped.into_iter().collect(),
+            failures: Vec::new(),
+        };
+        // Restated rows go before the coverage stamp: a row this process
+        // already holds adds nothing, and an emptied batch writes nothing.
+        let restated =
+            reconcile_kline_source_against_state(self.durable.worker().state(), &mut fetched)?;
+        if !restated.is_empty() {
+            eprintln!(
+                "signal-worker: kline lane: {} restated closed candle(s) kept as first seen: {}",
+                restated.len(),
+                restated_summary(&restated)
+            );
+        }
+        for (_, batch) in &mut fetched.batches {
             let opens = batch
                 .rows
                 .iter()
@@ -1031,11 +1072,6 @@ impl LiveRunner {
                 batch.checked_through_ms = opens.last().map(|last| last.saturating_add(HOUR_MS));
             }
         }
-        let fetched = FetchedKlineJobs {
-            batches: grouped.into_iter().collect(),
-            failures: Vec::new(),
-        };
-        validate_kline_source_against_state(self.durable.worker().state(), &fetched)?;
         Ok(Some(fetched))
     }
 

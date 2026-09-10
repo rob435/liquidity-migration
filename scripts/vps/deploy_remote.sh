@@ -55,6 +55,9 @@ SOAK_OVERRIDE=20-demo-soak.conf
 # heartbeat. Longer than the engine's and the signal worker's restart cycle
 # (RestartSec=5 plus the seconds each spends before it aborts).
 HEARTBEAT_SETTLE_SECONDS=12
+# A worker replaces its own stream when the instrument lane lands and reads
+# degraded for the seconds the socket is down; one heartbeat is not a verdict.
+HEARTBEAT_UNHEALTHY_SAMPLES=5
 
 NOTIFICATIONS_ENVIRONMENT=/etc/liquidity-migration/notifications.env
 ONCALL_ENVIRONMENT=/etc/liquidity-migration/oncall.env
@@ -181,7 +184,7 @@ funded_credential_env() {
 # on every restart: freshness alone cannot tell a live unit from a restarting
 # one. The unit must also hold one main process across HEARTBEAT_SETTLE_SECONDS.
 wait_fresh_heartbeat() {
-    local unit="$1" heartbeat="$2" since="$3" _attempt written pid restarts restarting=0
+    local unit="$1" heartbeat="$2" since="$3" _attempt written pid restarts restarting=0 unhealthy=0
     for _attempt in $(seq 1 90); do
         if [ "$(systemctl show --property=ActiveState --value "$unit")" = "active" ] \
             && [ -f "$heartbeat" ]; then
@@ -193,11 +196,16 @@ wait_fresh_heartbeat() {
                 if [ "$(systemctl show --property=ActiveState --value "$unit")" = "active" ] \
                     && [ "$(systemctl show --property=MainPID --value "$unit")" = "$pid" ] \
                     && [ "$(systemctl show --property=NRestarts --value "$unit")" = "$restarts" ]; then
-                    "$PYTHON" "$REPO_DIR/scripts/runtime/check_fleet_liveness.py" \
-                        --check-heartbeat "$unit" "$heartbeat" "$pid" "$since" \
+                    if "$PYTHON" "$REPO_DIR/scripts/runtime/check_fleet_liveness.py" \
+                        --check-heartbeat "$unit" "$heartbeat" "$pid" "$since"; then
+                        echo "heartbeat-ok unit=$unit age=$(( $(date +%s) - written ))s pid=$pid"
+                        return 0
+                    fi
+                    unhealthy=$((unhealthy + 1))
+                    [ "$unhealthy" -lt "$HEARTBEAT_UNHEALTHY_SAMPLES" ] \
                         || fail "$unit published an unhealthy heartbeat after startup"
-                    echo "heartbeat-ok unit=$unit age=$(( $(date +%s) - written ))s pid=$pid"
-                    return 0
+                    echo "heartbeat-unhealthy unit=$unit sample=$unhealthy pid=$pid; sampling again"
+                    continue
                 fi
                 restarting=1
                 continue

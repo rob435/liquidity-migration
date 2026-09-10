@@ -1663,7 +1663,12 @@ async fn revised_source_history_is_rejected_before_durable_mutation() {
             },
         )
         .expect("revised repair history stays lane-local");
-    assert!(!repair_ack.await.unwrap());
+    // The restated row is dropped, nothing is written, and the lane goes on.
+    assert!(repair_ack.await.unwrap());
+    assert_eq!(
+        lanes.repair_restated,
+        vec![("BTCUSDT".to_owned(), open_ts_ms)]
+    );
     assert_eq!(
         serde_json::to_vec(runner.durable.worker().state()).unwrap(),
         state_before
@@ -1678,15 +1683,14 @@ async fn revised_source_history_is_rejected_before_durable_mutation() {
             row: kline_wire(open_ts_ms, "101"),
         },
     );
-    assert!(!runner
+    // A stream candle that restates a held hour is dropped the same way:
+    // first seen, first kept; nothing is written and no gap opens for it.
+    assert!(runner
         .flush_pending_klines_or_recover(&mut stream, &mut pending, &lane_tx, &mut lanes)
-        .expect("a durable-history WS rewrite stays source-local"));
+        .expect("a restated WS candle is dropped, not a fault"));
     assert!(pending.is_empty());
-    assert!(stream.health().gap_open);
-    assert!(
-        lanes.repair,
-        "the durable WS conflict schedules REST repair"
-    );
+    assert!(!stream.health().gap_open);
+    assert!(!lanes.repair);
     assert_eq!(
         serde_json::to_vec(runner.durable.worker().state()).unwrap(),
         state_before
@@ -2279,6 +2283,69 @@ fn the_gate_file_is_read_whole_and_an_absent_one_is_nothing() {
     let error = super::read_gate_candidates(&path).unwrap_err();
     assert!(error.is_lane_local_source_failure());
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_restated_closed_candle_is_kept_as_first_seen_and_named() {
+    use super::reconcile_kline_source_against_state;
+    let worker = SignalWorker::new(checked_demo_config()).unwrap();
+    let mut state = worker.state().clone();
+    // 2026-09-10 16:00 UTC, a closed hour.
+    let t = 1_789_056_000_000_i64;
+    state.klines.entry("HYPEUSDT".into()).or_default().insert(
+        t,
+        HourlyKline {
+            symbol: "HYPEUSDT".into(),
+            open_ts_ms: t,
+            available_at_ms: t + HOUR_MS,
+            open: 100.0,
+            high: 110.0,
+            low: 90.0,
+            close: 99.933,
+            volume_base: 1.0,
+            turnover_quote: 100.0,
+        },
+    );
+    let batch = |rows: Vec<Vec<Value>>| FetchedKlineJobs {
+        batches: vec![(
+            "HYPEUSDT".into(),
+            FetchedKlineBatch {
+                rows,
+                available_at_ms: t + 3 * HOUR_MS,
+                checked_from_ms: Some(t),
+                checked_through_ms: Some(t + 2 * HOUR_MS),
+            },
+        )],
+        failures: Vec::new(),
+    };
+
+    // The venue settles the held hour differently: the held row stays, the
+    // restated row is dropped and named, the new hour goes through.
+    let mut fetched = batch(vec![
+        kline_wire(t, "99.937"),
+        kline_wire(t + HOUR_MS, "100"),
+    ]);
+    let restated = reconcile_kline_source_against_state(&state, &mut fetched).unwrap();
+    assert_eq!(restated, vec![("HYPEUSDT".to_owned(), t)]);
+    assert_eq!(
+        fetched.batches[0].1.rows,
+        vec![kline_wire(t + HOUR_MS, "100")]
+    );
+
+    // The same value is not a restatement.
+    let mut same = batch(vec![kline_wire(t, "99.933")]);
+    assert!(reconcile_kline_source_against_state(&state, &mut same)
+        .unwrap()
+        .is_empty());
+    assert_eq!(same.batches[0].1.rows.len(), 1);
+
+    // A fetch that contradicts itself is still refused.
+    let mut torn = batch(vec![
+        kline_wire(t + HOUR_MS, "100"),
+        kline_wire(t + HOUR_MS, "101"),
+    ]);
+    let error = reconcile_kline_source_against_state(&state, &mut torn).unwrap_err();
+    assert!(error.to_string().contains("kline fetch rewrote"), "{error}");
 }
 
 #[test]

@@ -258,10 +258,12 @@ impl LiveRunner {
     ) -> Result<(), WorkerError> {
         let LaneContext { lanes, .. } = context;
         let continue_lane = match result {
-            Ok(fetched) => {
-                if let Err(error) =
-                    validate_kline_source_against_state(self.durable.worker().state(), &fetched)
-                {
+            Ok(mut fetched) => {
+                let reconciled = reconcile_kline_source_against_state(
+                    self.durable.worker().state(),
+                    &mut fetched,
+                );
+                if let Err(error) = reconciled {
                     let sample = error.to_string();
                     lane_source_failure("kline repair lane chunk", error)?;
                     lanes.repair_failure_count = lanes.repair_failure_count.saturating_add(1);
@@ -276,6 +278,9 @@ impl LiveRunner {
                     }
                     let _ = resume.send(false);
                     return Ok(());
+                }
+                if let Ok(restated) = reconciled {
+                    lanes.repair_restated.extend(restated);
                 }
                 let committed = self.commit_kline_batches(fetched.batches)?;
                 lanes.repair_failure_count = lanes
@@ -356,6 +361,14 @@ impl LiveRunner {
         }
         lanes.repair_failure_count = 0;
         lanes.repair_failure_samples.clear();
+        if !lanes.repair_restated.is_empty() {
+            eprintln!(
+                "signal-worker: kline repair through {end_ms}: {} restated closed candle(s) kept as first seen: {}",
+                lanes.repair_restated.len(),
+                restated_summary(&lanes.repair_restated)
+            );
+            lanes.repair_restated.clear();
+        }
         if let Some(gap_symbols) = self.long_gap_symbols(end_ms) {
             self.long_watermark(end_ms, gap_symbols)?;
         }

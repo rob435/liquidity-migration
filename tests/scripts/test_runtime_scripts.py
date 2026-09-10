@@ -1177,6 +1177,7 @@ def test_a_realm_start_runs_its_liveness_watchdog_after_every_unit_it_watches(
 
 def _run_heartbeat_gate(
     tmp_path: Path, name: str, crash_loop: bool, unhealthy: str | None = None,
+    heal_at_sleep: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """`wait_fresh_heartbeat` against a stubbed unit that always writes a
     fresh heartbeat, restarting between reads only when crash_loop is set."""
@@ -1211,9 +1212,27 @@ esac
     )
     systemctl.chmod(0o755)
     # The gate's own waits; the loop under test does not need wall-clock time.
+    # With heal_at_sleep set, the Nth wait is when the unit's heartbeat turns
+    # healthy, the way a worker's own stream reconfigure passes.
     sleep = bin_dir / "sleep"
-    sleep.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    sleep.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, pathlib\n"
+        "counter = pathlib.Path(os.environ['LM_TEST_SLEEPS'])\n"
+        "count = int(counter.read_text() or '0') + 1\n"
+        "counter.write_text(str(count))\n"
+        "heal_at = os.environ.get('LM_TEST_HEAL_AT_SLEEP')\n"
+        "if heal_at and count == int(heal_at):\n"
+        "    path = pathlib.Path(os.environ['LM_TEST_HEARTBEAT'])\n"
+        "    payload = json.loads(path.read_text())\n"
+        "    payload['may_open'] = True\n"
+        "    payload['strategy_errors'] = []\n"
+        "    path.write_text(json.dumps(payload))\n",
+        encoding="utf-8",
+    )
     sleep.chmod(0o755)
+    sleeps = tmp_path / name / "sleeps"
+    sleeps.write_text("0", encoding="utf-8")
     stat = bin_dir / "stat"
     stat.write_text(
         f"#!{sys.executable}\n"
@@ -1240,11 +1259,16 @@ esac
         (line for line in remote.splitlines() if line.startswith("HEARTBEAT_SETTLE_SECONDS=")),
         "HEARTBEAT_SETTLE_SECONDS=12",
     )
+    samples = next(
+        (line for line in remote.splitlines() if line.startswith("HEARTBEAT_UNHEALTHY_SAMPLES=")),
+        "HEARTBEAT_UNHEALTHY_SAMPLES=5",
+    )
     harness = "\n".join(
         [
             "set -euo pipefail",
             'fail() { echo "deploy failed: $*" >&2; exit 1; }',
             settle,
+            samples,
             _function(remote, "wait_fresh_heartbeat"),
             f'wait_fresh_heartbeat liquidity-migration-engine.service "{heartbeat}" 1',
         ]
@@ -1257,6 +1281,9 @@ esac
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "LM_TEST_CRASH_LOOP": "1" if crash_loop else "0",
             "LM_TEST_RESTARTS": str(counter),
+            "LM_TEST_SLEEPS": str(sleeps),
+            "LM_TEST_HEARTBEAT": str(heartbeat),
+            **({"LM_TEST_HEAL_AT_SLEEP": str(heal_at_sleep)} if heal_at_sleep else {}),
             "PYTHON": sys.executable,
             "REPO_DIR": str(ROOT),
         },
@@ -1295,6 +1322,21 @@ def test_stable_fresh_but_unhealthy_engine_cannot_pass_handover(tmp_path: Path, 
     result = _run_heartbeat_gate(tmp_path, unhealthy, crash_loop=False, unhealthy=unhealthy)
     assert result.returncode != 0, "fresh heartbeat with a stable process incorrectly passed unhealthy handover"
     assert "heartbeat-ok" not in result.stdout
+    assert result.stdout.count("heartbeat-unhealthy") == 4, result.stdout
+    assert "published an unhealthy heartbeat after startup" in result.stderr
+
+
+def test_the_heartbeat_gate_samples_again_when_the_first_heartbeat_is_unhealthy(tmp_path: Path) -> None:
+    # A worker replaces its own stream when the instrument lane lands and
+    # reads degraded for the seconds the socket is down; the gate samples
+    # again instead of failing the handover on that one heartbeat.
+    result = _run_heartbeat_gate(
+        tmp_path, "heals", crash_loop=False, unhealthy="latched", heal_at_sleep=2,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("heartbeat-unhealthy") == 1, result.stdout
+    assert "sample=1" in result.stdout
+    assert "heartbeat-ok unit=liquidity-migration-engine.service" in result.stdout
 
 
 def test_the_heartbeat_gate_reads_unit_state_and_not_only_file_freshness() -> None:
