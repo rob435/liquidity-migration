@@ -22,9 +22,9 @@ Frozen column list, in order:
     gap                    ms since the symbol's previous panel day
     ret                    close / previous close - 1, null unless gap is one day
     lret                   log(1 + ret)
-    adv_30, adv_90         trailing mean turnover, 30 of 30 days and 60 of 90 days
-    age_days               panel days seen so far for the symbol, this day included
-    rv_30, rv_7, rv_90     trailing std of lret over 30 (20 min), 7 (5 min), 90 (60 min) days
+    adv_30, adv_90         trailing mean turnover, 30 of 30 and 60 of 90 calendar days
+    age_days               panel days seen so far for the symbol, this day included: rows, not a span
+    rv_30, rv_7, rv_90     trailing std of lret over 30 (20 min), 7 (5 min), 90 (60 min) calendar days
     adv_rank               rank of adv_30 among the day's names, 1 is the largest
 
 ``ret`` is the simple close-to-close return the backtester compounds; the
@@ -36,7 +36,7 @@ from pathlib import Path
 
 import polars as pl
 
-from liquidity_migration.core._common import MS_PER_DAY
+from liquidity_migration.core._common import MS_PER_DAY, calendar_roll
 
 FROZEN_COLUMNS: tuple[str, ...] = (
     "symbol", "day", "open", "high", "low", "close", "turnover", "n_bars",
@@ -53,6 +53,13 @@ def _parts(inputs_dir: Path, dataset: str) -> list[Path]:
 
 def _day(col: str = "ts_ms") -> pl.Expr:
     return (pl.col(col) // MS_PER_DAY * MS_PER_DAY).alias("day")
+
+
+def _roll(col: str, agg: str, days: int, min_samples: int) -> pl.Expr:
+    """Trailing ``agg`` of ``col`` over ``days`` calendar days of one symbol, ending on the row's day."""
+    return calendar_roll(
+        pl.col(col), agg, days, shifted=False, min_samples=min_samples, time_col="day", period_ms=MS_PER_DAY
+    ).over("symbol")
 
 
 def _daily_bars(parts: list[Path]) -> pl.DataFrame:
@@ -151,14 +158,17 @@ def build_daily_panel(inputs_dir: str | Path, out_path: str | Path | None = None
         )
         .with_columns(
             (pl.col("ret") + 1.0).log().alias("lret"),
-            pl.col("turnover").rolling_mean(30, min_samples=30).over("symbol").alias("adv_30"),
-            pl.col("turnover").rolling_mean(90, min_samples=60).over("symbol").alias("adv_90"),
+            # The panel is sparse: one row per day the symbol traded, so a
+            # calendar window spans only days it was there for, and min_samples
+            # counts those rows.
+            _roll("turnover", "mean", 30, 30).alias("adv_30"),
+            _roll("turnover", "mean", 90, 60).alias("adv_90"),
             pl.col("close").cum_count().over("symbol").alias("age_days"),
         )
         .with_columns(
-            pl.col("lret").rolling_std(30, min_samples=20).over("symbol").alias("rv_30"),
-            pl.col("lret").rolling_std(7, min_samples=5).over("symbol").alias("rv_7"),
-            pl.col("lret").rolling_std(90, min_samples=60).over("symbol").alias("rv_90"),
+            _roll("lret", "std", 30, 20).alias("rv_30"),
+            _roll("lret", "std", 7, 5).alias("rv_7"),
+            _roll("lret", "std", 90, 60).alias("rv_90"),
         )
         .with_columns(
             pl.when(pl.col("adv_30").is_not_null())

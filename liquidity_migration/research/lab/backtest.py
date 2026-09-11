@@ -1,10 +1,18 @@
 """Daily-panel backtester for cross-sectional and time-series rules.
 
 A signal known at the close of day D sets the weight held over day D+1
-(close to close, ``lag`` days after the decision). Costs are one-way turnover
-times the per-side fee. Funding: a long pays the day's summed settlement rate.
-Book returns are simple daily returns; equity compounds. Annualisation uses
-365 days.
+(close to close, ``lag`` days after the decision). Funding: a long pays the
+day's summed settlement rate. Book returns are simple daily returns; equity
+compounds. Annualisation uses 365 days.
+
+Position model: daily rebalance to target equity weights; turnover includes
+the rebalance back from price drift. Costs are that turnover times the
+per-side fee.
+
+``FEE_PER_SIDE`` is one all-in per-side constant (fee plus slippage) charged
+to every symbol, not the per-symbol authenticated snapshot
+``configs/bybit_fee_rates.json`` that ``engine backtest`` charges. These are
+daily equity-weight results, not native exact-quantity execution.
 """
 from __future__ import annotations
 
@@ -68,7 +76,7 @@ class Panel:
         self.high = mat("high")
         self.low = mat("low")
         self.open = mat("open")
-        self.funding = mat("funding_day", 0.0)
+        self.funding = mat("funding_day")
         self.adv = mat("adv_30")
         self.rv30 = mat("rv_30")
         self.rv7 = mat("rv_7")
@@ -117,9 +125,13 @@ def run_book(
 ) -> dict[str, Any]:
     """weights[t] is the target weight decided at the close of day t.
 
-    The weight earns ret[t+lag]. Turnover is charged when the held weight
-    changes. Returns the daily series: net, gross, fund, cost, turnover,
-    gross_exp, n_pos, and the held weights.
+    The weight earns ret[t+lag]. Turnover is the distance from the weights the
+    previous day's prices left behind to today's target, so a held position
+    pays for the rebalance back to its target. Missing ret and funding cells
+    count as zero; ``missing_ret_exp`` and ``missing_fund_exp`` carry the gross
+    weight standing on those cells. Returns the daily series: net, gross, fund,
+    cost, turnover, gross_exp, n_pos, missing_ret_exp, missing_fund_exp, and
+    the held weights.
     """
     w = np.nan_to_num(weights, nan=0.0)
     w_held = np.zeros_like(w)
@@ -131,17 +143,28 @@ def run_book(
     f = np.nan_to_num(P.funding, nan=0.0)
     gross_pnl = (w_held * r).sum(axis=1)
     fund_pnl = -(w_held * f).sum(axis=1) if funding else np.zeros(P.n)
-    turnover = np.abs(np.diff(w_held, axis=0, prepend=np.zeros((1, P.m)))).sum(axis=1)
+    # A book with no equity left has nothing to rebalance against: no drift.
+    equity = 1.0 + gross_pnl
+    alive = equity > 0
+    w_drift = np.where(alive[:, None], w_held * (1.0 + r) / np.where(alive, equity, 1.0)[:, None], w_held)
+    prior = np.vstack((np.zeros((1, P.m)), w_drift))[: P.n]
+    turnover = np.abs(w_held - prior).sum(axis=1)
     cost = turnover * fee
     net = gross_pnl + fund_pnl - cost
     return dict(
         net=net, gross=gross_pnl, fund=fund_pnl, cost=cost, turnover=turnover,
         gross_exp=np.abs(w_held).sum(axis=1), n_pos=(w_held != 0).sum(axis=1), w_held=w_held,
+        missing_ret_exp=(np.abs(w_held) * np.isnan(P.ret)).sum(axis=1),
+        missing_fund_exp=(np.abs(w_held) * np.isnan(P.funding)).sum(axis=1),
     )
 
 
 def stats(net: np.ndarray, days: np.ndarray | None = None, active_only: bool = False) -> dict[str, Any]:
-    """Summary of a daily return series; only ``n`` when fewer than ten days."""
+    """Summary of a daily return series; only ``n`` when fewer than ten days.
+
+    ``maxdd`` measures against a peak that starts at the initial capital, so a
+    book that only ever loses still reports a drawdown.
+    """
     x = np.asarray(net, dtype=float).copy()
     if active_only:
         x = x[x != 0]
@@ -149,7 +172,7 @@ def stats(net: np.ndarray, days: np.ndarray | None = None, active_only: bool = F
         return dict(n=len(x))
     mu, sd = x.mean(), x.std(ddof=1)
     eq = np.cumprod(1 + x)
-    dd = eq / np.maximum.accumulate(eq) - 1
+    dd = eq / np.maximum(np.maximum.accumulate(eq), 1.0) - 1
     yrs = len(x) / DAYS_PER_YEAR
     return dict(
         n=len(x),
@@ -208,7 +231,10 @@ def vol_target(
     scale = np.clip(target / np.where(np.isnan(s) | (s == 0), np.nan, s), lo, hi)
     scale = np.nan_to_num(scale, nan=1.0)
     sc = np.ones_like(net)
-    sc[lag:] = scale[:-lag]
+    if lag == 0:
+        sc[:] = scale
+    else:
+        sc[lag:] = scale[:-lag]
     return net * sc, sc
 
 

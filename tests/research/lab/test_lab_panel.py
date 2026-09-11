@@ -149,3 +149,67 @@ def test_missing_klines_is_an_error(tmp_path: Path) -> None:
     (tmp_path / "inputs").mkdir()
     with pytest.raises(FileNotFoundError):
         build_daily_panel(tmp_path / "inputs")
+
+
+def _one_bar_a_day(inputs: Path, days: int, *, skip: set[int] = frozenset(), spikes: dict[int, float] | None = None,
+                   turnover: dict[int, float] | None = None) -> None:
+    rows = []
+    price = 100.0
+    for d in range(days):
+        price *= 1.0 + (spikes or {}).get(d, 0.001 * ((d % 5) - 2))
+        if d in skip:
+            continue
+        rows.append(dict(ts_ms=T0 + d * DAY, symbol="AAA", open=price, high=price, low=price, close=price,
+                         turnover_quote=(turnover or {}).get(d, 10.0 + d)))
+    pl.DataFrame(rows).write_parquet(inputs / "klines_1h.parquet")
+
+
+def test_calendar_windows_match_the_row_windows_on_contiguous_days(tmp_path: Path) -> None:
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    _one_bar_a_day(inputs, 120)
+    panel = build_daily_panel(inputs).sort(["symbol", "day"])
+    both = panel.with_columns(
+        pl.col("turnover").rolling_mean(30, min_samples=30).over("symbol").alias("adv_30_row"),
+        pl.col("turnover").rolling_mean(90, min_samples=60).over("symbol").alias("adv_90_row"),
+        pl.col("lret").rolling_std(30, min_samples=20).over("symbol").alias("rv_30_row"),
+        pl.col("lret").rolling_std(7, min_samples=5).over("symbol").alias("rv_7_row"),
+        pl.col("lret").rolling_std(90, min_samples=60).over("symbol").alias("rv_90_row"),
+    )
+    for name in ("adv_30", "adv_90", "rv_30", "rv_7", "rv_90"):
+        got, want = both[name].to_list(), both[f"{name}_row"].to_list()
+        assert [v is None for v in got] == [v is None for v in want]
+        assert any(v is not None for v in got)
+        for a, b in zip(got, want):
+            if a is not None:
+                assert a == pytest.approx(b)
+
+
+def test_a_missing_day_shortens_the_window_instead_of_stretching_it(tmp_path: Path) -> None:
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    # Day 5 never traded, day 0 turns over a thousand times the rest, day 1 jumps 20%.
+    _one_bar_a_day(inputs, 45, skip={5}, spikes={1: 0.2}, turnover={0: 1e4})
+    panel = build_daily_panel(inputs).sort("day")
+    row = {int((day - T0) // DAY): i for i, day in enumerate(panel["day"].to_list())}
+    with_row_windows = panel.with_columns(
+        pl.col("turnover").rolling_mean(30, min_samples=30).alias("adv_30_row"),
+        pl.col("lret").rolling_std(30, min_samples=20).alias("rv_30_row"),
+    )
+
+    # 30 rows ending on day 30 span 31 calendar days and reach back to day 0.
+    assert with_row_windows["adv_30_row"][row[30]] == pytest.approx(
+        panel.filter(pl.col("day") <= T0 + 30 * DAY)["turnover"].mean()
+    )
+    # The calendar window (day 0, day 30] holds 29 of the 30 days it needs.
+    assert panel["adv_30"][row[30]] is None
+    first = next(i for i, v in enumerate(panel["adv_30"].to_list()) if v is not None)
+    assert int((panel["day"][first] - T0) // DAY) == 35
+    assert panel["adv_30"][first] == pytest.approx(
+        panel.filter((pl.col("day") > T0 + 5 * DAY) & (pl.col("day") <= T0 + 35 * DAY))["turnover"].mean()
+    )
+
+    # rv_30 on day 31 covers (day 1, day 31], so the day 1 jump is outside it.
+    tail = panel.filter((pl.col("day") > T0 + 1 * DAY) & (pl.col("day") <= T0 + 31 * DAY))["lret"]
+    assert panel["rv_30"][row[31]] == pytest.approx(tail.std())
+    assert with_row_windows["rv_30_row"][row[31]] > panel["rv_30"][row[31]] * 2

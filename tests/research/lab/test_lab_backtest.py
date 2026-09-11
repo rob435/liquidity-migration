@@ -47,9 +47,9 @@ def test_panel_matrices_are_days_by_symbols() -> None:
     np.testing.assert_allclose(P.ret[:, 0], ret_a)
     np.testing.assert_allclose(P.ret[:, 1], ret_b)
     assert P.funding[3, 1] == -0.002
-    # a missing (day, symbol) cell reads NaN for returns and 0 for funding
+    # a missing (day, symbol) cell reads NaN for returns and for funding
     P2 = Panel(frame.filter(~((pl.col("symbol") == "BBB") & (pl.col("day") == T0 + 2 * DAY))))
-    assert math.isnan(P2.ret[2, 1]) and P2.funding[2, 1] == 0.0
+    assert math.isnan(P2.ret[2, 1]) and math.isnan(P2.funding[2, 1])
     assert P.universe(top=1, min_age=1).sum() == 12
     assert P.universe(top=1).sum() == 0  # the default asks for 30 days of history
 
@@ -67,7 +67,17 @@ def test_run_book_charges_turnover_and_funding_one_day_after_the_decision() -> N
     assert held[1].tolist() == [1.0, 0.0]
     assert held[6].tolist() == [1.0, -0.5]
     assert held[9].tolist() == [-1.0, -0.5]
-    np.testing.assert_allclose(r["turnover"], [0, 1, 0, 0, 0, 0, 0.5, 0, 0, 2, 0, 0])
+    # Hand-computed: the target change plus the rebalance back from the previous
+    # day's price drift. Days 2..5 hold one fully-invested long, which drifts
+    # nowhere: a 100% weight stays 100% whatever the price does.
+    np.testing.assert_allclose(
+        r["turnover"],
+        [
+            0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.5,
+            0.007389162561576346, 0.007389162561576457, 2.007389162561576,
+            0.05457501161170453, 0.059329920893438914,
+        ],
+    )
     np.testing.assert_allclose(r["cost"], r["turnover"] * FEE_PER_SIDE)
     # day 6: long AAA earns ret_a, short BBB earns -0.5 ret_b; funding is paid by the long, received by the short
     assert r["gross"][6] == pytest.approx(ret_a[6] - 0.5 * ret_b[6])
@@ -75,6 +85,49 @@ def test_run_book_charges_turnover_and_funding_one_day_after_the_decision() -> N
     np.testing.assert_allclose(r["net"], r["gross"] + r["fund"] - r["cost"])
     assert r["gross_exp"][9] == 1.5 and r["n_pos"][9] == 2 and r["n_pos"][0] == 0
     assert run_book(P, w, lag=1, funding=False)["fund"].tolist() == [0.0] * 12
+
+
+def _two_day_panel(returns: list[tuple[float, float]]) -> Panel:
+    rows = []
+    for d, (ra, rb) in enumerate(returns):
+        for sym, r in (("AAA", ra), ("BBB", rb)):
+            rows.append(
+                dict(symbol=sym, day=T0 + d * DAY, ret=r, close=100.0, high=100.0, low=100.0, open=100.0,
+                     funding_day=0.0, adv_30=1e7, rv_30=0.02, rv_7=0.02, rv_90=0.02, age_days=d + 1,
+                     adv_rank=1.0, oi_value=1.0, premium_mean=0.0)
+            )
+    return Panel(pl.DataFrame(rows))
+
+
+def test_run_book_charges_the_rebalance_back_from_price_drift() -> None:
+    # 50/50 in two names, AAA doubles on day 0, the day 1 target is unchanged:
+    # the book opens day 1 at 2/3 and 1/3, so the rebalance trades a third of it.
+    P = _two_day_panel([(1.0, 0.0), (0.0, 0.0)])
+    r = run_book(P, np.full((2, 2), 0.5), lag=0, funding=False)
+    assert r["turnover"][0] == pytest.approx(1.0)
+    assert r["turnover"][1] == pytest.approx(1 / 3)
+    assert r["cost"][1] == pytest.approx(2.593333333e-4)
+
+
+def test_run_book_drift_does_not_divide_by_a_wiped_out_book() -> None:
+    P = _two_day_panel([(-1.0, -1.0), (0.0, 0.0)])
+    r = run_book(P, np.full((2, 2), 0.5), lag=0, funding=False)
+    assert r["turnover"].tolist() == [1.0, 0.0]
+
+
+def test_run_book_reports_the_weight_standing_on_missing_cells() -> None:
+    frame, ret_a, _ = _panel()
+    P = Panel(frame.filter(~((pl.col("symbol") == "BBB") & (pl.col("day") == T0 + 4 * DAY))))
+    w = np.zeros((12, 2))
+    w[:, 0] = 1.0
+    w[:, 1] = -0.5
+    r = run_book(P, w, lag=1)
+    assert r["missing_ret_exp"][4] == pytest.approx(0.5)
+    assert r["missing_fund_exp"][4] == pytest.approx(0.5)
+    assert r["missing_ret_exp"][3] == 0.0 and r["missing_fund_exp"][3] == 0.0
+    # the missing cell still earns and pays zero, it is not dropped from the book
+    assert r["gross"][4] == pytest.approx(ret_a[4])
+    assert r["fund"][4] == pytest.approx(-0.001)
 
 
 def test_run_book_lag_zero_holds_the_decision_day_and_lag_two_shifts_twice() -> None:
@@ -105,6 +158,14 @@ def test_stats_on_a_known_alternating_series() -> None:
     flat = stats(np.zeros(12))
     assert math.isnan(flat["sharpe"]) and math.isnan(flat["t"]) and flat["total"] == 0.0
     assert "Sharpe" in fmt(s) and fmt({"n": 5}) == "n=5"
+
+
+def test_maxdd_measures_from_the_initial_capital() -> None:
+    # A book that loses a tenth on day one and never moves again is 10% down,
+    # not flat: the peak starts at the capital, before the first return.
+    x = np.concatenate(([-0.1], np.zeros(11)))
+    assert stats(x)["maxdd"] == pytest.approx(-0.1)
+    assert stats(np.concatenate(([0.2], [-0.1], np.zeros(10))))["maxdd"] == pytest.approx(-0.1)
 
 
 def test_years_of_and_by_year_split_on_utc_calendar_years() -> None:
@@ -178,6 +239,16 @@ def test_vol_target_clips_and_lags_the_scale() -> None:
     assert vol_target(flat, window=10)[1].tolist() == [1.0] * n
     lagged = vol_target(noisy, window=10, lag=3)[1]
     assert lagged[:3].tolist() == [1.0] * 3
+
+
+def test_vol_target_with_no_lag_scales_the_day_its_vol_was_measured_on() -> None:
+    noisy = np.tile([0.1, -0.1], 30)
+    scaled, sc = vol_target(noisy, target=0.15, window=10, lo=0.2, hi=2.0, lag=0)
+    assert sc[:4].tolist() == [1.0] * 4  # the trailing vol needs five days
+    assert sc[4:].tolist() == [0.2] * 56
+    np.testing.assert_allclose(scaled, noisy * sc)
+    # lag pushes the same scale one day later
+    assert vol_target(noisy, target=0.15, window=10, lag=1)[1][1:].tolist() == sc[:-1].tolist()
 
 
 def test_universe_mask_filters_on_rank_age_liquidity_and_return() -> None:
