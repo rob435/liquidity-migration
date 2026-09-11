@@ -601,6 +601,10 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// What the risk kernel's rolling-loss window last reported, so its trip
     /// is seen once rather than polled.
     rolling_loss_tripped: bool,
+    /// The realm's canary operating policy, when it has one. Present on a
+    /// `live-canary` realm and absent everywhere else; `runner::run` compiles
+    /// it from `[canary]` before the log claim.
+    canary: Option<canary::CanaryPolicy>,
     /// Monotonic stamp of the transition into unready, `None` while ready.
     /// It is what separates a venue's paced re-read, which clears readiness
     /// and restores it within one sweep, from a private stream that never
@@ -662,6 +666,7 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
 
 mod account_recovery;
 mod boot_recovery;
+pub mod canary;
 mod execution_controls;
 mod history_recovery;
 mod intent_admission;

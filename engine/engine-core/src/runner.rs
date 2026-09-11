@@ -4,7 +4,7 @@
 //!
 //! | # | Step | Built by |
 //! | --- | --- | --- |
-//! | 1 | config, hashed; venue name parsed once | `config::load`, `assembly::venue_name` |
+//! | 1 | config, hashed; venue name parsed once; the realm's canary policy | `config::load`, `assembly::venue_name`, `canary::CanaryPolicy::compile` |
 //! | 2 | WAL claim, then the replay every later step reads | `engine_wal::lock`, `assembly::boot_wal` |
 //! | 3 | identity plan: sleeve slots and the symbol table | `identities::plan_identities`, `assembly::symbol_order` |
 //! | 4 | strategies, and the risk kernel they are gated by | `assembly::strategies_for_registry`, `assembly::risk` |
@@ -53,6 +53,10 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     // names what the run has not yet been seen doing.
     let chosen = assembly::venue_name(&settings.venue)?;
     chosen.require_engine_run_ready()?;
+    // A live-canary realm runs under a written operating policy or it does not
+    // run. Compiled here, beside the readiness gate and before anything is
+    // opened, because the policy has to agree with what the realm owes.
+    let canary = crate::engine::canary::CanaryPolicy::compile(&loaded.config, chosen)?;
     if chosen.readiness() == VenueReadiness::LiveCanary {
         let unproven: Vec<_> = chosen
             .unproven_capabilities()
@@ -64,6 +68,13 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
             readiness = chosen.readiness().as_str(),
             unproven = unproven.join(", "),
             "forward test: this realm holds no current live receipt for these capabilities"
+        );
+    }
+    if let Some(policy) = canary.as_ref() {
+        tracing::warn!(
+            venue = %chosen,
+            policy = %policy.summary(),
+            "canary policy: openings are bounded by absolute ceilings; reductions are not"
         );
     }
 
@@ -188,6 +199,9 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         }
     }
 
+    if let Some(policy) = canary {
+        engine.enforce_canary(policy);
+    }
     if let Some(trades) = assembly::trades(&settings) {
         engine.write_trades(trades);
     }

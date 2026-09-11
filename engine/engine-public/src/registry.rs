@@ -122,6 +122,18 @@ pub const UNATTENDED_PROTECTED_TRADING: &[Capability] = &[
     Capability::ReconnectHistoryRecovery,
 ];
 
+/// The [`UNATTENDED_PROTECTED_TRADING`] capabilities one evidence row owes.
+///
+/// `evidence` is a parameter for the same reason `derive_readiness` takes one:
+/// the rule can be exercised on a row this registry does not hold.
+fn unproven_from(evidence: impl Fn(Capability) -> Evidence) -> Vec<Capability> {
+    UNATTENDED_PROTECTED_TRADING
+        .iter()
+        .copied()
+        .filter(|capability| !evidence(*capability).qualifies())
+        .collect()
+}
+
 /// The readiness one capability row derives to.
 ///
 /// `evidence` answers for one realm and `real_money` says whose capital it is.
@@ -676,12 +688,12 @@ impl VenueName {
 
     /// The [`UNATTENDED_PROTECTED_TRADING`] capabilities this realm holds no
     /// current receipt for. Empty is what `live-proven` means.
+    ///
+    /// A live-canary realm's `[canary]` policy has to accept exactly this set,
+    /// so a receipt arriving or a receipt going stale refuses the deployed
+    /// config until somebody reads it again.
     pub fn unproven_capabilities(self) -> Vec<Capability> {
-        UNATTENDED_PROTECTED_TRADING
-            .iter()
-            .copied()
-            .filter(|capability| !self.capability(*capability).qualifies())
-            .collect()
+        unproven_from(|capability| self.capability(capability))
     }
 
     /// The two readiness states no capability row produces.
@@ -946,6 +958,83 @@ mod capability_matrix_tests {
             }),
             VenueReadiness::LiveCanary
         );
+    }
+
+    /// The `[canary]` section a live-canary realm runs under must accept
+    /// exactly that realm's unproven set (`engine-core/src/engine/canary.rs`).
+    /// So a cell going stale is not only a readiness question: it changes the
+    /// set, and the deployed config that accepted the old one refuses to load.
+    #[test]
+    fn one_stale_cell_changes_the_set_a_canary_config_has_to_accept() {
+        let realm = VenueName::MexcMainnet;
+        let owed = |evidence: &dyn Fn(Capability) -> Evidence| -> Vec<&'static str> {
+            unproven_from(evidence)
+                .into_iter()
+                .map(Capability::as_str)
+                .collect()
+        };
+        let stale = Evidence::Observed {
+            on: "2026-09-09",
+            receipt: "synthetic row under test, not a receipt",
+            adapter_commit: "0000000",
+            current: false,
+        };
+        let current = Evidence::Observed {
+            on: "2026-09-09",
+            receipt: "synthetic row under test, not a receipt",
+            adapter_commit: "0000000",
+            current: true,
+        };
+
+        let today = owed(&|capability| realm.capability(capability));
+        assert_eq!(
+            today,
+            [
+                "fill-attribution",
+                "protection-place",
+                "protection-trigger",
+                "reconnect-history-recovery"
+            ],
+            "this is what the deployed [canary] accepts"
+        );
+
+        // Every one of the six, from a row whose receipts are all current:
+        // the promoted realm's policy accepts nothing, and one stale cell
+        // makes it owe that capability instead.
+        let promoted = |capability: Capability| {
+            if UNATTENDED_PROTECTED_TRADING.contains(&capability) {
+                current
+            } else {
+                realm.capability(capability)
+            }
+        };
+        assert!(owed(&promoted).is_empty());
+        for capability in UNATTENDED_PROTECTED_TRADING {
+            let after = owed(&|asked| {
+                if asked == *capability {
+                    stale
+                } else {
+                    promoted(asked)
+                }
+            });
+            assert_eq!(after, [capability.as_str()], "{capability:?}");
+        }
+
+        // And on the realm's own row today, either cell that holds a current
+        // receipt going stale changes what the deployed policy has to accept.
+        for capability in [Capability::Submit, Capability::Cancel] {
+            let after = owed(&|asked| {
+                if asked == capability {
+                    stale
+                } else {
+                    realm.capability(asked)
+                }
+            });
+            assert_ne!(
+                after, today,
+                "{capability:?} went stale and the deployed [canary] would still load"
+            );
+        }
     }
 
     #[test]

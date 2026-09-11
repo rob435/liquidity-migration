@@ -223,6 +223,44 @@ requiring `amend` here would refuse the boot of a funded engine.
 | --- | --- | --- |
 | Strategy × venue compatibility | `assembly::compatibility`, called from `runner.rs` after the sleeve identities are resolved and before the venue, lease, credential or socket | A required capability whose row is `unknown` — the adapter does not do it, so the sleeve's action would die inside the engine every time. `implemented` and a stale receipt are accepted and logged per sleeve as a forward test (`WARN forward test: this sleeve's execution requirements hold no current live receipt on this realm`). |
 | Adapter-semantics pin | `VenueName::adapter_semantics_fingerprint`, one sha256 per venue over `engine-venue/src/venues/<venue>/**.rs` excluding test modules; checked by `engine/engine-venue/tests/venue/adapter_semantics.rs` | Nothing at runtime; it fails the suite, naming the realms of that venue that hold a current receipt. `Evidence::Observed { current }` stays a hand flag — deriving it would demote a realm on a comment edit. |
+| Canary operating policy | `CanaryPolicy::compile` (`engine-core/src/engine/canary.rs`), called from `runner.rs` beside `require_engine_run_ready`, before the log claim, any credential and any socket | A `live-canary` realm with no `[canary]` section; a `[canary]` section on a realm that is not one; a section whose `accepted_unproven` is not exactly that realm's `unproven_capabilities()`; an unreadable window or a ceiling that bounds nothing. An expired window boots: the run exits exposure and opens nothing. |
+
+#### Canary policy
+
+`[canary]` in `engine.toml`, required on a `live-canary` realm and refused on
+every other. Every `[risk]` cap is a ratio of verified equity, so a deposit
+enlarges all of them at once; these ceilings are absolute money and do not
+move. They bound openings only — a reduction, a cancel, a stop and a flatten
+command never meet them. Enforced in `Engine::prepare_intent`, after every
+other opening refusal and before the risk reservation; a refusal writes the
+same `IntentRefused` verdict the other opening refusals do and reaches the
+sleeve's `entry_blockers`.
+
+| Key | Type | Rule |
+| --- | --- | --- |
+| `started_at` | RFC3339 UTC, `YYYY-MM-DDTHH:MM:SSZ` | The loss window's start. Parsed to ms at load; anything but `Z` is refused |
+| `expires_at` | RFC3339 UTC | Must be after `started_at`. At or past it every opening is `canary_expired` |
+| `accepted_unproven` | list of `Capability::as_str` | Must equal the realm's `unproven_capabilities()` as a set; the refusal lists both sides |
+| `strategies` | list of `[[strategy]]` block names | Non-empty; each must name a configured block. Resolved to that block's sleeve label, which is what the engine judges |
+| `symbols` | optional list of venue symbols | Absent admits every admitted instrument; present and empty is refused |
+| `max_positions` | integer > 0 | Held symbols. An opening on a symbol not already held is refused at the count; adding to a held one is not |
+| `max_open_orders` | integer > 0 | Live orders that add exposure. Reductions are not counted |
+| `max_gross_notional_usdt` | number > 0 | Account gross plus this opening, valued at the marks the engine holds. Absolute money in the account's settlement asset, which the engine labels `usdt` even where it is USDC |
+| `max_position_notional_usdt` | number > 0 | The same for one symbol |
+| `max_loss_usdt` | number > 0 | Realised loss since `started_at` from the risk kernel's closed round trips, plus unrealised loss now. At or past it every opening is `canary_loss_ceiling` |
+
+The realised half reads `RiskKernel::rolling_loss_rows`, whose window is
+`engine_risk::ROLLING_LOSS_WINDOW_MS` (one day) wide: on a policy window longer
+than a day it answers for the last day of closed trips and not the ones before
+it, and a trip the log could not value counts as zero. The unrealised half is
+the engine's own marks against the account's entry prices, counted only while
+negative. `Engine::canary_status` reports the window, the book and the word
+every opening would be refused with.
+
+Refusal words: `canary_expired`, `canary_strategy_not_allowed`,
+`canary_symbol_not_allowed`, `canary_positions_at_cap`,
+`canary_open_orders_at_cap`, `canary_gross_notional_at_cap`,
+`canary_position_notional_at_cap`, `canary_loss_ceiling`.
 
 #### Invariants
 
@@ -254,6 +292,14 @@ requiring `amend` here would refuse the boot of a funded engine.
   they disagree the code is right and the row is edited.
 * **Must Never**: real capital reach a `production-blocked` or `read-only`
   realm. The boot gate refuses the run; there is no override flag.
+* **Must**: `engine run` on a `live-canary` realm carry a `[canary]` section
+  whose `accepted_unproven` is exactly that realm's `unproven_capabilities()`,
+  and refuse the run before the log claim otherwise. A receipt arriving, or a
+  receipt going stale under the adapter-semantics pin, changes that set and so
+  refuses the deployed config until it is read again.
+* **Must Never**: the canary policy refuse a reduction, a cancel, a stop or a
+  flatten command. It is judged on openings only, inside `prepare_intent`'s
+  `!intent.reduce_only` branch.
 * **Must**: `engine run` on a `live-canary` realm log the unproven capabilities
   at boot (`runner.rs`, `WARN forward test`). The run itself is the owner's:
   `posture=running` in `deploy/realms.tsv` and `REAL_MONEY=true` in the realm's
@@ -378,6 +424,7 @@ The signal worker's config identity (`engine/signal-worker/src/config.rs`) carri
 
 #### Execution and account limits
 
+| `[canary]` | The operating policy a `live-canary` realm runs under: window, accepted unproven set, allowed sleeves and symbols, and absolute opening ceilings. §2 *Canary policy*. |
 | Control | Runtime contract |
 |---|---|
 | Entry work | LONG in both realms rests PostOnly for 30 s. Crossing cancels first; an independent terminal REST lookup must agree exactly with recovered fills before one fresh IOC remainder is admitted. Restart cancels recovered entries, including sleeve growth that reduces the physical position |

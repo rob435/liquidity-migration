@@ -63,6 +63,43 @@ max_quote_age_ms = 30000
 leverage_authority = "sole"
 
 # ---------------------------------------------------------------------------
+# The canary's operating policy
+# ---------------------------------------------------------------------------
+# This realm is `live-canary`: it trades real money and holds no current
+# receipt for the four capabilities below. The engine refuses to start on a
+# live-canary realm without this section, and refuses it on a realm that is not
+# one. Every `[risk]` cap is a ratio of verified equity, so a deposit enlarges
+# all of them at once; these ceilings are absolute money and do not move. They
+# bound OPENINGS only — reductions, cancels, stops and flatten commands are
+# never refused by them.
+[canary]
+# The loss window's start, and the record of when this experiment began.
+started_at = "2026-09-11T00:00:00Z"
+# Past this the realm opens nothing and exits everything it is asked to.
+expires_at = "2026-10-11T00:00:00Z"
+# Must equal this realm's own unproven set exactly. A receipt that promotes one
+# of these, or a semantics change that makes one stale, refuses this file until
+# it is re-read.
+accepted_unproven = ["fill-attribution", "protection-place", "protection-trigger", "reconnect-history-recovery"]
+# `[[strategy]]` block names allowed to open. CARRY and EXODUS render entries
+# off; this is the second statement of that, and the engine's own.
+strategies = ["long_native"]
+# No `symbols` line: every instrument the signal producer admits.
+# Held symbols at once.
+max_positions = 3
+# Live opening orders at once.
+max_open_orders = 6
+# Account gross, USDT. What today's equity-relative caps admit at this
+# account's 30 USDT equity: the initial-margin cap 0.70 x reference, times the
+# 5x leverage ceiling.
+max_gross_notional_usdt = 105.0
+# Per symbol, USDT: `max_symbol_notional_usdt` 0.50 x reference at 30 USDT.
+max_position_notional_usdt = 15.0
+# Realised loss since `started_at` plus unrealised loss now, USDT:
+# `max_rolling_loss_fraction` 0.1 x 30 USDT.
+max_loss_usdt = 3.0
+
+# ---------------------------------------------------------------------------
 # Capital limits: the fleet's own document, not a copy of its numbers
 # ---------------------------------------------------------------------------
 # Deployment renders one profile for every realm from the reviewed base and the

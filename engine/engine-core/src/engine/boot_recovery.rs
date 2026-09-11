@@ -685,6 +685,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             authority,
             opening_dispatch_ttl_ns: settings.opening_dispatch_ttl_ms.saturating_mul(1_000_000),
             rolling_loss_tripped,
+            canary: None,
             private_stream_ready: true,
             private_stream_unready_since_ns: None,
             logged_exposure,

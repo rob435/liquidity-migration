@@ -45,8 +45,41 @@ pub struct Config {
     /// Passed to the risk kernel untouched. The engine does not read inside it.
     #[serde(default)]
     pub risk: toml::Table,
+    /// Required on a `live-canary` realm and refused anywhere else. Compiled
+    /// and enforced by `crate::engine::canary`, which is the layer that knows
+    /// what the realm's readiness and unproven set are.
+    #[serde(default)]
+    pub canary: Option<CanarySection>,
     #[serde(default, rename = "strategy")]
     pub strategies: Vec<StrategyConfig>,
+}
+
+/// `[canary]` as written. Every rule about what the values may say lives in
+/// `crate::engine::canary::CanaryPolicy::compile`; this is only the shape.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CanarySection {
+    /// RFC3339 UTC. The start of the loss window and the record of when the
+    /// experiment began.
+    pub started_at: String,
+    /// RFC3339 UTC. Past it the realm opens nothing.
+    pub expires_at: String,
+    /// `Capability::as_str` names, as a set equal to the realm's own
+    /// `unproven_capabilities()`.
+    pub accepted_unproven: Vec<String>,
+    /// `[[strategy]]` block names allowed to open.
+    pub strategies: Vec<String>,
+    /// Absent means any admitted instrument.
+    #[serde(default)]
+    pub symbols: Option<Vec<String>>,
+    pub max_positions: usize,
+    pub max_open_orders: usize,
+    /// Absolute, in the account's settlement asset. Unlike every `[risk]`
+    /// cap these do not move with equity, so a deposit does not enlarge them.
+    pub max_gross_notional_usdt: f64,
+    pub max_position_notional_usdt: f64,
+    /// Realised loss since `started_at` plus unrealised loss now.
+    pub max_loss_usdt: f64,
 }
 
 #[derive(Clone, Debug, Deserialize)]

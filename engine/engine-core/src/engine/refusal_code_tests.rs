@@ -13,7 +13,7 @@ use super::intent_admission::{code, OpeningRefusal};
 /// Every code a funded binary can write. `no_instrument_rule`,
 /// `below_minimum_size` and `below_minimum_notional` are absent on purpose:
 /// only the `#[cfg(test)]` legacy quantize fixture reaches them.
-const PINNED: [&str; 40] = [
+const PINNED: [&str; 48] = [
     // The engine's own words, before or after the kernel.
     "batch_leverage_conflict",
     "close_does_not_reduce",
@@ -32,6 +32,14 @@ const PINNED: [&str; 40] = [
     "venue_keeps_no_stop",
     "wake_action_limit",
     // `OpeningRefusal::as_str`.
+    "canary_expired",
+    "canary_gross_notional_at_cap",
+    "canary_loss_ceiling",
+    "canary_open_orders_at_cap",
+    "canary_position_notional_at_cap",
+    "canary_positions_at_cap",
+    "canary_strategy_not_allowed",
+    "canary_symbol_not_allowed",
     "engine_latched",
     "foreign_strategy_owner",
     "instrument_catalog_unready",
@@ -61,7 +69,7 @@ const PINNED: [&str; 40] = [
     "unknown_state",
 ];
 
-fn opening_refusals() -> [OpeningRefusal; 13] {
+fn opening_refusals() -> [OpeningRefusal; 21] {
     [
         OpeningRefusal::ForeignStrategyOwner,
         OpeningRefusal::PortfolioExitPending,
@@ -76,6 +84,14 @@ fn opening_refusals() -> [OpeningRefusal; 13] {
         OpeningRefusal::RuntimeEntriesDisabled,
         OpeningRefusal::PrivateStreamUnready,
         OpeningRefusal::EngineLatched,
+        OpeningRefusal::CanaryExpired,
+        OpeningRefusal::CanaryStrategyNotAllowed,
+        OpeningRefusal::CanarySymbolNotAllowed,
+        OpeningRefusal::CanaryPositionsAtCap,
+        OpeningRefusal::CanaryOpenOrdersAtCap,
+        OpeningRefusal::CanaryGrossNotionalAtCap,
+        OpeningRefusal::CanaryPositionNotionalAtCap,
+        OpeningRefusal::CanaryLossCeiling,
     ]
 }
 

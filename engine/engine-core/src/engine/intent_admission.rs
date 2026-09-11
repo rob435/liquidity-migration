@@ -24,6 +24,16 @@ pub(crate) enum OpeningRefusal {
     PrivateStreamUnready,
     /// Boot found orders or exposure the log cannot account for.
     EngineLatched,
+    /// The realm's `[canary]` operating policy. Openings only: a reduction, a
+    /// cancel, a stop and a flatten never reach these.
+    CanaryExpired,
+    CanaryStrategyNotAllowed,
+    CanarySymbolNotAllowed,
+    CanaryPositionsAtCap,
+    CanaryOpenOrdersAtCap,
+    CanaryGrossNotionalAtCap,
+    CanaryPositionNotionalAtCap,
+    CanaryLossCeiling,
 }
 
 impl OpeningRefusal {
@@ -42,6 +52,14 @@ impl OpeningRefusal {
             Self::RuntimeEntriesDisabled => "runtime_entries_disabled",
             Self::PrivateStreamUnready => "private_stream_unready",
             Self::EngineLatched => "engine_latched",
+            Self::CanaryExpired => "canary_expired",
+            Self::CanaryStrategyNotAllowed => "canary_strategy_not_allowed",
+            Self::CanarySymbolNotAllowed => "canary_symbol_not_allowed",
+            Self::CanaryPositionsAtCap => "canary_positions_at_cap",
+            Self::CanaryOpenOrdersAtCap => "canary_open_orders_at_cap",
+            Self::CanaryGrossNotionalAtCap => "canary_gross_notional_at_cap",
+            Self::CanaryPositionNotionalAtCap => "canary_position_notional_at_cap",
+            Self::CanaryLossCeiling => "canary_loss_ceiling",
         }
     }
 
@@ -66,6 +84,14 @@ impl OpeningRefusal {
             }
             Self::PrivateStreamUnready => "private account stream has not completed gap recovery",
             Self::EngineLatched => "boot could not account for what this account holds",
+            Self::CanaryExpired => "canary_expired: this realm's canary policy window has ended",
+            Self::CanaryStrategyNotAllowed => "canary_strategy_not_allowed: this realm's canary policy does not list this sleeve",
+            Self::CanarySymbolNotAllowed => "canary_symbol_not_allowed: this realm's canary policy does not list this instrument",
+            Self::CanaryPositionsAtCap => "canary_positions_at_cap: the canary policy's position count is reached",
+            Self::CanaryOpenOrdersAtCap => "canary_open_orders_at_cap: the canary policy's opening-order count is reached",
+            Self::CanaryGrossNotionalAtCap => "canary_gross_notional_at_cap: this opening would pass the canary policy's account gross ceiling",
+            Self::CanaryPositionNotionalAtCap => "canary_position_notional_at_cap: this opening would pass the canary policy's per-symbol ceiling",
+            Self::CanaryLossCeiling => "canary_loss_ceiling: the canary policy's loss ceiling is reached for its window",
         }
     }
 }
@@ -673,6 +699,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 Some(OpeningRefusal::InstrumentUnlisted)
             } else {
                 self.opening_refusal(intent.strategy)
+                    .or_else(|| self.canary_refusal(intent))
             };
             if let Some(refusal) = refusal {
                 self.deny_opening(intent, refusal, client_order_id)?;
