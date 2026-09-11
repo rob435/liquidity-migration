@@ -18,6 +18,8 @@ pub(crate) struct RecentExposure {
     pub signed_qty: Exact,
     pub stop_fraction: Option<Exact>,
 }
+/// Fills newer than the account view, netted per symbol id.
+pub(crate) type RecentFills = BTreeMap<u16, RecentExposure>;
 #[derive(Debug, Default)]
 struct PendingInterval {
     rows: usize,
@@ -202,10 +204,7 @@ impl Book {
             None => Ok((settled.clone(), settled.clone())),
         }
     }
-    pub(crate) fn fills_after(
-        &mut self,
-        observed_ns: u64,
-    ) -> Result<BTreeMap<u16, RecentExposure>, &'static str> {
+    pub(crate) fn fills_after(&mut self, observed_ns: u64) -> Result<RecentFills, &'static str> {
         self.prune_through(observed_ns);
         let mut net = BTreeMap::<u16, RecentExposure>::new();
         for (_, symbol, qty, stop) in &self.recent_fills {

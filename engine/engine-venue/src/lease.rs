@@ -104,10 +104,11 @@ pub enum LeaseError {
     /// The file that got locked is not the file at the path any more, so the
     /// lock guards an inode nobody else will ever open.
     Replaced { path: PathBuf },
-    /// A realm that is not `demo` or `mainnet`. Defaulting would put two
-    /// accounts on one lock or one account on two.
+    /// A realm no venue name reaches. Defaulting would put two accounts on
+    /// one lock or one account on two.
     UnknownRealm { given: String },
-    /// A user id that is not a whole number above zero.
+    /// An account id `account_key_text` does not normalize: neither a whole
+    /// number above zero nor an accepted lowercase token.
     UnknownUserId { given: String },
     /// A lease with no role says nothing to whoever finds it stuck.
     EmptyRole,
@@ -140,12 +141,15 @@ impl fmt::Display for LeaseError {
             ),
             LeaseError::UnknownRealm { given } => write!(
                 f,
-                "an account lease is for {REALM_DEMO} or {REALM_MAINNET}, not {given:?}"
+                "an account lease is for one of {}, not {given:?}",
+                known_realms().join(", ")
             ),
             LeaseError::UnknownUserId { given } => write!(
                 f,
-                "an account lease is named by the venue's own account id, \
-                 a whole number above zero, not {given:?}"
+                "an account lease is named by the venue's own account id: \
+                 a whole number above zero, or a lowercase token of letters, \
+                 digits, '-' and '_' starting with a letter or digit (a wallet \
+                 address, a MEXC key-<hex>), not {given:?}"
             ),
             LeaseError::EmptyRole => {
                 write!(f, "an account lease has to say what is holding it")
@@ -897,6 +901,33 @@ mod tests {
         }
         assert_eq!(realm_text("Demo"), Some(REALM_DEMO));
         assert_eq!(realm_text(" mainnet\n"), Some(REALM_MAINNET));
+    }
+
+    #[test]
+    fn a_refusal_names_what_a_lease_key_accepts() {
+        let realm = LeaseError::UnknownRealm {
+            given: "paper".into(),
+        }
+        .to_string();
+        for known in known_realms() {
+            assert!(
+                realm.contains(known),
+                "{known:?} is an accepted realm the refusal does not name: {realm}"
+            );
+        }
+        assert!(realm.contains("\"paper\""), "{realm}");
+        let id = LeaseError::UnknownUserId {
+            given: "12.0".into(),
+        }
+        .to_string();
+        // Both branches of `account_key_text`, not the numeric one alone.
+        for shape in ["number", "token", "address"] {
+            assert!(
+                id.contains(shape),
+                "an accepted id shape the refusal does not name: {shape}: {id}"
+            );
+        }
+        assert!(id.contains("\"12.0\""), "{id}");
     }
 
     #[test]

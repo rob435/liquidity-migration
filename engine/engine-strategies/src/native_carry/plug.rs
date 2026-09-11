@@ -119,13 +119,6 @@ impl NativeCarry {
         })
     }
 
-    pub fn reduce(&mut self, input: ReducerInput) -> Result<ReducerOutput, &'static str> {
-        let output = reduce_lifecycle(input, self.core.state.clone(), &self.core.config)?;
-        self.core.state = output.next_state.clone();
-        self.core.checkpoint_fingerprint = Some(self.core.config.fingerprint());
-        Ok(output)
-    }
-
     fn effective_config(&self, ctx: &dyn StrategyCtx) -> StrategyConfig {
         let mut config = self.core.config.clone();
         config.entries_enabled = ctx.entries_enabled(self.core.config.entries_enabled);

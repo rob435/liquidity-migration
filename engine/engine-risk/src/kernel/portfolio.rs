@@ -195,10 +195,10 @@ impl Kernel {
         self.check_available(&margin, view)
     }
     pub(super) fn projected_portfolio(
-        &mut self,
+        &self,
         notional: &Exact,
         fraction: &Exact,
-        account: &AccountView,
+        recent: &RecentFills,
         view: &ViewFacts,
         portfolio: &PortfolioFacts,
     ) -> Result<Projected, DenyReason> {
@@ -230,10 +230,6 @@ impl Kernel {
                 .envelope
                 .modelled_stop_charge_usdt(&notional, &fraction);
         }
-        let recent = self
-            .book
-            .fills_after(account.observed_ns)
-            .map_err(unknown)?;
         let symbols: BTreeSet<_> = view
             .exposures()
             .map(|(s, _)| s)

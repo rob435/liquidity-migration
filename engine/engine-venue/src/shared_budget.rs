@@ -45,13 +45,15 @@ impl SharedBudget {
                 id,
             });
         }
+        // Capacity frees at `completed_at + window`, so the earliest a slot
+        // can open is that instant over the completed reservations; with none
+        // completed, no reservation can free before `now + window`.
         Err(state
             .reservations
             .values()
             .filter_map(|(_, at)| at.map(|at| (at + window).saturating_duration_since(now)))
             .min()
-            .unwrap_or(Duration::from_millis(10))
-            .min(Duration::from_millis(10)))
+            .unwrap_or(window))
     }
     #[cfg(feature = "binance")]
     pub(crate) async fn reserve(&self, cost: u32) -> Reservation {
@@ -108,5 +110,26 @@ mod tests {
         assert!(budget
             .try_reserve(3, Instant::now() + Duration::from_secs(61))
             .is_ok());
+    }
+
+    #[test]
+    fn a_refusal_waits_until_capacity_can_free_and_no_longer() {
+        let window = Duration::from_secs(60);
+        let budget = SharedBudget::new(window, 1);
+        let began = Instant::now();
+        let held = budget.try_reserve(1, began).ok().unwrap();
+        // Still in flight: it cannot complete before `now`, so it cannot free
+        // before `now + window`.
+        assert_eq!(budget.try_reserve(1, began).err(), Some(window));
+        let id = held.id;
+        drop(held);
+        let completed = budget.0.lock().unwrap().reservations[&id]
+            .1
+            .expect("dropping a reservation stamps its completion");
+        let waited = Duration::from_secs(20);
+        assert_eq!(
+            budget.try_reserve(1, completed + waited).err(),
+            Some(window - waited)
+        );
     }
 }

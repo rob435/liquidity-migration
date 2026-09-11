@@ -51,7 +51,11 @@ pub fn describe(records: &[WalRecord], torn_tail: bool) -> ReplayReport {
         }
     }
     if torn_tail {
-        lines.push("        the log ends part-way through a record; the rest was dropped".into());
+        lines.push(
+            "        a log segment ends part-way through a record; the records after that point \
+             in that segment were dropped"
+                .into(),
+        );
     }
 
     ReplayReport {

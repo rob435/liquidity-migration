@@ -110,6 +110,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             self.on_order_lookup(id, result).await?;
         }
         if self.dispatches.write.is_none() {
+            let administration_available = !self.leverage_pending();
             let queued: Vec<_> = self
                 .dispatches
                 .orders
@@ -117,7 +118,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .filter(|(id, order)| {
                     order.phase == OrderDispatchPhase::Queued
                         && !self.busy_symbols.contains_key(&order.request.symbol)
-                        && (!self.leverage_pending() || self.missing_leverage(id).is_none())
+                        && (administration_available || self.missing_leverage(id).is_none())
                 })
                 .take(MAX_ORDERS_PER_BATCH)
                 .map(|(id, _)| id.clone())

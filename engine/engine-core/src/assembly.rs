@@ -4,15 +4,17 @@
 //! the concrete crates exactly once. Nothing above it knows which venue,
 //! which log format, or which kernel it is running.
 
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::mem::Discriminant;
 use std::path::{Path, PathBuf};
 
 use engine_marketdata::MarketFeeds;
 use engine_risk::{EnvelopeConfig, Kernel, KernelConfig};
 use engine_strategies::build_strategy;
 use engine_types::{
-    AccountIdentity, Capability, Strategy, StrategyId, Subscription, Symbol, VenueError, WalError,
-    WalRecord,
+    AccountIdentity, Capability, Feed, Strategy, StrategyId, Subscription, Symbol, VenueError,
+    WalError, WalRecord,
 };
 use engine_venue::{Evidence, InventoryProbe, OrderFeeds, Venue, VenueName};
 use engine_wal::WalWriter;
@@ -57,8 +59,10 @@ pub fn symbol_order(
         .into_iter()
         .map(|binding| binding.symbol)
         .collect::<Vec<_>>();
+    // Membership only. `names` is the id order.
+    let mut interned: HashSet<Symbol> = names.iter().cloned().collect();
     for sub in wanted {
-        if !names.iter().any(|n| n == &sub.symbol) {
+        if interned.insert(sub.symbol.clone()) {
             names.push(sub.symbol.clone());
         }
     }
@@ -84,31 +88,57 @@ pub fn symbol_order(
 /// shifts by one on the feed side only, prices land in the wrong slots, and
 /// what a follower then reads as standing exposure is another symbol's.
 pub fn boot_subscriptions(symbols: &[Symbol], wanted: &[Subscription]) -> Vec<Subscription> {
+    // Grouping and membership only. Both keep `wanted`'s own order, which is
+    // what the emitted order is built from.
+    let mut asked: HashMap<&str, Vec<&Subscription>> = HashMap::with_capacity(wanted.len());
+    for sub in wanted {
+        asked.entry(sub.symbol.as_str()).or_default().push(sub);
+    }
+    let mut held: HashSet<SubscriptionKey<'_>> = HashSet::with_capacity(wanted.len());
     let mut subs: Vec<Subscription> = Vec::new();
     for name in symbols {
-        let mut named = false;
-        for sub in wanted.iter().filter(|s| &s.symbol == name) {
-            named = true;
-            if !subs.contains(sub) {
-                subs.push(sub.clone());
+        match asked.get(name.as_str()) {
+            Some(named) => {
+                for sub in named {
+                    if held.insert(subscription_key(sub)) {
+                        subs.push((*sub).clone());
+                    }
+                }
             }
-        }
-        if !named {
-            subs.push(Subscription {
-                symbol: name.clone(),
-                feed: engine_types::Feed::Quote,
-            });
+            None => {
+                held.insert((name.as_str(), std::mem::discriminant(&Feed::Quote)));
+                subs.push(Subscription {
+                    symbol: name.clone(),
+                    feed: Feed::Quote,
+                });
+            }
         }
     }
     // `symbol_order` already appends every wanted name, so nothing should
     // remain; kept so a caller handing an unrelated list cannot silently
     // drop a subscription.
     for sub in wanted {
-        if !subs.contains(sub) {
+        if held.insert(subscription_key(sub)) {
             subs.push(sub.clone());
         }
     }
     subs
+}
+
+/// `Subscription` is not `Hash`; this is what membership keys it by.
+type SubscriptionKey<'a> = (&'a str, Discriminant<Feed>);
+
+fn subscription_key(sub: &Subscription) -> SubscriptionKey<'_> {
+    (sub.symbol.as_str(), std::mem::discriminant(&sub.feed))
+}
+
+/// The boot seeds no strategy asked for, in `seeded` order.
+fn unasked_seeds<'a>(seeded: &'a [Subscription], wanted: &[Subscription]) -> Vec<&'a Subscription> {
+    let asked: HashSet<SubscriptionKey<'_>> = wanted.iter().map(subscription_key).collect();
+    seeded
+        .iter()
+        .filter(|sub| !asked.contains(&subscription_key(sub)))
+        .collect()
 }
 
 /// Read the config's venue name — the switch, turned once.
@@ -138,10 +168,8 @@ pub fn market_feed_for_registry(
 ) -> Result<MarketFeeds, VenueError> {
     let seeded = boot_subscriptions(symbols, wanted);
     let mut feed = market_feed(name, &seeded)?;
-    for subscription in seeded {
-        if !wanted.contains(&subscription) {
-            engine_types::MarketFeed::retire(&mut feed, &subscription.symbol, subscription.feed);
-        }
+    for subscription in unasked_seeds(&seeded, wanted) {
+        engine_types::MarketFeed::retire(&mut feed, &subscription.symbol, subscription.feed);
     }
     Ok(feed)
 }
@@ -1040,5 +1068,129 @@ mod retired_registry_tests {
             Some(engine_types::SymbolId(0))
         );
         assert_eq!(feed.id_of("BTCUSDT"), Some(engine_types::SymbolId(1)));
+    }
+}
+
+#[cfg(test)]
+mod boot_order_tests {
+    use super::*;
+    use engine_types::identity::{IdentityState, InstrumentBinding, InstrumentIdentity};
+
+    const N: usize = 3_000;
+    const FEEDS: [Feed; 4] = [Feed::Quote, Feed::Depth, Feed::Trades, Feed::Ticker];
+
+    fn name(i: usize) -> String {
+        format!("SYM{i:04}USDT")
+    }
+
+    /// The log's own table: two names in three, in id order.
+    fn logged() -> Vec<WalRecord> {
+        vec![WalRecord::IdentityState {
+            wall_ts_ms: 1,
+            state: IdentityState {
+                instruments: (0..N)
+                    .filter(|i| i % 3 != 0)
+                    .map(|i| InstrumentBinding {
+                        symbol: name(i),
+                        identity: InstrumentIdentity::Unresolved,
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+        }]
+    }
+
+    /// Four names in five, in an order that is neither the log's nor sorted,
+    /// with repeated subscriptions and several feeds on one symbol.
+    fn wanted() -> Vec<Subscription> {
+        let mut wanted = Vec::new();
+        for step in 0..N {
+            // 1009 is coprime with N, so this visits every index once.
+            let i = (step * 1009 + 17) % N;
+            if i.is_multiple_of(5) {
+                continue;
+            }
+            wanted.push(Subscription {
+                symbol: name(i),
+                feed: FEEDS[i % FEEDS.len()],
+            });
+            if i.is_multiple_of(7) {
+                wanted.push(Subscription {
+                    symbol: name(i),
+                    feed: Feed::Depth,
+                });
+                wanted.push(Subscription {
+                    symbol: name(i),
+                    feed: FEEDS[i % FEEDS.len()],
+                });
+            }
+        }
+        wanted
+    }
+
+    fn symbol_order_oracle(replayed: &[WalRecord], wanted: &[Subscription]) -> Vec<Symbol> {
+        let mut names = crate::identities::replay_identities(replayed)
+            .unwrap()
+            .unwrap_or_default()
+            .instruments
+            .into_iter()
+            .map(|binding| binding.symbol)
+            .collect::<Vec<_>>();
+        for sub in wanted {
+            if !names.iter().any(|n| n == &sub.symbol) {
+                names.push(sub.symbol.clone());
+            }
+        }
+        names
+    }
+
+    fn boot_subscriptions_oracle(symbols: &[Symbol], wanted: &[Subscription]) -> Vec<Subscription> {
+        let mut subs: Vec<Subscription> = Vec::new();
+        for name in symbols {
+            let mut named = false;
+            for sub in wanted.iter().filter(|s| &s.symbol == name) {
+                named = true;
+                if !subs.contains(sub) {
+                    subs.push(sub.clone());
+                }
+            }
+            if !named {
+                subs.push(Subscription {
+                    symbol: name.clone(),
+                    feed: Feed::Quote,
+                });
+            }
+        }
+        for sub in wanted {
+            if !subs.contains(sub) {
+                subs.push(sub.clone());
+            }
+        }
+        subs
+    }
+
+    fn unasked_seeds_oracle<'a>(
+        seeded: &'a [Subscription],
+        wanted: &[Subscription],
+    ) -> Vec<&'a Subscription> {
+        seeded.iter().filter(|sub| !wanted.contains(sub)).collect()
+    }
+
+    #[test]
+    fn the_indexed_boot_order_is_the_scanning_one() {
+        let records = logged();
+        let wanted = wanted();
+        let symbols = symbol_order(&records, &wanted).unwrap();
+        assert_eq!(symbols, symbol_order_oracle(&records, &wanted));
+        // Two thirds from the log, then the names only a subscription knows.
+        assert_eq!(symbols.len(), 2_800);
+
+        let seeded = boot_subscriptions(&symbols, &wanted);
+        assert_eq!(seeded, boot_subscriptions_oracle(&symbols, &wanted));
+
+        let unasked = unasked_seeds(&seeded, &wanted);
+        assert_eq!(unasked, unasked_seeds_oracle(&seeded, &wanted));
+        // Carried-over names nobody subscribed to: the seeded quotes.
+        assert_eq!(unasked.len(), 400);
     }
 }

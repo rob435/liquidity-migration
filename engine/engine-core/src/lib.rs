@@ -1,10 +1,11 @@
 //! The execution engine's loop.
 //!
-//! Read `docs/engine.md` first: this crate is the part that wires the others
-//! together and runs them. It is written against the traits in `engine-types`
-//! and nothing else, which is why it can be built and tested while the crates
-//! that supply market data, the venue, the log and the risk kernel are still
-//! being written. `assembly.rs` is where those get plugged in.
+//! Read `docs/engine.md` first. The loop is written against the traits in
+//! `engine-types` — `Wal`, `RiskKernel`, `VenueGateway`, `MarketFeed`,
+//! `OrderFeed`, `Strategy` — and names no venue, log format or kernel of its
+//! own. `assembly.rs` is the only file here that names the concrete crates
+//! behind those traits; `runner.rs` is the `engine run` command that puts them
+//! together.
 
 pub mod account_state_bench;
 pub mod assembly;

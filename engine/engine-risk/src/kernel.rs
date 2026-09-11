@@ -1,7 +1,7 @@
 //! One capital owner; canonical quantities and money remain exact until reporting.
 use crate::config::{ConfigError, KernelConfig};
 use crate::envelope::Envelope;
-use crate::exposure::{Book, Pending};
+use crate::exposure::{Book, Pending, RecentFills};
 use crate::loss_window::LossWindow;
 use crate::margin::MarginBook;
 use crate::ROLLING_LOSS_WINDOW_MS;
@@ -431,9 +431,9 @@ impl Kernel {
         let fraction = read_stop(intent, &low, &px)?;
         let notional = &ask * &px;
         let projected = if let Some(portfolio) = portfolio {
-            self.projected_portfolio(&notional, &fraction, account, &view, portfolio)?
+            self.projected_portfolio(&notional, &fraction, &recent, &view, portfolio)?
         } else {
-            self.projected_book(&notional, &fraction, account, &view)?
+            self.projected_book(&notional, &fraction, recent, &view)?
         };
         let allowance = self.envelope.allowance_usdt();
         if projected.modelled_stop_charge_usdt > allowance {
@@ -508,17 +508,15 @@ impl Kernel {
         }
         Ok(())
     }
+    /// `recent` is the post-snapshot fill fold this evaluation already made;
+    /// this consumes it, symbol by symbol, against the view's exposures.
     fn projected_book(
-        &mut self,
+        &self,
         notional: &Exact,
         fraction: &Exact,
-        account: &AccountView,
+        mut recent: RecentFills,
         view: &ViewFacts,
     ) -> Result<Projected, DenyReason> {
-        let mut recent = self
-            .book
-            .fills_after(account.observed_ns)
-            .map_err(unknown)?;
         let mut projected = Projected {
             gross_usdt: notional.clone(),
             modelled_stop_charge_usdt: self.envelope.modelled_stop_charge_usdt(notional, fraction),

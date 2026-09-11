@@ -1,12 +1,23 @@
 //! `engine run`: the full assembly.
 //!
-//! Every part comes from `assembly.rs`. While a crate is still empty its
-//! constructor returns "not wired yet", so this command starts, names the
-//! missing part, and stops without writing to the log or touching a venue.
+//! Every concrete part comes from `assembly.rs`. What `run` builds, in order:
 //!
-//! Two claims are staked before any of it runs: the venue account, so this is
-//! its only order writer, and the log file, so no second engine can append to
-//! the same WAL. Both are kernel locks that die with the process.
+//! | # | Step | Built by |
+//! | --- | --- | --- |
+//! | 1 | config, hashed; venue name parsed once | `config::load`, `assembly::venue_name` |
+//! | 2 | WAL claim, then the replay every later step reads | `engine_wal::lock`, `assembly::wal` |
+//! | 3 | identity plan: sleeve slots and the symbol table | `identities::plan_identities`, `assembly::symbol_order` |
+//! | 4 | strategies, and the risk kernel they are gated by | `assembly::strategies_for_registry`, `assembly::risk` |
+//! | 5 | venue gateway, on the name from 1 and the symbols from 3 | `assembly::venue` |
+//! | 6 | account lease, held for the whole run | `single_writer` |
+//! | 7 | public market feed | `assembly::market_feed_for_registry` |
+//! | 8 | private order feed, ready before any order | `assembly::order_feed` |
+//! | 9 | engine boot over the same replay | `Engine::boot_as_exact` |
+//! | 10 | run loop, chosen by the spool paths the config names | `Engine::run*` |
+//!
+//! Two kernel locks are staked before the engine boots: the log file, so no
+//! second engine appends to the same WAL, and the venue account, so this is
+//! its only order writer. Both die with the process.
 
 use std::error::Error;
 use std::path::Path;
@@ -159,6 +170,8 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
         &replayed,
     )
     .await?;
+    // The decoded log is boot input; the live loop must not hold it.
+    drop(replayed);
 
     for subscription in engine.subscriptions() {
         let expected = engine

@@ -1,7 +1,18 @@
-//! The pooled HTTPS client every venue sends through: one warm keep-alive
-//! connection per host, HTTP/1.1 only, Nagle off.
+//! The pooled HTTPS client every venue sends through: HTTP/1.1 only, Nagle
+//! off, and idle sockets held rather than re-handshaked.
 //!
-//! Only the wire lives here. Signing belongs to each venue, because the four
+//! | Dial | Value |
+//! | --- | --- |
+//! | idle connections kept per host | 16 |
+//! | how long an idle one is kept | 600 s |
+//! | TCP keep-alive probe | 60 s |
+//! | request timeout | 10 s |
+//!
+//! One pool per `HttpClient`, and each venue's REST gateway and public reader
+//! builds its own. `HttpClient` is `Clone`, and a clone shares the pool it was
+//! cloned from.
+//!
+//! Only the wire lives here. Signing belongs to each venue, because venues
 //! do not agree on what is signed or where the proof rides — Bybit signs the
 //! exact bytes and puts a hex HMAC in a header, Hyperliquid signs a hash of a
 //! msgpack action and puts the signature *inside* the body, Lighter signs a
