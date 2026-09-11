@@ -208,6 +208,33 @@ def test_the_lookup_refuses_a_fields_file_it_does_not_know(tmp_path: Path) -> No
     assert "unsupported schema; expected # realm-fields-v1" in completed.stderr
 
 
+def test_a_lookup_answered_by_the_first_row_leaves_the_writer_alive(tmp_path: Path) -> None:
+    # A table larger than a pipe holds, so the reader answers before the writer
+    # has finished: a reader that quit on its match would close the pipe under
+    # the writer, and pipefail would report the writer's SIGPIPE as 141.
+    fields = tmp_path / "realm_fields.tsv"
+    padding = "".join(f"zzpad|field_{i}|x\n" for i in range(40_000))
+    fields.write_text(
+        (DEPLOY / "realm_fields.tsv").read_text(encoding="utf-8") + padding,
+        encoding="utf-8",
+    )
+    assert fields.stat().st_size > 512 * 1024
+    funded = _bash("lm_funded_realms | paste -sd ' ' -").strip()
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"set -euo pipefail; export LM_REALM_FIELDS={fields}; . {DEPLOY}/lib_realms.sh; "
+            "lm_realm_field demo realm; lm_is_realm zzpad; lm_funded_realms | paste -sd ' ' -",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == ["demo", funded]
+
+
 # --------------------------------------------------------- adding a realm
 
 

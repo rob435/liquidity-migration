@@ -5,6 +5,11 @@
 # the VPS by scripts/deploy_vps_live.sh so the remote body reads realm facts
 # before its checkout exists. LM_REALM_FIELDS_TEXT carries the file itself in
 # that case.
+#
+# Every awk here reads its input to the end. The rows arrive through a pipe
+# under `set -o pipefail`; a reader that exits on its first match closes that
+# pipe while the writer is still writing, the writer dies of SIGPIPE, and the
+# lookup answers 141 with the right value on stdout.
 # shellcheck shell=bash
 
 LM_REALM_FIELDS="${LM_REALM_FIELDS:-deploy/realm_fields.tsv}"
@@ -23,11 +28,14 @@ _lm_realm_field_rows() {
     else
         cat "$LM_REALM_FIELDS"
     fi | LC_ALL=C awk '
-NR == 1 && $0 != "# realm-fields-v1" {
-    print "realm fields have an unsupported schema; expected # realm-fields-v1" > "/dev/stderr"
-    exit 1
+NR == 1 && $0 != "# realm-fields-v1" { unsupported = 1 }
+!unsupported && !/^#/ && !/^[[:space:]]*$/ { print }
+END {
+    if (unsupported) {
+        print "realm fields have an unsupported schema; expected # realm-fields-v1" > "/dev/stderr"
+        exit 1
+    }
 }
-!/^#/ && !/^[[:space:]]*$/ { print }
 '
 }
 
@@ -61,10 +69,10 @@ lm_realm_field() {
         -v want_realm="$_lrf_realm" -v want_field="$_lrf_field" '
 $1 == want_realm {
     realm_seen = 1
-    if ($2 == want_field) { print $3; answered = 1; exit 0 }
+    if ($2 == want_field && !answered) { value = $3; answered = 1 }
 }
 END {
-    if (answered) exit 0
+    if (answered) { print value; exit 0 }
     if (!realm_seen) {
         print "unknown realm: " want_realm > "/dev/stderr"
         exit 2
