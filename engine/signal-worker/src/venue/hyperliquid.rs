@@ -96,6 +96,16 @@ const MIN_ORDER_NOTIONAL_USD: i64 = 10;
 /// Minutes between settlements. The venue pays funding every hour.
 const FUNDING_INTERVAL_MIN: i64 = 60;
 
+/// The REST host without its scheme, which is what [`PublicHttpClient`] takes.
+/// No venue address is written down here: it comes from the realm table in
+/// `engine-public`. [`HyperliquidPublicVenue::open`] refuses any public market
+/// realm but mainnet, so that is the only host a worker reads.
+pub fn rest_host() -> &'static str {
+    engine_public::HyperliquidRealm::Mainnet
+        .rest_base()
+        .trim_start_matches("https://")
+}
+
 pub struct HyperliquidPublicVenue {
     info: PublicHttpClient,
     pacer: Arc<RequestPacer>,

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::model::NormalizedObservation;
@@ -284,6 +284,14 @@ pub struct SpoolInventory {
     pub classes: BTreeMap<String, SpoolClassInventory>,
 }
 
+/// The class key alone. A spooled row whose body no longer parses still holds
+/// disk and backlog, so the inventory counts it and oldest-first trimming is
+/// what removes it.
+#[derive(Deserialize)]
+struct SpoolEnvelope {
+    kind: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SpoolClassInventory {
     pub files: u64,
@@ -384,11 +392,11 @@ impl SpoolWriter {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(WorkerError::io("open signal spool entry", error)),
             };
-            let observation: NormalizedObservation = serde_json::from_reader(BufReader::new(file))
+            let envelope: SpoolEnvelope = serde_json::from_reader(BufReader::new(file))
                 .map_err(|error| WorkerError::json("parse signal spool inventory", error))?;
             inventory.files = inventory.files.saturating_add(1);
             inventory.bytes = inventory.bytes.saturating_add(metadata.len());
-            let class = spool_class(&observation.kind).to_owned();
+            let class = spool_class(&envelope.kind).to_owned();
             let class_inventory = inventory.classes.entry(class).or_default();
             class_inventory.files = class_inventory.files.saturating_add(1);
             class_inventory.bytes = class_inventory.bytes.saturating_add(metadata.len());
@@ -407,12 +415,12 @@ impl SpoolWriter {
                 class_inventory.newest_path = Some(path.clone());
             }
             if matches!(
-                observation.kind.as_str(),
+                envelope.kind.as_str(),
                 "market_snapshot" | "readiness" | "long_feature_batch" | "carry_feature_batch"
             ) {
                 let pending = inventory
                     .replaceable_paths
-                    .entry(observation.kind)
+                    .entry(envelope.kind)
                     .or_default();
                 if pending.as_os_str().is_empty() || path > *pending {
                     *pending = path;
@@ -789,6 +797,61 @@ mod tests {
         );
 
         drop(listener);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_spooled_row_with_an_unreadable_body_still_counts_toward_its_class() {
+        let root = std::env::temp_dir().join(format!(
+            "signal-worker-spool-envelope-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let spool = SpoolWriter::new(&root).unwrap();
+
+        let good = root.join("00000000000000000001-good.json");
+        std::fs::write(&good, observation(1)).unwrap();
+        let damaged = root.join("00000000000000000002-damaged.json");
+        std::fs::write(
+            &damaged,
+            br#"{"kind":"funding_update","payload_wire":"not-base64","sequence":"two"}"#,
+        )
+        .unwrap();
+
+        let inventory = spool.inventory().unwrap();
+        assert_eq!(inventory.files, 2);
+        assert_eq!(
+            inventory.bytes,
+            std::fs::metadata(&good).unwrap().len() + std::fs::metadata(&damaged).unwrap().len()
+        );
+        let lifecycle = &inventory.classes["lifecycle"];
+        assert_eq!(lifecycle.files, 2);
+        assert_eq!(lifecycle.oldest_path.as_deref(), Some(good.as_path()));
+        assert_eq!(lifecycle.newest_path.as_deref(), Some(damaged.as_path()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_spooled_row_without_a_readable_kind_fails_the_inventory() {
+        let root = std::env::temp_dir().join(format!(
+            "signal-worker-spool-no-kind-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let spool = SpoolWriter::new(&root).unwrap();
+        std::fs::write(
+            root.join("00000000000000000001-kindless.json"),
+            br#"{"sequence":1}"#,
+        )
+        .unwrap();
+
+        let error = spool.inventory().unwrap_err().to_string();
+        assert!(
+            error.contains("parse signal spool inventory"),
+            "unexpected error: {error}"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

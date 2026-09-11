@@ -11,6 +11,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 #[test]
 fn a_contract_at_its_delivery_clock_is_not_trading_whatever_status_says() {
@@ -343,7 +344,7 @@ fn compact_feature_config() -> SignalWorkerConfig {
 
 fn install_compact_history(worker: &mut SignalWorker, through_day: i64) {
     install_trading_instrument(worker, "BTCUSDT");
-    let klines = worker.state.klines.entry("BTCUSDT".into()).or_default();
+    let klines = Arc::make_mut(worker.state.klines.entry("BTCUSDT".into()).or_default());
     for open_ts_ms in (DAY_MS..through_day * DAY_MS).step_by(HOUR_MS as usize) {
         klines.insert(
             open_ts_ms,
@@ -360,7 +361,7 @@ fn install_compact_history(worker: &mut SignalWorker, through_day: i64) {
             },
         );
     }
-    let funding = worker.state.funding.entry("BTCUSDT".into()).or_default();
+    let funding = Arc::make_mut(worker.state.funding.entry("BTCUSDT".into()).or_default());
     for settlement_ts_ms in (DAY_MS..=through_day * DAY_MS).step_by(HOUR_MS as usize) {
         funding.insert(
             settlement_ts_ms,
@@ -441,7 +442,10 @@ fn clone_symbol_history(worker: &mut SignalWorker, source: &str, target: &str) {
             (row.open_ts_ms, row)
         })
         .collect();
-    worker.state.klines.insert(target.to_owned(), klines);
+    worker
+        .state
+        .klines
+        .insert(target.to_owned(), Arc::new(klines));
     let funding = worker.state.funding[source]
         .values()
         .cloned()
@@ -450,7 +454,10 @@ fn clone_symbol_history(worker: &mut SignalWorker, source: &str, target: &str) {
             (row.settlement_ts_ms, row)
         })
         .collect();
-    worker.state.funding.insert(target.to_owned(), funding);
+    worker
+        .state
+        .funding
+        .insert(target.to_owned(), Arc::new(funding));
 }
 
 fn worker_with_newer_prunable_state() -> SignalWorker {
@@ -458,56 +465,41 @@ fn worker_with_newer_prunable_state() -> SignalWorker {
     let mut worker = SignalWorker::with_universe(test_config(), test_universe()).unwrap();
     worker.state.last_observed_ts_ms = newer_at_ms;
     let kline_ts_ms = newer_at_ms - HOUR_MS;
-    worker
-        .state
-        .klines
-        .entry("BTCUSDT".into())
-        .or_default()
-        .insert(
-            kline_ts_ms,
-            HourlyKline {
-                symbol: "BTCUSDT".into(),
-                open_ts_ms: kline_ts_ms,
-                available_at_ms: newer_at_ms,
-                open: 100.0,
-                high: 101.0,
-                low: 99.0,
-                close: 100.0,
-                volume_base: 1.0,
-                turnover_quote: 100.0,
-            },
-        );
+    Arc::make_mut(worker.state.klines.entry("BTCUSDT".into()).or_default()).insert(
+        kline_ts_ms,
+        HourlyKline {
+            symbol: "BTCUSDT".into(),
+            open_ts_ms: kline_ts_ms,
+            available_at_ms: newer_at_ms,
+            open: 100.0,
+            high: 101.0,
+            low: 99.0,
+            close: 100.0,
+            volume_base: 1.0,
+            turnover_quote: 100.0,
+        },
+    );
     let funding_ts_ms = newer_at_ms - HOUR_MS;
-    worker
-        .state
-        .funding
-        .entry("BTCUSDT".into())
-        .or_default()
-        .insert(
-            funding_ts_ms,
-            SettledFunding {
-                symbol: "BTCUSDT".into(),
-                settlement_ts_ms: funding_ts_ms,
-                available_at_ms: newer_at_ms,
-                rate: -0.001,
-                funding_interval_min: 60,
-            },
-        );
+    Arc::make_mut(worker.state.funding.entry("BTCUSDT".into()).or_default()).insert(
+        funding_ts_ms,
+        SettledFunding {
+            symbol: "BTCUSDT".into(),
+            settlement_ts_ms: funding_ts_ms,
+            available_at_ms: newer_at_ms,
+            rate: -0.001,
+            funding_interval_min: 60,
+        },
+    );
     let whale_ts_ms = newer_at_ms - DAY_MS;
-    worker
-        .state
-        .whales
-        .entry("BTCUSDT".into())
-        .or_default()
-        .insert(
-            whale_ts_ms,
-            BinanceWhaleObservation {
-                symbol: "BTCUSDT".into(),
-                day_end_ms: whale_ts_ms,
-                available_at_ms: newer_at_ms,
-                long_short_ratio: Some(1.0),
-            },
-        );
+    Arc::make_mut(worker.state.whales.entry("BTCUSDT".into()).or_default()).insert(
+        whale_ts_ms,
+        BinanceWhaleObservation {
+            symbol: "BTCUSDT".into(),
+            day_end_ms: whale_ts_ms,
+            available_at_ms: newer_at_ms,
+            long_short_ratio: Some(1.0),
+        },
+    );
     worker.state.instrument_trading_intervals.insert(
         "BTCUSDT".into(),
         vec![InstrumentTradingInterval {
@@ -2309,7 +2301,7 @@ fn carry_scorer_catchup_is_bounded_ordered_and_has_no_market_payload() {
     let mut worker = SignalWorker::with_universe(config, test_universe()).unwrap();
     install_trading_instrument(&mut worker, "BTCUSDT");
     worker.state.last_carry_decision_ts_ms = Some(40 * DAY_MS);
-    let history = worker.state.klines.entry("BTCUSDT".into()).or_default();
+    let history = Arc::make_mut(worker.state.klines.entry("BTCUSDT".into()).or_default());
     for open_ts_ms in (5 * DAY_MS..50 * DAY_MS).step_by(HOUR_MS as usize) {
         history.insert(
             open_ts_ms,
@@ -2326,7 +2318,7 @@ fn carry_scorer_catchup_is_bounded_ordered_and_has_no_market_payload() {
             },
         );
     }
-    let funding = worker.state.funding.entry("BTCUSDT".into()).or_default();
+    let funding = Arc::make_mut(worker.state.funding.entry("BTCUSDT".into()).or_default());
     for settlement_ts_ms in (30 * DAY_MS..=42 * DAY_MS).step_by((8 * HOUR_MS) as usize) {
         funding.insert(
             settlement_ts_ms,
@@ -4291,4 +4283,389 @@ fn the_worker_judges_instruments_by_its_venues_settle_coin() {
     ));
     assert!(instrument_is_trading(&row("USDT"), demo.settle_coin()));
     assert!(!instrument_is_trading(&row("USDC"), demo.settle_coin()));
+}
+
+/// Live-scale state for the batch-candidate clone: the symbol count and the
+/// per-series depth the worker carries on a funded realm.
+fn live_scale_worker(symbols: usize) -> SignalWorker {
+    let mut worker = SignalWorker::with_universe(test_config(), test_universe()).unwrap();
+    let names: Vec<String> = (0..symbols)
+        .map(|index| format!("SYM{index:04}USDT"))
+        .collect();
+    for symbol in &names {
+        let mut klines = BTreeMap::new();
+        for hour in 0..720_i64 {
+            let open_ts_ms = hour * HOUR_MS;
+            klines.insert(
+                open_ts_ms,
+                HourlyKline {
+                    symbol: symbol.clone(),
+                    open_ts_ms,
+                    available_at_ms: open_ts_ms + HOUR_MS,
+                    open: 1.0,
+                    high: 2.0,
+                    low: 0.5,
+                    close: 1.5,
+                    volume_base: 100.0,
+                    turnover_quote: 150.0,
+                },
+            );
+        }
+        worker.state.klines.insert(symbol.clone(), Arc::new(klines));
+
+        let mut funding = BTreeMap::new();
+        for slot in 0..90_i64 {
+            let settlement_ts_ms = slot * 8 * HOUR_MS;
+            funding.insert(
+                settlement_ts_ms,
+                SettledFunding {
+                    symbol: symbol.clone(),
+                    settlement_ts_ms,
+                    available_at_ms: settlement_ts_ms + 1,
+                    rate: 0.0001,
+                    funding_interval_min: 480,
+                },
+            );
+        }
+        worker
+            .state
+            .funding
+            .insert(symbol.clone(), Arc::new(funding));
+
+        let mut whales = BTreeMap::new();
+        for day in 0..300_i64 {
+            let day_end_ms = day * DAY_MS;
+            whales.insert(
+                day_end_ms,
+                BinanceWhaleObservation {
+                    symbol: symbol.clone(),
+                    day_end_ms,
+                    available_at_ms: day_end_ms + 1,
+                    long_short_ratio: Some(1.2),
+                },
+            );
+        }
+        worker.state.whales.insert(symbol.clone(), Arc::new(whales));
+
+        worker.state.instruments.insert(
+            symbol.clone(),
+            InstrumentObservation {
+                symbol: symbol.clone(),
+                observed_ts_ms: 0,
+                available_at_ms: 0,
+                contract_type: Some("LinearPerpetual".into()),
+                symbol_type: None,
+                status: Some("Trading".into()),
+                base_coin: Some("SYM".into()),
+                quote_coin: Some("USDT".into()),
+                settle_coin: Some("USDT".into()),
+                launch_time_ms: Some(1),
+                delivery_time_ms: Some(0),
+                tick_size: Some(0.1),
+                qty_step: Some(0.001),
+                min_order_qty: Some(0.001),
+                min_notional_value: Some(5.0),
+                max_order_qty: None,
+                max_market_order_qty: None,
+                funding_interval_min: Some(480),
+                is_prelisting: false,
+            },
+        );
+        worker.state.tickers.insert(
+            symbol.clone(),
+            TickerObservation {
+                symbol: symbol.clone(),
+                observed_ts_ms: 0,
+                available_at_ms: 0,
+                mark_observed_ts_ms: Some(0),
+                funding_observed_ts_ms: Some(0),
+                schedule_observed_ts_ms: Some(0),
+                last_price: Some(1.5),
+                mark_price: Some(1.5),
+                index_price: Some(1.5),
+                bid1_price: Some(1.49),
+                ask1_price: Some(1.51),
+                bid1_size: Some(10.0),
+                ask1_size: Some(10.0),
+                open_interest: Some(1000.0),
+                open_interest_value: Some(1500.0),
+                turnover_24h: Some(1.0e6),
+                volume_24h: Some(1.0e6),
+                funding_rate: Some(0.0001),
+                next_funding_time_ms: Some(8 * HOUR_MS),
+            },
+        );
+    }
+    worker
+}
+
+fn live_scale_heap_bytes(worker: &SignalWorker) -> u64 {
+    // BTreeMap holds up to 11 key/value pairs per node; the node header and
+    // the unused slots are charged at the same per-pair rate.
+    let pair = |key: usize, value: usize| (key + value) as u64;
+    let mut bytes = 0_u64;
+    for (symbol, series) in &worker.state.klines {
+        bytes += symbol.len() as u64 + std::mem::size_of::<String>() as u64;
+        for row in series.values() {
+            bytes += pair(
+                std::mem::size_of::<i64>(),
+                std::mem::size_of::<HourlyKline>(),
+            ) + row.symbol.len() as u64;
+        }
+    }
+    for (symbol, series) in &worker.state.funding {
+        bytes += symbol.len() as u64 + std::mem::size_of::<String>() as u64;
+        for row in series.values() {
+            bytes += pair(
+                std::mem::size_of::<i64>(),
+                std::mem::size_of::<SettledFunding>(),
+            ) + row.symbol.len() as u64;
+        }
+    }
+    for (symbol, series) in &worker.state.whales {
+        bytes += symbol.len() as u64 + std::mem::size_of::<String>() as u64;
+        for row in series.values() {
+            bytes += pair(
+                std::mem::size_of::<i64>(),
+                std::mem::size_of::<BinanceWhaleObservation>(),
+            ) + row.symbol.len() as u64;
+        }
+    }
+    for row in worker.state.instruments.values() {
+        bytes += std::mem::size_of::<InstrumentObservation>() as u64 + row.symbol.len() as u64;
+    }
+    for row in worker.state.tickers.values() {
+        bytes += std::mem::size_of::<TickerObservation>() as u64 + row.symbol.len() as u64;
+    }
+    bytes
+}
+
+/// Run with `cargo test -p signal-worker --release -- --ignored --nocapture
+/// candidate_clone_cost`.
+#[test]
+#[ignore]
+fn candidate_clone_cost() {
+    let worker = live_scale_worker(400);
+    let bars: usize = worker
+        .state
+        .klines
+        .values()
+        .map(|series| series.len())
+        .sum();
+    let heap_bytes = live_scale_heap_bytes(&worker);
+    let kline_symbol_bytes: u64 = worker
+        .state
+        .klines
+        .values()
+        .flat_map(|series| series.values())
+        .map(|row| (std::mem::size_of::<String>() + row.symbol.len()) as u64)
+        .sum();
+    let kline_row_bytes: u64 = worker
+        .state
+        .klines
+        .values()
+        .flat_map(|series| series.values())
+        .map(|row| {
+            (std::mem::size_of::<i64>() + std::mem::size_of::<HourlyKline>() + row.symbol.len())
+                as u64
+        })
+        .sum();
+    let mut samples = Vec::new();
+    for _ in 0..50 {
+        let start = std::time::Instant::now();
+        let candidate = worker.clone();
+        samples.push(start.elapsed());
+        std::hint::black_box(&candidate);
+    }
+    samples.sort();
+    let median = samples[samples.len() / 2];
+
+    let mut encoded_len = 0;
+    let mut serialize_samples = Vec::new();
+    for _ in 0..5 {
+        let start = std::time::Instant::now();
+        let encoded = serde_json::to_vec(&worker.state).unwrap();
+        serialize_samples.push(start.elapsed());
+        encoded_len = encoded.len();
+    }
+    let first_serialize = serialize_samples[0];
+    serialize_samples.sort();
+    let serialize = serialize_samples[serialize_samples.len() / 2];
+
+    println!(
+        "symbols={} kline_bars={} heap_bytes={} kline_row_bytes={} kline_symbol_bytes={} clone_median_ms={:.3} clone_min_ms={:.3} clone_max_ms={:.3} serialize_median_ms={:.3} serialize_first_ms={:.3} serialized_bytes={}",
+        worker.state.klines.len(),
+        bars,
+        heap_bytes,
+        kline_row_bytes,
+        kline_symbol_bytes,
+        median.as_secs_f64() * 1e3,
+        samples[0].as_secs_f64() * 1e3,
+        samples[samples.len() - 1].as_secs_f64() * 1e3,
+        serialize.as_secs_f64() * 1e3,
+        first_serialize.as_secs_f64() * 1e3,
+        encoded_len,
+    );
+}
+
+/// The checkpoint layout the engine and a restarted worker read back.
+fn checkpoint_fixture_state() -> WorkerState {
+    let mut worker = SignalWorker::with_universe(test_config(), test_universe()).unwrap();
+    let state = &mut worker.state;
+    for (index, symbol) in ["AAAUSDT", "BBBUSDT", "BTCUSDT"].iter().enumerate() {
+        let base = index as f64;
+        let mut klines = BTreeMap::new();
+        for hour in 0..5_i64 {
+            let open_ts_ms = 10 * DAY_MS + hour * HOUR_MS;
+            klines.insert(
+                open_ts_ms,
+                HourlyKline {
+                    symbol: (*symbol).into(),
+                    open_ts_ms,
+                    available_at_ms: open_ts_ms + HOUR_MS,
+                    open: 100.0 + base,
+                    high: 101.0 + base,
+                    low: 99.0 + base,
+                    close: 100.5 + base,
+                    volume_base: 10.0 + base,
+                    turnover_quote: 1_000.0 + base,
+                },
+            );
+        }
+        state.klines.insert((*symbol).into(), Arc::new(klines));
+
+        let mut funding = BTreeMap::new();
+        for slot in 0..3_i64 {
+            let settlement_ts_ms = 10 * DAY_MS + slot * 8 * HOUR_MS;
+            funding.insert(
+                settlement_ts_ms,
+                SettledFunding {
+                    symbol: (*symbol).into(),
+                    settlement_ts_ms,
+                    available_at_ms: settlement_ts_ms + 1,
+                    rate: 0.0001 * (slot + 1) as f64,
+                    funding_interval_min: 480,
+                },
+            );
+        }
+        state.funding.insert((*symbol).into(), Arc::new(funding));
+
+        let mut whales = BTreeMap::new();
+        for day in 0..2_i64 {
+            let day_end_ms = (9 + day) * DAY_MS;
+            whales.insert(
+                day_end_ms,
+                BinanceWhaleObservation {
+                    symbol: (*symbol).into(),
+                    day_end_ms,
+                    available_at_ms: day_end_ms + 1,
+                    long_short_ratio: if index == 1 { None } else { Some(1.25) },
+                },
+            );
+        }
+        state.whales.insert((*symbol).into(), Arc::new(whales));
+
+        state
+            .kline_checked_from_ms
+            .insert((*symbol).into(), 10 * DAY_MS);
+        state
+            .kline_checked_through_ms
+            .insert((*symbol).into(), 10 * DAY_MS + 5 * HOUR_MS);
+        state.kline_coverage_intervals.insert(
+            (*symbol).into(),
+            vec![CoverageInterval {
+                checked_from_ms: 10 * DAY_MS,
+                checked_through_ms: 10 * DAY_MS + 5 * HOUR_MS,
+            }],
+        );
+        state
+            .funding_checked_from_ms
+            .insert((*symbol).into(), 10 * DAY_MS);
+        state
+            .funding_checked_through_ms
+            .insert((*symbol).into(), 10 * DAY_MS + 16 * HOUR_MS);
+        state
+            .whale_checked_from_ms
+            .insert((*symbol).into(), 9 * DAY_MS);
+        state
+            .whale_checked_through_ms
+            .insert((*symbol).into(), 10 * DAY_MS);
+    }
+    install_trading_instrument(&mut worker, "AAAUSDT");
+    install_trading_instrument(&mut worker, "BTCUSDT");
+    worker.state.last_input_sequence = 42;
+    worker.state.long_output_sequence = 7;
+    worker.state.carry_output_sequence = 3;
+    worker.state.last_observed_ts_ms = 10 * DAY_MS + 5 * HOUR_MS;
+    worker.state.last_carry_decision_ts_ms = Some(10 * DAY_MS);
+    worker.state
+}
+
+/// The checkpoint bytes are the contract with a restarted worker and with the
+/// engine that reads them; the recorded fixture is what they must stay.
+#[test]
+fn checkpoint_bytes_match_the_recorded_layout() {
+    let golden = include_str!("../../tests/fixtures/worker_state_checkpoint.json");
+    let encoded = serde_json::to_string(&checkpoint_fixture_state()).unwrap();
+    assert_eq!(encoded, golden.trim_end(), "checkpoint layout drifted");
+
+    let restored: WorkerState = serde_json::from_str(golden).unwrap();
+    assert_eq!(
+        serde_json::to_string(&restored).unwrap(),
+        golden.trim_end(),
+        "a checkpoint written by an older worker does not round-trip"
+    );
+}
+
+/// The batch candidate is all-or-nothing: a series the candidate copied and
+/// wrote is not visible on the committed worker when a later event in the
+/// same batch fails.
+#[test]
+fn a_failed_batch_leaves_every_series_as_it_was() {
+    let root = temporary_root("batch-rollback");
+    let config = test_config();
+    let universe = test_universe();
+    let mut durable = DurableSignalWorker::open_with_universe(
+        config,
+        universe,
+        root.join("state"),
+        root.join("spool"),
+    )
+    .unwrap();
+    let bar = |sequence: u64, open_ts_ms: i64, close: &str| WireEvent::BybitKlineBatch {
+        schema_version: SCHEMA_VERSION,
+        sequence,
+        symbol: "BTCUSDT".into(),
+        available_at_ms: open_ts_ms + HOUR_MS,
+        checked_from_ms: None,
+        checked_through_ms: None,
+        replace_coverage: false,
+        rows: vec![vec![
+            Value::from(open_ts_ms),
+            Value::from("100"),
+            Value::from("200"),
+            Value::from("1"),
+            Value::from(close),
+            Value::from("1"),
+            Value::from("100"),
+        ]],
+    };
+    let first = 10 * DAY_MS;
+    durable.apply_and_commit(bar(1, first, "100")).unwrap();
+    // The rows, not another handle on the shared series: an `Arc` clone would
+    // follow a write through the candidate and prove nothing.
+    let committed: BTreeMap<i64, HourlyKline> = (*durable.worker.state.klines["BTCUSDT"]).clone();
+    assert_eq!(committed.len(), 1);
+
+    let error = durable
+        .apply_many_and_commit([bar(2, first + HOUR_MS, "101"), bar(3, first, "150")])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("kline history rewrote"), "{error}");
+    assert_eq!(
+        *durable.worker.state.klines["BTCUSDT"], committed,
+        "the candidate's write to BTCUSDT survived a failed batch"
+    );
+    assert_eq!(durable.worker.state.last_input_sequence, 1);
+    std::fs::remove_dir_all(root).unwrap();
 }

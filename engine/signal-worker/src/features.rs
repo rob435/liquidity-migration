@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crate::config::{CarryFeatureConfig, LongFeatureConfig};
 use crate::model::{
@@ -7,9 +8,15 @@ use crate::model::{
 };
 use crate::{DAY_MS, HOUR_MS};
 
-pub type KlineHistory = BTreeMap<String, BTreeMap<i64, HourlyKline>>;
-pub type FundingHistory = BTreeMap<String, BTreeMap<i64, SettledFunding>>;
-pub type WhaleHistory = BTreeMap<String, BTreeMap<i64, BinanceWhaleObservation>>;
+pub type KlineSeries = BTreeMap<i64, HourlyKline>;
+pub type FundingSeries = BTreeMap<i64, SettledFunding>;
+pub type WhaleSeries = BTreeMap<i64, BinanceWhaleObservation>;
+
+/// One symbol's series is shared, not copied: a batch candidate clones the
+/// index and `Arc::make_mut` copies only the series it writes.
+pub type KlineHistory = BTreeMap<String, Arc<KlineSeries>>;
+pub type FundingHistory = BTreeMap<String, Arc<FundingSeries>>;
+pub type WhaleHistory = BTreeMap<String, Arc<WhaleSeries>>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LongFeatureBuild {
@@ -226,8 +233,8 @@ pub fn build_carry_features_at(
         let Some(row) = carry_row(
             symbol,
             history,
-            funding.get(symbol),
-            whales.get(symbol),
+            funding.get(symbol).map(|series| &**series),
+            whales.get(symbol).map(|series| &**series),
             decision_ts_ms,
             observed_ts_ms,
             cfg,

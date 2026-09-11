@@ -21,7 +21,11 @@ const TICKER_STRESS_MINUTES: usize = 120;
 const TICKS_PER_MINUTE: usize = 12;
 const TICKER_CADENCE_MS: i64 = 5_000;
 const OUTAGE_MINUTES: usize = 720;
-const MAX_CHECKPOINT_BYTES: u64 = 128 * 1024 * 1024;
+/// Nothing in the runtime caps the checkpoint, so the envelope is per retained
+/// row: what sits under it follows the registered LONG and CARRY windows, and a
+/// longer carry history moves the row count, not this bound. Measured at 188
+/// bytes per row for the 270-symbol worst case.
+const MAX_CHECKPOINT_BYTES_PER_ROW: u64 = 256;
 const MAX_JOURNAL_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_JOURNAL_ENTRIES: u64 = 1_024;
 
@@ -48,6 +52,22 @@ fn full_population_outage_resource_envelope_is_bounded() -> TestResult {
             .saturating_add(48),
         33 * 24,
     );
+
+    // What `prune` keeps, from the same functions it calls: the LONG window is
+    // the cold-start lookback plus its padding; the CARRY window is the source
+    // history plus the day `carry_retained_through_ms` runs past the scorer
+    // cursor, and its funding range is closed at both ends where the kline
+    // range is half-open. Neither sleeve can hold more than was recorded.
+    let recorded_hours = usize::try_from(HISTORY_DAYS * 24)?;
+    let long_retained_hours =
+        usize::try_from(signal_worker::worker::required_long_history_hours(&config))?
+            .min(recorded_hours);
+    let carry_window_hours =
+        usize::try_from(signal_worker::worker::required_carry_history_hours(&config))? + 24;
+    let carry_retained_hours = carry_window_hours.min(recorded_hours);
+    let carry_retained_settlements = (carry_window_hours + 1).min(recorded_hours);
+    let cold_klines = LONG_SYMBOLS * long_retained_hours + CARRY_SYMBOLS * carry_retained_hours;
+    let cold_funding = CARRY_SYMBOLS * carry_retained_settlements;
 
     let root = temporary_root();
     let state_dir = root.join("state");
@@ -161,7 +181,7 @@ fn full_population_outage_resource_envelope_is_bounded() -> TestResult {
     assert_eq!(durable.worker().state().last_input_sequence, 424);
     assert_eq!(
         population_counts(durable.worker().state()),
-        (736_560, 442_800, 1_050)
+        (cold_klines, cold_funding, 1_050)
     );
     let cold_metrics = durable.durability_metrics()?;
     assert_eq!(cold_metrics.journal_entries_retained, 424);
@@ -193,14 +213,9 @@ fn full_population_outage_resource_envelope_is_bounded() -> TestResult {
         durable.worker().state().last_carry_scorer_ts_ms,
         Some(end_ms - DAY_MS),
     );
-    let carry_retained_hours = 33 * 24 + 24;
     assert_eq!(
         population_counts(durable.worker().state()),
-        (
-            LONG_SYMBOLS * 102 * 24 + CARRY_SYMBOLS * carry_retained_hours,
-            CARRY_SYMBOLS * (carry_retained_hours + 1),
-            1_050,
-        ),
+        (cold_klines, cold_funding, 1_050),
     );
     let cold_restart_identity = state_identity(durable.worker().state())?;
     drop(durable);
@@ -217,7 +232,7 @@ fn full_population_outage_resource_envelope_is_bounded() -> TestResult {
         cold_restart_identity
     );
     let cold_reopen_metrics = durable.durability_metrics()?;
-    assert!(cold_reopen_metrics.checkpoint_bytes <= MAX_CHECKPOINT_BYTES);
+    assert!(cold_reopen_metrics.checkpoint_bytes <= checkpoint_bound(durable.worker().state()));
     assert_eq!(cold_reopen_metrics.journal_bytes, 0);
     assert_eq!(cold_reopen_metrics.journal_entries_retained, 0);
     assert_durability_bounds(&cold_reopen_metrics);
@@ -242,20 +257,15 @@ fn full_population_outage_resource_envelope_is_bounded() -> TestResult {
         durable.worker().state().last_carry_scorer_ts_ms,
         Some(end_ms - DAY_MS),
     );
-    let carry_retained_hours = 33 * 24 + 24;
     assert_eq!(
         population_counts(durable.worker().state()),
-        (
-            LONG_SYMBOLS * 102 * 24 + CARRY_SYMBOLS * carry_retained_hours,
-            CARRY_SYMBOLS * (carry_retained_hours + 1),
-            1_050,
-        ),
+        (cold_klines, cold_funding, 1_050),
     );
     let ticker_metrics = durable.durability_metrics()?;
     assert_eq!(ticker_metrics.spool_files, pre_ticker_spool.spool_files);
     assert_eq!(ticker_metrics.spool_bytes, pre_ticker_spool.spool_bytes);
     assert!(ticker_metrics.checkpoint_writes_session >= 2);
-    assert!(ticker_metrics.checkpoint_bytes <= MAX_CHECKPOINT_BYTES);
+    assert!(ticker_metrics.checkpoint_bytes <= checkpoint_bound(durable.worker().state()));
     assert!(ticker_metrics.journal_bytes <= MAX_JOURNAL_BYTES);
     assert!(ticker_metrics.journal_entries_retained <= MAX_JOURNAL_ENTRIES);
     assert_durability_bounds(&ticker_metrics);
@@ -287,8 +297,9 @@ fn full_population_outage_resource_envelope_is_bounded() -> TestResult {
     assert_eq!(
         population_counts(durable.worker().state()),
         (
-            LONG_SYMBOLS * (102 * 24 - elapsed_hours) + CARRY_SYMBOLS * carry_retained_hours,
-            CARRY_SYMBOLS * (carry_retained_hours + 1),
+            LONG_SYMBOLS * (long_retained_hours - elapsed_hours)
+                + CARRY_SYMBOLS * carry_retained_hours,
+            cold_funding,
             1_050,
         ),
     );
@@ -298,7 +309,7 @@ fn full_population_outage_resource_envelope_is_bounded() -> TestResult {
     assert!(outage_metrics.replaceable_outputs_coalesced >= 2_800);
     assert!(outage_metrics.checkpoint_writes_session >= 3);
     assert_durability_bounds(&outage_metrics);
-    assert!(outage_metrics.checkpoint_bytes <= MAX_CHECKPOINT_BYTES);
+    assert!(outage_metrics.checkpoint_bytes <= checkpoint_bound(durable.worker().state()));
     assert!(outage_metrics.journal_bytes <= MAX_JOURNAL_BYTES);
     assert!(outage_metrics.journal_entries_retained <= MAX_JOURNAL_ENTRIES);
 
@@ -309,13 +320,13 @@ fn full_population_outage_resource_envelope_is_bounded() -> TestResult {
     assert_eq!(reopened.worker().state().last_input_sequence, 3_306);
     assert_eq!(state_identity(reopened.worker().state())?, final_identity);
     let reopened_metrics = reopened.durability_metrics()?;
-    assert!(reopened_metrics.checkpoint_bytes <= MAX_CHECKPOINT_BYTES);
+    assert!(reopened_metrics.checkpoint_bytes <= checkpoint_bound(reopened.worker().state()));
     assert_eq!(reopened_metrics.journal_bytes, 0);
     assert_eq!(reopened_metrics.journal_entries_retained, 0);
     assert_durability_bounds(&reopened_metrics);
     let (final_klines, final_funding, _) = population_counts(reopened.worker().state());
     println!(
-        "resource_envelope union=270 long=120 carry=150 cold_klines=736560 cold_funding=442800 ticker_cadence_ms=5000 ticker_events=1440 ticker_hours=2 outage_watermark_hours=12 final_klines={final_klines} final_funding={final_funding} checkpoint_bytes={} spool_files={} spool_bytes={} sequence=3306",
+        "resource_envelope union=270 long=120 carry=150 cold_klines={cold_klines} cold_funding={cold_funding} ticker_cadence_ms=5000 ticker_events=1440 ticker_hours=2 outage_watermark_hours=12 final_klines={final_klines} final_funding={final_funding} checkpoint_bytes={} spool_files={} spool_bytes={} sequence=3306",
         reopened_metrics.checkpoint_bytes,
         reopened_metrics.spool_files,
         reopened_metrics.spool_bytes,
@@ -513,11 +524,16 @@ fn ticker_wire(symbol: &str) -> BybitTickerWire {
     }
 }
 
+fn checkpoint_bound(state: &WorkerState) -> u64 {
+    let (klines, funding, whales) = population_counts(state);
+    (klines + funding + whales) as u64 * MAX_CHECKPOINT_BYTES_PER_ROW
+}
+
 fn population_counts(state: &WorkerState) -> (usize, usize, usize) {
     (
-        state.klines.values().map(BTreeMap::len).sum(),
-        state.funding.values().map(BTreeMap::len).sum(),
-        state.whales.values().map(BTreeMap::len).sum(),
+        state.klines.values().map(|series| series.len()).sum(),
+        state.funding.values().map(|series| series.len()).sum(),
+        state.whales.values().map(|series| series.len()).sum(),
     )
 }
 

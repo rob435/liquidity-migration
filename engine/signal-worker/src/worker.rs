@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
 
 use engine_types::{
     Feed, StrategyId, Subscription, MAX_SIGNAL_OBSERVATION_BYTES, MAX_SIGNAL_SUBSCRIPTIONS,
@@ -14,7 +15,7 @@ use crate::features::{
     build_carry_features_at, build_carry_replay_features, build_long_features, carry_decision_at,
     FundingHistory, KlineHistory, WhaleHistory,
 };
-use crate::history::{merge_row, CoverageMut, CoverageRef};
+use crate::history::{merge_row, retain_series, CoverageMut, CoverageRef};
 use crate::model::{
     BootstrapCoverage, CoverageInterval, DataRejection, InstrumentObservation,
     InstrumentTradingInterval, MarketMark, NormalizedObservation, ObservationPayload,
@@ -40,8 +41,17 @@ pub use lifecycle::WorkerSignalLifecycle;
 /// Hours of kline and funding history every CARRY batch is built from: the
 /// replay window plus the feature lookbacks, whether or not a decision has
 /// been published, because every batch carries the window.
-pub(crate) fn required_carry_history_hours(config: &SignalWorkerConfig) -> i64 {
+pub fn required_carry_history_hours(config: &SignalWorkerConfig) -> i64 {
     carry_source_history_hours(&config.carry).unwrap_or(i64::MAX)
+}
+
+/// Hours of kline history LONG is built from: the cold-start lookback plus the
+/// padding that keeps the oldest ranked day whole.
+pub fn required_long_history_hours(config: &SignalWorkerConfig) -> i64 {
+    i64::try_from(config.long.cold_start_lookback_days)
+        .unwrap_or(i64::MAX / 24)
+        .saturating_mul(24)
+        .saturating_add(48)
 }
 
 fn validate_gap_symbols(
@@ -383,7 +393,7 @@ impl SignalWorker {
     /// A worker that has not derived its universe yet. It refuses every input
     /// until the universe snapshot that resolves it arrives.
     pub fn new(config: SignalWorkerConfig) -> Result<Self, WorkerError> {
-        let universe = unresolved_universe(&config.live.environment, realm_endpoint(&config));
+        let universe = unresolved_universe(&config.live.environment, config.universe_endpoint());
         Self::new_with_source_generation(config, universe, REPLAY_SOURCE_GENERATION.to_owned())
     }
 
@@ -779,7 +789,7 @@ impl SignalWorker {
         let normalized = normalize_kline_rows(&symbol, available_at_ms, &rows)?;
         for row in normalized {
             merge_row(
-                self.state.klines.entry(row.symbol.clone()).or_default(),
+                Arc::make_mut(self.state.klines.entry(row.symbol.clone()).or_default()),
                 row,
             )?;
         }
@@ -820,7 +830,7 @@ impl SignalWorker {
         let mut inserted = Vec::new();
         for row in normalized {
             if merge_row(
-                self.state.funding.entry(row.symbol.clone()).or_default(),
+                Arc::make_mut(self.state.funding.entry(row.symbol.clone()).or_default()),
                 row.clone(),
             )? {
                 inserted.push(row);
@@ -998,7 +1008,7 @@ impl SignalWorker {
     ) -> Result<(), WorkerError> {
         for row in normalize_whales(available_at_ms, rows)? {
             merge_row(
-                self.state.whales.entry(row.symbol.clone()).or_default(),
+                Arc::make_mut(self.state.whales.entry(row.symbol.clone()).or_default()),
                 row,
             )?;
         }
@@ -1875,11 +1885,7 @@ impl SignalWorker {
         for symbol in symbols {
             let long_cutoff = long_symbols.contains(&symbol).then(|| {
                 retained_through_ms.saturating_sub(
-                    i64::try_from(self.config.long.cold_start_lookback_days)
-                        .unwrap_or(i64::MAX / 24)
-                        .saturating_mul(24)
-                        .saturating_add(48)
-                        .saturating_mul(HOUR_MS),
+                    required_long_history_hours(&self.config).saturating_mul(HOUR_MS),
                 )
             });
             let carry_cutoff = carry_symbols.contains(&symbol).then(|| {
@@ -1902,7 +1908,7 @@ impl SignalWorker {
                 .chain(carry_cutoff.map(|from| (from, carry_retained_through_ms)))
                 .collect::<Vec<_>>();
             if let Some(rows) = self.state.klines.get_mut(&symbol) {
-                rows.retain(|timestamp, _| {
+                retain_series(rows, |timestamp| {
                     windows
                         .iter()
                         .any(|(from, through)| from <= timestamp && timestamp < through)
@@ -1926,7 +1932,7 @@ impl SignalWorker {
             (current_funding_cutoff, retained_through_ms),
         ];
         for rows in self.state.funding.values_mut() {
-            rows.retain(|timestamp, _| {
+            retain_series(rows, |timestamp| {
                 funding_windows
                     .iter()
                     .any(|(from, through)| from <= timestamp && timestamp <= through)
@@ -1958,7 +1964,7 @@ impl SignalWorker {
             (current_whale_cutoff, retained_through_ms),
         ];
         for rows in self.state.whales.values_mut() {
-            rows.retain(|timestamp, _| {
+            retain_series(rows, |timestamp| {
                 whale_windows
                     .iter()
                     .any(|(from, through)| from <= timestamp && timestamp <= through)
@@ -2600,7 +2606,7 @@ impl DurableSignalWorker {
         state_dir: impl AsRef<Path>,
         spool_dir: impl AsRef<Path>,
     ) -> Result<Self, WorkerError> {
-        let universe = unresolved_universe(&config.live.environment, realm_endpoint(&config));
+        let universe = unresolved_universe(&config.live.environment, config.universe_endpoint());
         Self::open_with_universe(config, universe, state_dir, spool_dir)
     }
 

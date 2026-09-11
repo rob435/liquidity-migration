@@ -58,7 +58,9 @@ pub struct WorkerHeartbeat {
     pub pid: u32,
     pub updated_at_ms: i64,
     pub public_market_realm: String,
-    pub public_bybit_host: String,
+    /// The host this realm's klines, tickers and funding come from, whatever
+    /// venue `sources.public_venue` names.
+    pub public_host: String,
     pub credential_free: bool,
     pub signal_config_sha256: String,
     pub long_rule_sha256: String,
@@ -2291,7 +2293,7 @@ impl LiveRunner {
             pid: std::process::id(),
             updated_at_ms: wall_ms()?,
             public_market_realm: self.config.live.public_market_realm.clone(),
-            public_bybit_host: self.config.sources.bybit_mainnet_host.clone(),
+            public_host: self.config.public_market_host().to_owned(),
             credential_free: true,
             signal_config_sha256: self.config.identity.signal_config_sha256.clone(),
             long_rule_sha256: self.config.identity.long_rule_sha256.clone(),
@@ -2394,7 +2396,7 @@ fn write_provisional_heartbeat(
         pid: std::process::id(),
         updated_at_ms: wall_ms()?,
         public_market_realm: config.live.public_market_realm.clone(),
-        public_bybit_host: config.sources.bybit_mainnet_host.clone(),
+        public_host: config.public_market_host().to_owned(),
         credential_free: true,
         signal_config_sha256: config.identity.signal_config_sha256.clone(),
         long_rule_sha256: config.identity.long_rule_sha256.clone(),

@@ -273,17 +273,17 @@ def _transport_reasons(payload: dict[str, object], *, now: float) -> list[str]:
         reasons.append(f"{accepted:g}/{capacity:g} kline topics accepted")
     last_frame_ms = _number(payload.get("bybit_ws_last_frame_ts_ms"))
     if last_frame_ms is None:
-        reasons.append("no Bybit WebSocket frame recorded")
+        reasons.append("no public WebSocket frame recorded")
         return reasons
     limit_ms = _number(payload.get("bybit_ws_max_frame_age_ms"))
     written_ms = _number(payload.get("updated_at_ms"))
     clock_ms = written_ms if written_ms else now * 1000
     age_ms = clock_ms - last_frame_ms
     if age_ms < 0:
-        reasons.append("Bybit WebSocket frame timestamp is in the future")
+        reasons.append("public WebSocket frame timestamp is in the future")
     elif limit_ms is not None and age_ms > limit_ms:
         reasons.append(
-            f"no Bybit WebSocket frame for {age_ms / 1000:.0f}s (limit {limit_ms / 1000:.0f}s)"
+            f"no public WebSocket frame for {age_ms / 1000:.0f}s (limit {limit_ms / 1000:.0f}s)"
         )
     return reasons
 
@@ -291,16 +291,16 @@ def _transport_reasons(payload: dict[str, object], *, now: float) -> list[str]:
 def _signal_worker_detail(payload: dict[str, object], *, now: float) -> str:
     reasons: list[str] = []
     if payload.get("bybit_ws_connected") is not True:
-        reasons.append("Bybit WebSocket disconnected")
+        reasons.append("public WebSocket disconnected")
     else:
         reasons.extend(_transport_reasons(payload, now=now))
     if payload.get("bybit_ws_gap_open") is True:
         since_ms = _number(payload.get("bybit_ws_gap_open_since_wall_ts_ms"))
         if since_ms is None:
-            reasons.append("Bybit WebSocket repair gap open")
+            reasons.append("public WebSocket repair gap open")
         else:
             age_sec = max(0.0, now - since_ms / 1000)
-            reasons.append(f"Bybit WebSocket repair gap open for {age_sec:.0f}s")
+            reasons.append(f"public WebSocket repair gap open for {age_sec:.0f}s")
     if payload.get("bybit_ws_ticker_coverage_complete") is not True:
         # The counts say whether the fill is short by a few symbols or empty.
         rows = _number(payload.get("bybit_ws_ticker_rows"))

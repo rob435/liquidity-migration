@@ -578,11 +578,26 @@ impl SignalWorkerConfig {
 
     /// The venue host whose instrument table the realm's universe was derived
     /// from. A realm reading a non-Bybit venue names that venue's own host:
-    /// the listings behind the snapshot came from there.
+    /// the listings behind the snapshot came from there. On the Bybit demo
+    /// realm that is the demo venue, whose instrument list bounds what the
+    /// account may trade.
     pub fn universe_endpoint(&self) -> &str {
         match self.public_venue() {
             Ok(PublicVenueKind::Mexc) => crate::venue::mexc::rest_host(),
+            Ok(PublicVenueKind::Hyperliquid) => crate::venue::hyperliquid::rest_host(),
             _ => crate::worker::realm_endpoint(self),
+        }
+    }
+
+    /// The venue host the realm's klines, tickers and funding come from. Both
+    /// Bybit realms read mainnet — demo observes mainnet prices deliberately —
+    /// so this is not `universe_endpoint`, which names the instrument table's
+    /// host instead.
+    pub fn public_market_host(&self) -> &str {
+        match self.public_venue() {
+            Ok(PublicVenueKind::Mexc) => crate::venue::mexc::rest_host(),
+            Ok(PublicVenueKind::Hyperliquid) => crate::venue::hyperliquid::rest_host(),
+            _ => self.sources.bybit_mainnet_host.as_str(),
         }
     }
 }
@@ -1170,6 +1185,43 @@ pub(crate) mod tests {
         }
         config.sources.public_venue = "binance".into();
         assert!(config.public_venue().is_err());
+    }
+
+    /// The two hosts a realm reads are not the same host. The universe comes
+    /// from the instrument table, which on `demo` is the demo venue; klines,
+    /// tickers and funding come from the market host, which is Bybit mainnet
+    /// for both Bybit realms and the venue's own host for the others.
+    #[test]
+    fn each_realm_names_the_hosts_it_actually_reads() {
+        let mexc = crate::venue::mexc::rest_host();
+        let hyperliquid = crate::venue::hyperliquid::rest_host();
+        for (realm, universe, market) in [
+            ("demo", "api-demo.bybit.com", "api.bybit.com"),
+            ("mainnet", "api.bybit.com", "api.bybit.com"),
+            ("mexc", mexc, mexc),
+            ("hyperliquid", hyperliquid, hyperliquid),
+        ] {
+            let config = checked_realm_config(realm);
+            assert_eq!(
+                config.universe_endpoint(),
+                universe,
+                "{realm} universe host"
+            );
+            assert_eq!(config.public_market_host(), market, "{realm} market host");
+        }
+        for realm in ["mexc", "hyperliquid"] {
+            let config = checked_realm_config(realm);
+            assert_ne!(
+                config.universe_endpoint(),
+                config.sources.bybit_mainnet_host,
+                "{realm} universe host"
+            );
+            assert_ne!(
+                config.public_market_host(),
+                config.sources.bybit_mainnet_host,
+                "{realm} market host"
+            );
+        }
     }
 
     pub(crate) fn checked_realm_config(realm: &str) -> SignalWorkerConfig {

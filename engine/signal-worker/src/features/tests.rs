@@ -186,7 +186,7 @@ fn long_features_match_recorded_golden_with_identical_nulls() {
                     + (0.004 + symbol_index as f64 * 0.001) * (h / 19.0).sin())
                 .exp();
             let open_ts_ms = golden.base_ts_ms + hour as i64 * HOUR_MS;
-            history.entry((*symbol).to_owned()).or_default().insert(
+            Arc::make_mut(history.entry((*symbol).to_owned()).or_default()).insert(
                 open_ts_ms,
                 HourlyKline {
                     symbol: (*symbol).to_owned(),
@@ -277,7 +277,7 @@ fn long_features_match_recorded_golden_with_identical_nulls() {
 
     let mut gapped = history.clone();
     let missing = golden.observed_ts_ms - 10 * HOUR_MS;
-    gapped.get_mut("AAAUSDT").unwrap().remove(&missing);
+    Arc::make_mut(gapped.get_mut("AAAUSDT").unwrap()).remove(&missing);
     let gapped = build_long_features(
         &gapped,
         &symbols
@@ -333,7 +333,7 @@ fn carry_features_match_recorded_golden_with_identical_nulls() {
                     + (0.003 + symbol_index as f64 * 0.001) * (h / 23.0).sin())
                 .exp();
             let open_ts_ms = golden.base_ts_ms + hour as i64 * HOUR_MS;
-            klines.entry((*symbol).to_owned()).or_default().insert(
+            Arc::make_mut(klines.entry((*symbol).to_owned()).or_default()).insert(
                 open_ts_ms,
                 HourlyKline {
                     symbol: (*symbol).to_owned(),
@@ -351,7 +351,7 @@ fn carry_features_match_recorded_golden_with_identical_nulls() {
         for settlement in 0..=golden.days * 3 {
             let settlement_ts_ms = golden.base_ts_ms + settlement as i64 * 8 * HOUR_MS;
             let rate = -0.0015 + 0.0003 * (settlement as f64 / 5.0 + symbol_index as f64).sin();
-            funding.entry((*symbol).to_owned()).or_default().insert(
+            Arc::make_mut(funding.entry((*symbol).to_owned()).or_default()).insert(
                 settlement_ts_ms,
                 SettledFunding {
                     symbol: (*symbol).to_owned(),
@@ -364,7 +364,7 @@ fn carry_features_match_recorded_golden_with_identical_nulls() {
         }
         for day in 0..=golden.days {
             let day_end_ms = golden.base_ts_ms + day as i64 * DAY_MS;
-            whales.entry((*symbol).to_owned()).or_default().insert(
+            Arc::make_mut(whales.entry((*symbol).to_owned()).or_default()).insert(
                 day_end_ms,
                 BinanceWhaleObservation {
                     symbol: (*symbol).to_owned(),
@@ -460,7 +460,7 @@ fn carry_features_match_recorded_golden_with_identical_nulls() {
 
     let mut gapped = klines.clone();
     let missing = golden.decision_ts_ms - 10 * HOUR_MS;
-    gapped.get_mut("AAAUSDT").unwrap().remove(&missing);
+    Arc::make_mut(gapped.get_mut("AAAUSDT").unwrap()).remove(&missing);
     let gapped = build_carry_features_at(
         &gapped,
         &funding,

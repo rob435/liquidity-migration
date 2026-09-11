@@ -727,7 +727,7 @@ def test_degraded_worker_page_names_the_transport_input_that_decided_it(tmp_path
     alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0)
     assert [alert.key for alert in alerts] == ["worker-status:worker"]
     assert "516/517 kline topics accepted" in alerts[0].message
-    assert "no Bybit WebSocket frame for 47s (limit 30s)" in alerts[0].message
+    assert "no public WebSocket frame for 47s (limit 30s)" in alerts[0].message
     assert "carry cycle has not completed" in alerts[0].message
 
     # A sound transport says nothing extra, so the page stays about the lane.
@@ -744,15 +744,15 @@ def test_degraded_worker_page_names_the_transport_input_that_decided_it(tmp_path
     # An absent or future frame stamp is named rather than read as fresh.
     heartbeat.write_text(json.dumps(dict(healthy_transport, bybit_ws_last_frame_ts_ms=None)))
     alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0)
-    assert "no Bybit WebSocket frame recorded" in alerts[0].message
+    assert "no public WebSocket frame recorded" in alerts[0].message
     heartbeat.write_text(json.dumps(dict(healthy_transport, bybit_ws_last_frame_ts_ms=1_000_001)))
     alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0)
-    assert "Bybit WebSocket frame timestamp is in the future" in alerts[0].message
+    assert "public WebSocket frame timestamp is in the future" in alerts[0].message
 
     # A disconnected stream keeps its one line; the clauses below it are moot.
     heartbeat.write_text(json.dumps(dict(payload, bybit_ws_connected=False)))
     alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0)
-    assert "Bybit WebSocket disconnected" in alerts[0].message
+    assert "public WebSocket disconnected" in alerts[0].message
     assert "kline topics accepted" not in alerts[0].message
 
 

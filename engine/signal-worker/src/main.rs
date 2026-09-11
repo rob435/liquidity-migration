@@ -46,7 +46,7 @@ struct ConfigCheck<'a> {
     credential_free: bool,
     environment: &'a str,
     public_market_realm: &'a str,
-    public_bybit_host: &'a str,
+    public_host: &'a str,
     public_venue: &'a str,
     long_destination: u16,
     carry_destination: u16,
@@ -118,7 +118,7 @@ fn config_check(config: &SignalWorkerConfig) -> ConfigCheck<'_> {
         credential_free: true,
         environment: &config.live.environment,
         public_market_realm: &config.live.public_market_realm,
-        public_bybit_host: &config.sources.bybit_mainnet_host,
+        public_host: config.public_market_host(),
         public_venue: &config.sources.public_venue,
         long_destination: config.long_destination,
         carry_destination: config.carry_destination,
@@ -266,8 +266,8 @@ fn reject_overlapping_paths(
 mod tests {
     use super::{config_check, parse_args, Command};
 
-    /// `scripts/ops.sh deploy` reads this object. Its keys are the contract, so
-    /// the venue seam adds one and moves none.
+    /// What an operator running `check-config` reads. Its keys are the
+    /// contract, so the venue seam adds one and moves none.
     #[test]
     fn the_demo_config_check_object_names_the_public_venue_and_nothing_new() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -301,7 +301,7 @@ mod tests {
                 "live_long_source_pattern",
                 "llm_gate",
                 "long_destination",
-                "public_bybit_host",
+                "public_host",
                 "public_market_realm",
                 "public_venue",
                 "schema_version",
@@ -310,7 +310,7 @@ mod tests {
             ]
         );
         assert!(
-            encoded.contains(r#""public_bybit_host":"api.bybit.com","public_venue":"bybit""#),
+            encoded.contains(r#""public_host":"api.bybit.com","public_venue":"bybit""#),
             "{encoded}"
         );
     }

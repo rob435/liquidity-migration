@@ -30,6 +30,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 #[test]
 fn production_frontier_plans_only_unchecked_or_rebased_ranges() {
@@ -1920,7 +1921,7 @@ fn durable_carry_catchup_crosses_delivery_without_post_delivery_refetch() {
         .unwrap();
     let mut state = worker.state().clone();
     for symbol in ["BTCUSDT", "ETHUSDT"] {
-        let klines = state.klines.entry(symbol.into()).or_default();
+        let klines = Arc::make_mut(state.klines.entry(symbol.into()).or_default());
         for open_ts_ms in (100 * DAY_MS..212 * DAY_MS).step_by(HOUR_MS as usize) {
             klines.insert(
                 open_ts_ms,
@@ -1937,7 +1938,7 @@ fn durable_carry_catchup_crosses_delivery_without_post_delivery_refetch() {
                 },
             );
         }
-        let funding = state.funding.entry(symbol.into()).or_default();
+        let funding = Arc::make_mut(state.funding.entry(symbol.into()).or_default());
         for settlement_ts_ms in (100 * DAY_MS + HOUR_MS..=212 * DAY_MS).step_by(HOUR_MS as usize) {
             funding.insert(
                 settlement_ts_ms,
@@ -2292,7 +2293,7 @@ fn a_restated_closed_candle_is_kept_as_first_seen_and_named() {
     let mut state = worker.state().clone();
     // 2026-09-10 16:00 UTC, a closed hour.
     let t = 1_789_056_000_000_i64;
-    state.klines.entry("HYPEUSDT".into()).or_default().insert(
+    Arc::make_mut(state.klines.entry("HYPEUSDT".into()).or_default()).insert(
         t,
         HourlyKline {
             symbol: "HYPEUSDT".into(),
@@ -2354,7 +2355,7 @@ fn a_checked_hour_without_a_candle_is_not_a_hole() {
     let worker = SignalWorker::new(checked_demo_config()).unwrap();
     let mut state = worker.state().clone();
     let day = 100 * DAY_MS;
-    let klines = state.klines.entry("PONSUSDT".into()).or_default();
+    let klines = Arc::make_mut(state.klines.entry("PONSUSDT".into()).or_default());
     for open_ts_ms in [day, day + 2 * HOUR_MS] {
         klines.insert(
             open_ts_ms,
@@ -2615,7 +2616,7 @@ fn a_changed_funding_interval_is_not_a_rewritten_settlement() {
         .unwrap()
         .state()
         .clone();
-    state.funding.entry("BTCUSDT".into()).or_default().insert(
+    Arc::make_mut(state.funding.entry("BTCUSDT".into()).or_default()).insert(
         settlement,
         SettledFunding {
             symbol: "BTCUSDT".into(),

@@ -9,6 +9,7 @@
 //! before intervals existed.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crate::model::{BinanceWhaleObservation, CoverageInterval, HourlyKline, SettledFunding};
 use crate::worker::WorkerError;
@@ -49,6 +50,17 @@ pub(crate) fn merge_row<R: HistoryRow>(
     }
     rows.insert(key, row);
     Ok(true)
+}
+
+/// Trim a shared series, copying it only when a row actually leaves.
+pub(crate) fn retain_series<V: Clone>(
+    rows: &mut Arc<BTreeMap<i64, V>>,
+    keep: impl Fn(&i64) -> bool,
+) {
+    if rows.keys().all(&keep) {
+        return;
+    }
+    Arc::make_mut(rows).retain(|timestamp, _| keep(timestamp));
 }
 
 impl HistoryRow for HourlyKline {
