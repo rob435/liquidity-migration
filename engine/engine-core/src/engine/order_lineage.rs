@@ -305,6 +305,12 @@ mod tests {
         fn rotate(&mut self, base: &WalRecord) -> Result<bool, WalError> {
             self.inner.rotate(base)
         }
+        fn segment_size(&self) -> u64 {
+            self.inner.segment_size()
+        }
+        fn durability_mode(&self) -> Option<engine_wal::DurabilityMode> {
+            Wal::durability_mode(&self.inner)
+        }
         fn supports_order_lineage_archive(&self) -> bool {
             true
         }

@@ -42,6 +42,23 @@ FULL: dict[str, Any] = {
         {"strategy": "long", "symbol": "BTCUSDT", "reason": "rolling_loss_tripped"},
         {"strategy": "long", "symbol": "ETHUSDT", "reason": "quote_stale"},
     ],
+    "loop_iterations": 41207,
+    "protective_backlog_oldest_ms": 0,
+    "wal": {
+        "durability_mode": "caller-thread",
+        "last_rotation_base_bytes": 51200,
+        "last_rotation_ms": 7,
+        "segment_bytes": 268435456,
+    },
+    "canary": {
+        "blocked": "canary_loss_ceiling",
+        "expires_in_s": 3600,
+        "gross_notional_usdt": 42.5,
+        "loss_usdt": 3.25,
+        "open_orders": 1,
+        "positions": 2,
+        "unvalued_trips": 1,
+    },
 }
 
 
@@ -52,6 +69,10 @@ def _run(path: Path, *extra: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         check=False,
     )
+
+
+def _line(out: str, label: str) -> str:
+    return next(row for row in out.splitlines() if row.strip().startswith(label)).rstrip()
 
 
 def _heartbeat(tmp_path: Path, payload: object) -> Path:
@@ -81,8 +102,15 @@ def test_all_three_sections_render_the_heartbeat_the_engine_wrote(tmp_path: Path
     assert "carry: instrument catalog stale" in out
     assert "long: r-1" in out
     assert "7200" in out and "abc1234" in out
+    # Byte counts and turn counts print whole: %g would make them exponential.
+    assert "durability=caller-thread segment_bytes=268435456 last_rotation_ms=7" in out
+    assert _line(out, "loop iterations").endswith(" 41207")
+    # Zero is a reading here too: nothing waiting at all is null, not a zero age.
+    assert _line(out, "protective backlog ms").endswith(" 0")
 
     # EXPOSURE
+    assert "expires_in_s=3600 blocked=canary_loss_ceiling" in out
+    assert "gross=42.5 USDT positions=2 open_orders=1 loss=3.25 USDT unvalued_trips=1" in out
     assert "NEARUSDT" in out and "qty=120" in out and "strategy=carry" in out
     assert "ZECUSDT" in out and "qty=3.5" in out
     assert "BTCUSDT long" in out
@@ -114,6 +142,11 @@ def test_absent_fields_print_unknown_and_never_zero(tmp_path: Path) -> None:
         "positions",
         "working entries",
         "entry blockers",
+        "wal",
+        "loop iterations",
+        "protective backlog ms",
+        "canary policy",
+        "canary book",
     ):
         line = next(row for row in out.splitlines() if row.strip().startswith(label))
         assert "unknown" in line, line
@@ -122,6 +155,21 @@ def test_absent_fields_print_unknown_and_never_zero(tmp_path: Path) -> None:
     for line in out.splitlines():
         if "unknown" in line:
             assert " 0" not in line.replace("unknown", ""), line
+
+
+def test_a_policy_refusing_nothing_is_not_an_unknown_policy(tmp_path: Path) -> None:
+    # `blocked: null` inside a published policy means it is refusing nothing.
+    # A heartbeat carrying no policy at all is what `unknown` is for.
+    payload = {
+        "wall_ts_ms": NOW_MS,
+        "canary": {"blocked": None, "expires_in_s": 86400, "positions": 0},
+    }
+    out = _run(_heartbeat(tmp_path, payload)).stdout
+    assert "expires_in_s=86400 blocked=none" in out
+    assert "positions=0" in out
+
+    without = _run(_heartbeat(tmp_path, {"wall_ts_ms": NOW_MS})).stdout
+    assert "expires_in_s=unknown blocked=unknown" in without
 
 
 def test_an_empty_list_is_a_reading_not_an_unknown(tmp_path: Path) -> None:

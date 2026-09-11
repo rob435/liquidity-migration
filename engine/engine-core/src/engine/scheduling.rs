@@ -909,7 +909,22 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
             self.flush_strategy_prefix()?;
             let base = self.rotation_base(clock::wall_ms());
+            // Timed here rather than inside the log: this is the wait the
+            // engine loop actually takes, two fdatasyncs and a directory
+            // fsync, with nothing else running.
+            let rotating = std::time::Instant::now();
             if self.wal.rotate(&base)? {
+                let took_ns = rotating.elapsed().as_nanos() as u64;
+                // Read the moment rotation returned, so the segment is the
+                // restatement and nothing since.
+                let base_bytes = self.wal.segment_size();
+                if let Some(heartbeat) = self.heartbeat.as_mut() {
+                    heartbeat.record_rotation(took_ns, base_bytes);
+                }
+                // The log replaces its durability thread's descriptor during
+                // a rotation; a run that came back without one pays every
+                // later barrier on this loop.
+                crate::heartbeat::warn_once_on_caller_thread_barriers(self.wal.durability_mode());
                 self.books
                     .orders
                     .try_apply(&base)

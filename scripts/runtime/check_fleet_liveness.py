@@ -6,7 +6,9 @@ scopes read the fleet
 manifest, require every always-on unit in the realm to be active, require each
 heartbeat-bearing unit's heartbeat file to be fresh, require each signal worker
 to leave its bounded startup and report ready, and alert when an engine reports
-it can no longer open positions or that its rolling-loss trip is on.
+it can no longer open positions, that its rolling-loss trip is on, that a cancel
+or stop has gone unanswered, that its own loop counter has stopped moving, or
+that its canary policy is refusing openings or is inside its last day.
 The ``host`` scope watches the units the manifest marks independent — the
 market recorder, its hourly upload, the state backup, the storage reclaimer —
 plus disk space, the off-box backup stamp, the recorder's own status file, the
@@ -87,6 +89,9 @@ _DEPLOY_TRANSITIONAL_ALERT_PREFIXES = (
     "may-open:",
     "private-stream:",
     "rolling-loss:",
+    "protective-backlog:",
+    "wal-durability:",
+    "canary-",
     "strategy-errors:",
     "worker-status:",
     "worker-spool",
@@ -103,6 +108,16 @@ _ENGINE_UNITS = {row.engine_unit for row in _realm_rows()}
 # (mexc/rest.rs QUOTA_REQUESTS): ~19 s of pacing floor at 151 symbols, order
 # 15-25 s in practice, against the 600 s mexc/ws.rs CONNECTED_RESYNC period.
 _PRIVATE_STREAM_STUCK_MS = 180_000
+# A cancel or a stop the venue has not answered in a minute is a fault whatever
+# the process state: the engine is healthy, the order is not coming off, and the
+# exposure it was meant to remove is still on.
+_PROTECTIVE_BACKLOG_STUCK_MS = 60_000
+# `loop_iterations` must move between two readings of one process. The bound is
+# the engine-rate sampler's: at a 30-second timer a wider gap is not a pair.
+_LOOP_SAMPLE_MAX_GAP_SEC = 60.0
+# A canary policy inside its last day: the realm stops opening when it expires,
+# and renewing it is an owner decision that needs more than a moment's notice.
+_CANARY_EXPIRY_WARN_SEC = 86_400
 _ENGINE_WAL_BYTES_PER_SECOND = 1_048_576
 _ENGINE_RSS_BYTES = 1_610_612_736
 # Written by scripts/runtime/reclaim_host_storage.py, one JSON row per deleted
@@ -213,7 +228,9 @@ def evaluate_units(scope: str, rows: list[FleetUnit]) -> list[Alert]:
     return alerts
 
 
-def evaluate_heartbeats(rows: list[FleetUnit], *, now: float, max_age_sec: float) -> list[Alert]:
+def evaluate_heartbeats(
+    rows: list[FleetUnit], *, now: float, max_age_sec: float, counters: dict[str, float] | None = None
+) -> list[Alert]:
     alerts = []
     for row in rows:
         if row.output_artifact == "-":
@@ -222,6 +239,7 @@ def evaluate_heartbeats(rows: list[FleetUnit], *, now: float, max_age_sec: float
         try:
             age = now - path.stat().st_mtime
         except OSError:
+            _forget_loop_samples(row.unit, counters)
             alerts.append(
                 Alert(
                     f"heartbeat:{row.unit}",
@@ -231,6 +249,7 @@ def evaluate_heartbeats(rows: list[FleetUnit], *, now: float, max_age_sec: float
             )
             continue
         if age > max_age_sec:
+            _forget_loop_samples(row.unit, counters)
             alerts.append(
                 Alert(
                     f"heartbeat:{row.unit}",
@@ -239,7 +258,7 @@ def evaluate_heartbeats(rows: list[FleetUnit], *, now: float, max_age_sec: float
                 )
             )
             continue
-        alerts.extend(evaluate_engine_heartbeat(row.unit, path, now=now))
+        alerts.extend(evaluate_engine_heartbeat(row.unit, path, now=now, counters=counters))
     return alerts
 
 
@@ -376,7 +395,9 @@ def _signal_worker_detail(payload: dict[str, object], *, now: float) -> str:
     return "; ".join(reasons) or "worker self-check is degraded"
 
 
-def evaluate_engine_heartbeat(unit: str, path: Path, *, now: float | None = None) -> list[Alert]:
+def evaluate_engine_heartbeat(
+    unit: str, path: Path, *, now: float | None = None, counters: dict[str, float] | None = None
+) -> list[Alert]:
     # Freshness alone is not health. Signal workers publish their own verdict;
     # engines publish entry and loss latches. Other heartbeat-bearing units do
     # not carry these fields and receive only the structural JSON check here.
@@ -484,6 +505,8 @@ def evaluate_engine_heartbeat(unit: str, path: Path, *, now: float | None = None
                 f"{unit} rolling-loss trip is on: {_rolling_loss_detail(payload)}; entries refused",
             )
         )
+    if unit in _ENGINE_UNITS:
+        alerts.extend(_engine_runtime_alerts(unit, payload, now=time.time() if now is None else now, counters=counters))
     strategy_errors = payload.get("strategy_errors")
     if unit in _ENGINE_UNITS and isinstance(strategy_errors, list) and strategy_errors:
         detail = "; ".join(
@@ -498,6 +521,113 @@ def evaluate_engine_heartbeat(unit: str, path: Path, *, now: float | None = None
                 f"{unit} reports strategy errors: {detail or str(strategy_errors)}",
             )
         )
+    return alerts
+
+
+def _loop_prefix(unit: str) -> str:
+    return f"engine-loop:{unit}:"
+
+
+def _forget_loop_samples(unit: str, counters: dict[str, float] | None) -> None:
+    """A reading nobody took cannot be half of a pair."""
+
+    if counters is None:
+        return
+    for key in [key for key in counters if key.startswith(_loop_prefix(unit))]:
+        del counters[key]
+
+
+def _engine_loop_alerts(
+    unit: str, payload: dict[str, object], *, now: float, counters: dict[str, float] | None
+) -> list[Alert]:
+    """The engine's own turn counter, compared against this scope's last reading.
+
+    Heartbeat freshness is the file's mtime, which anything that touches the
+    file can move; this is the process saying it turned. Unchanged between two
+    readings of one live process is a loop that is running and not advancing.
+    """
+
+    iterations = _number(payload.get("loop_iterations"))
+    if counters is None or iterations is None:
+        return []
+    prefix = _loop_prefix(unit)
+    previous, sampled_at = counters.get(prefix + "iterations"), counters.get(prefix + "time")
+    counters[prefix + "iterations"] = iterations
+    counters[prefix + "time"] = now
+    if previous is None or sampled_at is None:
+        return []
+    elapsed = now - sampled_at
+    if elapsed <= 0 or elapsed > _LOOP_SAMPLE_MAX_GAP_SEC:
+        return []
+    # A restart begins the count again, which the restart rule owns.
+    if iterations != previous:
+        return []
+    return [
+        Alert(
+            f"engine-loop:{unit}",
+            "CRITICAL",
+            f"{unit} engine loop stalled: {iterations:.0f} turns at both readings "
+            f"{elapsed:.0f}s apart, with a fresh heartbeat",
+        )
+    ]
+
+
+def _engine_runtime_alerts(
+    unit: str, payload: dict[str, object], *, now: float, counters: dict[str, float] | None
+) -> list[Alert]:
+    """What the engine says about its own loop, its log and its canary policy.
+
+    Every field here is absent from an engine older than the split, and an
+    absent field is never a fault: each rule reads only what the beat carries.
+    """
+
+    alerts: list[Alert] = []
+    backlog_ms = _number(payload.get("protective_backlog_oldest_ms"))
+    if backlog_ms is not None and backlog_ms > _PROTECTIVE_BACKLOG_STUCK_MS:
+        alerts.append(
+            Alert(
+                f"protective-backlog:{unit}",
+                "CRITICAL",
+                f"{unit} protective work unresolved: the oldest cancel or stop has waited "
+                f"{backlog_ms / 1000:.0f}s (limit {_PROTECTIVE_BACKLOG_STUCK_MS / 1000:.0f}s) "
+                "for the venue to answer",
+            )
+        )
+    wal = payload.get("wal")
+    if isinstance(wal, dict) and wal.get("durability_mode") == "caller-thread":
+        alerts.append(
+            Alert(
+                f"wal-durability:{unit}",
+                "WARNING",
+                f"{unit} log has no durability thread: every barrier runs on the engine loop, "
+                "so the loop waits for the disk before the send it protects. Same durability, "
+                "slower loop",
+            )
+        )
+    alerts.extend(_engine_loop_alerts(unit, payload, now=now, counters=counters))
+    canary = payload.get("canary")
+    if isinstance(canary, dict):
+        blocked = canary.get("blocked")
+        if isinstance(blocked, str) and blocked:
+            # The policy doing its job. Nothing to repair, and an agent could
+            # only report back what the policy already says.
+            alerts.append(
+                Alert(
+                    f"canary-blocked:{unit}",
+                    "NOTICE",
+                    f"{unit} canary policy refuses every opening: {blocked}",
+                )
+            )
+        expires_in_s = _number(canary.get("expires_in_s"))
+        if expires_in_s is not None and expires_in_s < _CANARY_EXPIRY_WARN_SEC:
+            alerts.append(
+                Alert(
+                    f"canary-expiry:{unit}",
+                    "WARNING",
+                    f"{unit} canary policy expires in {expires_in_s / 3600:.1f}h "
+                    f"(limit {_CANARY_EXPIRY_WARN_SEC / 3600:.0f}h); the realm stops opening when it does",
+                )
+            )
     return alerts
 
 
@@ -792,10 +922,24 @@ def evaluate_engine_rates(
     return alerts
 
 
+#: What an incoming runtime would report exactly the same way, so none of it is
+#: evidence against replacing the running one. Routine liveness still reports
+#: every one of them.
+_NOT_DEPLOYMENT_BLOCKERS = (
+    # The risk kernel refuses entries under the trip either way.
+    "rolling-loss:",
+    # The realm's written canary policy: the incoming engine compiles the same
+    # file, so a cap it is holding or an expiry it is near says nothing about
+    # the release.
+    "canary-",
+    # Where the log's barriers run is a property of this box. Refusing the
+    # deploy leaves the old engine paying the same wait.
+    "wal-durability:",
+)
+
+
 def deployment_blockers(alerts: list[Alert]) -> list[Alert]:
-    # A rolling-loss restriction must not prevent replacing a running engine.
-    # The risk kernel still refuses entries; routine liveness still reports the trip.
-    return [alert for alert in alerts if not alert.key.startswith("rolling-loss:")]
+    return [alert for alert in alerts if not alert.key.startswith(_NOT_DEPLOYMENT_BLOCKERS)]
 
 
 def run_demo_soak() -> int:
@@ -1582,12 +1726,16 @@ def main() -> int:
 
     alerts: list[Alert] = []
     fleet_rows: list[FleetUnit] = []
+    heartbeats_read = False
     if not deploy_maintenance:
         try:
             fleet_rows = load_fleet_manifest()
             rows = scope_units(scope, fleet_rows)
             alerts.extend(evaluate_units(scope, rows))
-            alerts.extend(evaluate_heartbeats(rows, now=now, max_age_sec=args.max_heartbeat_age_sec))
+            alerts.extend(
+                evaluate_heartbeats(rows, now=now, max_age_sec=args.max_heartbeat_age_sec, counters=counters)
+            )
+            heartbeats_read = True
         except (OSError, ValueError) as error:
             alerts.append(Alert("manifest", "CRITICAL", f"cannot read the fleet manifest: {error}"))
     if scope == "host":
@@ -1631,7 +1779,7 @@ def main() -> int:
                 label=label,
             )
             alerts.extend(capture_alerts)
-    if scope == "host" or args.engine_rates or (capture_status_files and not deploy_maintenance):
+    if scope == "host" or args.engine_rates or heartbeats_read or (capture_status_files and not deploy_maintenance):
         save_state(counters_file, counters)
     if args.upload_stamp_file:
         alerts.extend(

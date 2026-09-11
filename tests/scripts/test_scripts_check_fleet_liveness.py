@@ -466,6 +466,253 @@ def test_a_paced_private_stream_resync_is_quiet_but_a_stuck_one_pages(tmp_path: 
     assert alerts_for() == set()
 
 
+ENGINE_UNIT = sorted(liveness._ENGINE_UNITS)[0]
+
+
+def _engine_beat(path: Path, **fields: object) -> Path:
+    path.write_text(
+        json.dumps({"wall_ts_ms": 0, "may_open": True, "rolling_loss_tripped": False, **fields})
+    )
+    return path
+
+
+def test_unanswered_protective_work_pages_whatever_the_process_state(tmp_path: Path) -> None:
+    # A cancel or a stop the venue has not answered in a minute leaves exposure
+    # on that the engine already decided to remove. Every other field reads
+    # healthy while it happens.
+    heartbeat = tmp_path / "heartbeat.json"
+
+    def keys(**fields: object) -> set[str]:
+        return {
+            alert.key
+            for alert in liveness.evaluate_engine_heartbeat(ENGINE_UNIT, _engine_beat(heartbeat, **fields))
+        }
+
+    assert keys() == set(), "an engine older than the field says nothing here"
+    assert keys(protective_backlog_oldest_ms=None) == set()
+    assert keys(protective_backlog_oldest_ms=0) == set(), "answered work is not a backlog"
+    assert keys(protective_backlog_oldest_ms=liveness._PROTECTIVE_BACKLOG_STUCK_MS) == set(), (
+        "the limit itself is still inside the bound"
+    )
+
+    stuck = liveness.evaluate_engine_heartbeat(
+        ENGINE_UNIT, _engine_beat(heartbeat, protective_backlog_oldest_ms=185_000)
+    )
+    assert [(alert.key, alert.severity) for alert in stuck] == [
+        (f"protective-backlog:{ENGINE_UNIT}", "CRITICAL")
+    ]
+    assert "protective work unresolved" in stuck[0].message
+    assert "185s (limit 60s)" in stuck[0].message
+
+    # A heartbeat-bearing unit that is not an engine carries no such contract.
+    assert liveness.evaluate_engine_heartbeat("worker", _engine_beat(heartbeat, protective_backlog_oldest_ms=185_000)) == []
+
+    # And it resolves by answering, with no other state to clear.
+    assert keys(protective_backlog_oldest_ms=250) == set()
+
+
+def test_barriers_on_the_engine_loop_warn_and_do_not_page(tmp_path: Path) -> None:
+    # Same durability either way: the loop pays the wait instead of the log's
+    # own thread. Nothing is lost, so nothing is CRITICAL.
+    heartbeat = tmp_path / "heartbeat.json"
+
+    def alerts_for(wal: object) -> list[liveness.Alert]:
+        return liveness.evaluate_engine_heartbeat(ENGINE_UNIT, _engine_beat(heartbeat, wal=wal))
+
+    for healthy in (
+        {"durability_mode": "sync-thread", "segment_bytes": 4096},
+        {"durability_mode": "unsynced"},
+        {"durability_mode": None},
+        {},
+    ):
+        assert alerts_for(healthy) == [], healthy
+
+    paying = alerts_for({"durability_mode": "caller-thread", "segment_bytes": 4096})
+    assert [(alert.key, alert.severity) for alert in paying] == [
+        (f"wal-durability:{ENGINE_UNIT}", "WARNING")
+    ]
+    assert "no durability thread" in paying[0].message
+
+
+def test_a_loop_that_stops_turning_pages_on_the_second_reading(tmp_path: Path) -> None:
+    heartbeat = tmp_path / "heartbeat.json"
+    counters: dict[str, float] = {}
+
+    def keys(iterations: object, *, at: float) -> set[str]:
+        return {
+            alert.key
+            for alert in liveness.evaluate_engine_heartbeat(
+                ENGINE_UNIT,
+                _engine_beat(heartbeat, loop_iterations=iterations),
+                now=at,
+                counters=counters,
+            )
+        }
+
+    # One reading is not a comparison.
+    assert keys(41_207, at=1_000.0) == set()
+    assert counters[f"engine-loop:{ENGINE_UNIT}:iterations"] == 41_207
+    # A loop that turned between the readings is a healthy loop.
+    assert keys(41_327, at=1_030.0) == set()
+    # Unchanged, with a fresh heartbeat: the process is up and not advancing.
+    stalled = liveness.evaluate_engine_heartbeat(
+        ENGINE_UNIT,
+        _engine_beat(heartbeat, loop_iterations=41_327),
+        now=1_060.0,
+        counters=counters,
+    )
+    assert [(alert.key, alert.severity) for alert in stalled] == [
+        (f"engine-loop:{ENGINE_UNIT}", "CRITICAL")
+    ]
+    assert "engine loop stalled" in stalled[0].message
+    assert "30s apart" in stalled[0].message
+    # And it resolves as soon as the loop turns again.
+    assert keys(41_400, at=1_090.0) == set()
+
+    # A gap too wide to be one pair re-seeds rather than judging.
+    assert keys(41_400, at=1_090.0 + liveness._LOOP_SAMPLE_MAX_GAP_SEC + 1) == set()
+    assert keys(41_400, at=1_090.0 + liveness._LOOP_SAMPLE_MAX_GAP_SEC + 31) == {
+        f"engine-loop:{ENGINE_UNIT}"
+    }
+
+    # A restarted engine begins its count again; the restart rules own that.
+    assert keys(12, at=1_400.0) == set()
+    assert keys(112, at=1_430.0) == set()
+
+    # An engine older than the field, and a scope keeping no counters, cannot
+    # compare anything and must not invent a stall.
+    assert keys(None, at=1_460.0) == set()
+    assert (
+        liveness.evaluate_engine_heartbeat(
+            ENGINE_UNIT, _engine_beat(heartbeat, loop_iterations=99), now=1_490.0
+        )
+        == []
+    )
+
+
+def test_a_stale_or_unreadable_heartbeat_leaves_no_half_pair(tmp_path: Path) -> None:
+    heartbeat = _engine_beat(tmp_path / "heartbeat.json", loop_iterations=7)
+    row = liveness.FleetUnit(
+        unit=ENGINE_UNIT,
+        kind="service",
+        realm="demo",
+        activation="always",
+        health="active",
+        output_artifact=str(heartbeat),
+    )
+    counters: dict[str, float] = {}
+    now = time.time()
+    assert liveness.evaluate_heartbeats([row], now=now, max_age_sec=60.0, counters=counters) == []
+    assert counters[f"engine-loop:{ENGINE_UNIT}:iterations"] == 7
+
+    os.utime(heartbeat, (now - 300, now - 300))
+    stale = liveness.evaluate_heartbeats([row], now=now, max_age_sec=60.0, counters=counters)
+    assert [alert.key for alert in stale] == [f"heartbeat:{ENGINE_UNIT}"]
+    assert counters == {}, "a reading nobody took cannot be half of a pair"
+
+    heartbeat.unlink()
+    assert [alert.key for alert in liveness.evaluate_heartbeats([row], now=now, max_age_sec=60.0, counters=counters)] == [
+        f"heartbeat:{ENGINE_UNIT}"
+    ]
+    assert counters == {}
+
+
+def test_a_canary_policy_reports_its_restriction_and_warns_before_it_expires(tmp_path: Path) -> None:
+    heartbeat = tmp_path / "heartbeat.json"
+
+    def alerts_for(canary: object) -> list[tuple[str, str]]:
+        return [
+            (alert.key, alert.severity)
+            for alert in liveness.evaluate_engine_heartbeat(ENGINE_UNIT, _engine_beat(heartbeat, canary=canary))
+        ]
+
+    assert alerts_for(None) == [], "a realm with no policy"
+    assert alerts_for({"blocked": None, "expires_in_s": 172_800}) == []
+    assert alerts_for({"blocked": "", "expires_in_s": 172_800}) == []
+
+    # A restriction the policy is enforcing on purpose: real, and nothing to fix.
+    assert alerts_for({"blocked": "canary_loss_ceiling", "expires_in_s": 172_800}) == [
+        (f"canary-blocked:{ENGINE_UNIT}", "NOTICE")
+    ]
+
+    assert alerts_for({"blocked": None, "expires_in_s": liveness._CANARY_EXPIRY_WARN_SEC}) == []
+    expiring = liveness.evaluate_engine_heartbeat(
+        ENGINE_UNIT,
+        _engine_beat(heartbeat, canary={"blocked": None, "expires_in_s": 3_600}),
+    )
+    assert [(alert.key, alert.severity) for alert in expiring] == [
+        (f"canary-expiry:{ENGINE_UNIT}", "WARNING")
+    ]
+    assert "expires in 1.0h" in expiring[0].message
+
+    # An expired policy refuses everything and is past its warning.
+    assert alerts_for({"blocked": "canary_expired", "expires_in_s": -10}) == [
+        (f"canary-blocked:{ENGINE_UNIT}", "NOTICE"),
+        (f"canary-expiry:{ENGINE_UNIT}", "WARNING"),
+    ]
+
+
+def test_a_restriction_the_incoming_engine_would_repeat_never_refuses_a_deploy() -> None:
+    # The readiness check and the demo soak both run these alerts as blockers.
+    # A canary cap, a canary nearing expiry and barriers on the loop are all
+    # properties of the policy file or the box, not of the runtime being
+    # replaced, so refusing the handover would only keep the old engine under
+    # exactly the same condition.
+    alerts = [
+        liveness.Alert(f"canary-blocked:{ENGINE_UNIT}", "NOTICE", "at a cap"),
+        liveness.Alert(f"canary-expiry:{ENGINE_UNIT}", "WARNING", "expires soon"),
+        liveness.Alert(f"wal-durability:{ENGINE_UNIT}", "WARNING", "no durability thread"),
+        liveness.Alert(f"rolling-loss:{ENGINE_UNIT}", "NOTICE", "tripped"),
+    ]
+    assert liveness.deployment_blockers(alerts) == []
+
+    # A fault the new process must not inherit still refuses it.
+    blocking = [
+        liveness.Alert(f"protective-backlog:{ENGINE_UNIT}", "CRITICAL", "unresolved"),
+        liveness.Alert(f"engine-loop:{ENGINE_UNIT}", "CRITICAL", "stalled"),
+        liveness.Alert(f"may-open:{ENGINE_UNIT}", "CRITICAL", "latched"),
+    ]
+    assert liveness.deployment_blockers(alerts + blocking) == blocking
+
+
+def test_the_loop_sample_survives_between_realm_runs(tmp_path: Path, monkeypatch, capsys) -> None:
+    """The stall rule needs two runs of one timer, so the pair must be stored."""
+
+    heartbeat = _engine_beat(tmp_path / "engine.json", loop_iterations=900)
+    row = liveness.FleetUnit(
+        unit=ENGINE_UNIT,
+        kind="service",
+        realm="demo",
+        activation="always",
+        health="active",
+        output_artifact=str(heartbeat),
+    )
+    monkeypatch.setattr(liveness, "load_fleet_manifest", lambda: [row])
+    monkeypatch.setattr(liveness, "scope_units", lambda _scope, rows: rows)
+    monkeypatch.setattr(liveness, "unit_states", lambda units: {unit: "active" for unit in units})
+    monkeypatch.setattr(liveness, "active_deploy_age", lambda *_args, **_kwargs: None)
+    monkeypatch.delenv("ONCALL_DEADMAN_URL", raising=False)
+    monkeypatch.delenv("LIVENESS_CAPTURE_STATUS_FILE", raising=False)
+    state_file = tmp_path / "state.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["check_fleet_liveness.py", "--account-scope", "demo", "--state-file", str(state_file)],
+    )
+
+    assert liveness.main() == 0
+    assert "engine-loop" not in capsys.readouterr().out
+    counters_file = state_file.with_name(state_file.stem + ".counters.json")
+    assert liveness.load_state(counters_file)[f"engine-loop:{ENGINE_UNIT}:iterations"] == 900
+
+    # The same reading one run later, with the file still fresh. A health
+    # fault with its routes accepted still exits 0.
+    assert liveness.main() == 0
+    out = capsys.readouterr().out
+    assert f"CRITICAL engine-loop:{ENGINE_UNIT}" in out
+    assert "engine loop stalled" in out
+
+
 def test_a_stuck_private_stream_page_carries_its_journal_and_holds_across_a_deploy(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -1021,6 +1021,34 @@ pub trait OrderEpochReader: Send {
     fn max_order_epoch_ms(&mut self) -> Result<Option<i64>, WalError>;
 }
 
+/// Where a durability barrier actually runs.
+///
+/// A `barrier_begin` is only asynchronous while the log has its own sync
+/// thread. A writer whose thread could not be started keeps the same
+/// durability promise by running every barrier on the caller — the engine
+/// loop — so the difference is in responsiveness, not in correctness, and
+/// nothing but this answer makes it observable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DurabilityMode {
+    /// No barrier waits for the disk.
+    Unsynced,
+    /// `barrier_begin` hands the fsync to the log's own thread.
+    SyncThread,
+    /// No thread; every barrier runs on the caller.
+    CallerThread,
+}
+
+impl DurabilityMode {
+    /// The spelling the heartbeat publishes and the fleet watchdog reads.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DurabilityMode::Unsynced => "unsynced",
+            DurabilityMode::SyncThread => "sync-thread",
+            DurabilityMode::CallerThread => "caller-thread",
+        }
+    }
+}
+
 pub trait Wal {
     /// Buffered append. Returns the record's sequence number.
     fn append(&mut self, record: &WalRecord) -> Result<u64, WalError>;
@@ -1072,6 +1100,12 @@ pub trait Wal {
     fn rotate(&mut self, base: &WalRecord) -> Result<bool, WalError> {
         let _ = base;
         Ok(false)
+    }
+    /// Where this log's barriers run. `None` from a log that does not say —
+    /// the in-memory test doubles — which the heartbeat writes as null rather
+    /// than as a mode nobody measured.
+    fn durability_mode(&self) -> Option<DurabilityMode> {
+        None
     }
 }
 

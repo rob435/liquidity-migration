@@ -36,6 +36,11 @@ fn beat_with(costs: &Costs) -> serde_json::Value {
         working_entries: &[],
         costs,
         rolling_loss: None,
+        venue_queue: None,
+        protective_backlog_oldest_ms: None,
+        wal_durability_mode: None,
+        wal_segment_bytes: None,
+        canary: None,
     };
     let beat = Heartbeat::new("unused".into(), None, None);
     serde_json::from_str(&beat.render(&facts, 1_700_000_000_000)).expect("valid json")

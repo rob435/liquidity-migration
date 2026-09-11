@@ -73,6 +73,7 @@ def test_help_lists_only_current_operator_routes() -> None:
         "real-money",
         "deploy",
         "why",
+        "alert-drill",
     ):
         assert route in result.stdout
     for retired in ("rollout", "staged", "install|activate"):
@@ -146,6 +147,46 @@ def test_why_reads_the_realms_engine_heartbeat_on_the_host(tmp_path: Path) -> No
     assert realm_row("demo").engine_heartbeat in capture.read_text()
 
     assert _run("why", "not-a-realm", env=environment).returncode == 2
+
+
+def test_alert_drill_runs_the_documented_host_recipe_and_prints_no_secret(tmp_path: Path) -> None:
+    capture, environment = _ssh_capture(tmp_path)
+
+    assert _run("alert-drill", env=environment).returncode == 0
+    payload = capture.read_text(encoding="utf-8")
+    assert "REMOTE_ARGS=( host )" in payload
+    assert "systemd-run --wait --pipe --collect" in payload
+    assert "--property=Type=oneshot" in payload
+    assert "--property=User=liquidity-observer" in payload
+    assert "--property=EnvironmentFile=/etc/liquidity-migration/notifications.env" in payload
+    assert "--property=EnvironmentFile=/etc/liquidity-migration/oncall.env" in payload
+    assert "scripts/runtime/check_fleet_liveness.py" in payload
+    assert '--account-scope "${REMOTE_ARGS[0]}" --require-oncall --delivery-drill' in payload
+    # PID 1 reads the private files; only their paths ever cross the wire.
+    for secret in ("TELEGRAM_BOT_TOKEN", "INCIDENT_ROUTINE_FIRE_TOKEN", "ONCALL_DEADMAN_URL"):
+        assert secret not in payload
+
+    # An explicit host scope is the same run.
+    assert _run("alert-drill", "--scope", "host", env=environment).returncode == 0
+    assert "REMOTE_ARGS=( host )" in capture.read_text(encoding="utf-8")
+
+
+def test_alert_drill_refuses_a_scope_with_no_drill_and_never_reaches_the_host(tmp_path: Path) -> None:
+    capture, environment = _ssh_capture(tmp_path)
+
+    # A realm is a real scope of the watchdog and still has no dead-man route,
+    # so check_fleet_liveness refuses the drill there; ops.sh says so first.
+    realm = _run("alert-drill", "--scope", "demo", env=environment)
+    assert realm.returncode == 2
+    assert "must be host" in realm.stderr
+
+    for bad in (
+        ("alert-drill", "--scope", "not-a-realm"),
+        ("alert-drill", "--execute"),
+        ("alert-drill", "host"),
+    ):
+        assert _run(*bad, env=environment).returncode == 2, bad
+    assert not capture.exists(), "a refused drill never reaches the host"
 
 
 def test_deploy_allowlists_one_stop_and_disarm_mode_per_funded_realm(tmp_path: Path) -> None:

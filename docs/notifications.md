@@ -39,6 +39,10 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 | Realm | Private stream | Engine reports `private_stream_unready_ms > 180000`. The account channel clears its own readiness for each execution-history sweep, and a venue whose history is the authority sweeps on a timer with the socket up, so only the age is a fault. The bit alone is not, and an engine that omits the field reports through Admission instead |
 | Realm | Circuit breaker | Engine reports `rolling_loss_tripped=true`: a `NOTICE` carrying the window net, limit and window, repeated on the Telegram cooldown and resolved when the window clears. The trip is the risk kernel enforcing `max_rolling_loss_fraction × capital_reference`, so it wakes no agent and never blocks a deploy |
 | Realm | Strategy errors | A nonempty engine `strategy_errors` list is `CRITICAL`, including when `may_open=true`; one reference per realm includes the sleeve details and engine journal |
+| Realm | Protective backlog | Engine reports `protective_backlog_oldest_ms > 60000`: a cancel, a position stop, or a reduce-only send the venue has not answered in a minute. `CRITICAL` whatever the process state — the exposure the engine decided to remove is still on, and protective work never expires the way a queued opening does |
+| Realm | WAL durability | Engine reports `wal.durability_mode = "caller-thread"`: the log has no durability thread, so every barrier runs on the engine loop. Same durability, slower loop, so `WARNING`. A property of the box rather than of a release, so it never blocks a deploy |
+| Realm | Engine loop | Engine `loop_iterations` identical at two readings of one live process less than 60 s apart is `CRITICAL`. Heartbeat freshness is the file's mtime, which anything touching the file can move; this is the process saying it turned. A different or lower count (a restart), a wider gap, or an engine that omits the field alerts nothing |
+| Realm | Canary policy | Engine `canary.blocked` non-null is `NOTICE`: the realm's written operating policy refusing every opening on purpose. `canary.expires_in_s < 86400` is `WARNING` — the realm stops opening when the policy expires, and renewing it is an owner decision. The incoming engine compiles the same policy file, so neither blocks a deploy |
 | Host | Recorders | Status unreadable, no frames for 2 min, complete connection loss, blocked storage, or new drops are immediate. Partial shard loss warns after two consecutive 3-min readings, so a dynamic tier's sub-second socket start does not page and resolve. Startup silence and connection loss use `started_at_ns`, so a restarted recorder reads as starting up for its first 2 min |
 | Host | Tape budget | Projected monthly ingress exceeds the recorder budget |
 | Host | Upload | Receipt exceeds 3 h or destination has less than 200 GB free |
@@ -58,6 +62,24 @@ Define the fleet's Telegram surfaces, liveness detection, automated incident res
 | Incident routine | One run per active `CRITICAL` reference; failed fire retries on that scope's next run; the reference rearms only after resolution |
 | External dead-man | Host scope alone pings on a run with no `CRITICAL`; no realm scope ever pings it |
 | Systemd result | Health fault with accepted routes exits 0; invalid configuration or failed route exits non-zero |
+| Maintenance suppression | Begins when a process holds a `FLOCK WRITE` on `/run/liquidity-migration/deploy.lock` (`active_deploy_age`, which returns an age only while that lock appears in `/proc/locks`). While the age is inside 1,800 s the transition-prone checks are skipped and their delivery state is preserved rather than resolved. It ends when the holder releases the lock — an interrupted deploy leaves the file with no holder, so the very next run reads no maintenance window, evaluates every check again, and emits no false resolution. A lock still **held** past 1,800 s is `CRITICAL` `deploy-lock` from `evaluate_watchdog_chain`; a lock table that cannot be read is `CRITICAL` too |
+
+### Drill
+
+Every step is read-only apart from the three messages the delivery drill itself
+sends. The drill's Telegram message and routine fire take the same two routes a
+`CRITICAL` takes; only the payload's `event_kind` differs (`drill` against
+`incident`). Nothing here stops a unit, and nothing here arms or flattens.
+
+| Step | Command | What it proves | Acknowledgement recorded where |
+| :--- | :--- | :--- | :--- |
+| Critical alert reaches Telegram and the incident routine | `scripts/ops.sh alert-drill` | One message accepted by the alerts chat and one routine run accepted: the alert chat id resolves and the routine is enabled. Both are the routes a `CRITICAL` uses | `delivery drill: telegram accepted` and `incident routine accepted (<session URL>)` in the transient unit's journal; the message in the alerts chat; the run in the routines UI; the outcome in [STATE.md](../STATE.md) `Alert delivery drill` |
+| Routine paused or destination invalid | `scripts/ops.sh alert-drill` | The drill prints `incident routine failed (...)` with the venue's own reason and no credential, and exits non-zero. A paused routine answers `HTTP 400 Routine is paused` | The journal line, and `systemctl show <unit> --property=Result,ExecMainStatus`; the fault itself in [CHANGELOG.md](../CHANGELOG.md) |
+| Network outage on the host | `scripts/ops.sh alert-drill`, then `scripts/ops.sh logs host-liveness.service 100` | Every leg fails with a named transport error, the scheduled run prints `CRITICAL telegram: cannot deliver alerts (...)`, its cooldown state is not committed, and the run exits non-zero — so systemd and the dead-man show a broken watchdog rather than a green one | Watchdog journal; the outage in [CHANGELOG.md](../CHANGELOG.md) |
+| Engine hang | `scripts/ops.sh why REALM` twice, 30 s apart; then `scripts/ops.sh logs REALM-liveness.service 200` | `loop iterations` advances between the two readings, so the rule's input is live. Unchanged at two watchdog readings under 60 s apart is `CRITICAL engine-loop:<unit>`; the pair itself lives in `/var/lib/liquidity-migration/liveness-REALM/state.counters.json` | Watchdog journal and that counters file |
+| Stale but readable heartbeat | `scripts/ops.sh why REALM` | The `heartbeat age s` row is the same file mtime the watchdog ages; past 60 s it is `CRITICAL heartbeat:<unit>` with the age and the limit, ahead of any field inside the file. Inducing it means stopping that realm's engine, which is an operator action and not part of this drill | Watchdog journal; `scripts/ops.sh units` for the unit state behind it |
+| Host disappearance | `scripts/ops.sh alert-drill`, then the dead-man provider's own check page | The third leg pings `ONCALL_DEADMAN_URL` and the provider records it. The disappearance itself is proven only by that provider's timeout, off this box, and no realm scope ever pings it | `delivery drill: dead-man accepted` in the journal; the ping on the provider's page; the outcome in [STATE.md](../STATE.md) `Host-loss detection drill` |
+| Interrupted maintenance window | `scripts/ops.sh logs host-liveness.service 100` | A run inside a sanctioned deploy prints `ok scope=host sanctioned-deploy-in-progress` and preserves the suppressed keys' delivery state. A deploy that died leaves the lock file with no holder, so the next run reads no window and evaluates everything again with no false resolution. A lock still held past 1,800 s is `CRITICAL deploy-lock` | Watchdog journal; the interrupted deploy in [CHANGELOG.md](../CHANGELOG.md) |
 
 ### Private Environment Files
 
@@ -140,6 +162,9 @@ systemd-run --wait --pipe --collect --unit=liquidity-migration-oncall-drill \
 
 # Fast remote evidence for the automated engineer or owner.
 gh workflow run vps-deploy.yml --ref main -f mode=diagnose
+
+# The same drill from an operator shell, over SSH, with no secret in any argv.
+scripts/ops.sh alert-drill
 
 # Local operator logs.
 scripts/ops.sh logs trade-notify.service 100

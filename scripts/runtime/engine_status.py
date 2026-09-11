@@ -38,8 +38,9 @@ def _number(heartbeat: dict[str, Any], key: str) -> str:
     return f"{value:g}"
 
 
-def _millis(heartbeat: dict[str, Any], key: str) -> str:
-    """Epoch milliseconds, printed whole: %g would turn them into 1.7575e+12."""
+def _whole(heartbeat: dict[str, Any], key: str) -> str:
+    """A stamp or a count, printed whole: %g turns 1757499998000 into 1.7575e+12
+    and 268435456 into 2.68435e+08."""
     value = _get(heartbeat, key)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return UNKNOWN
@@ -61,6 +62,14 @@ def _rows(heartbeat: dict[str, Any], key: str) -> list[dict[str, Any]] | None:
 def _text(row: dict[str, Any], key: str) -> str:
     value = row.get(key)
     return UNKNOWN if value is None else str(value)
+
+
+def _nested(heartbeat: dict[str, Any], key: str) -> dict[str, Any]:
+    """One nested block. An empty dict when the heartbeat carries none, which
+    prints every field inside it as ``unknown`` without a second branch."""
+
+    value = _get(heartbeat, key)
+    return value if isinstance(value, dict) else {}
 
 
 def _heartbeat_age_s(heartbeat: dict[str, Any], now_ms: int) -> str:
@@ -97,7 +106,7 @@ def _health(heartbeat: dict[str, Any], now_ms: int) -> list[str]:
             "equity={} available={} observed_wall_ts_ms={}".format(
                 _number(heartbeat, "account_equity_usdt"),
                 _number(heartbeat, "account_available_usdt"),
-                _millis(heartbeat, "account_observed_wall_ts_ms"),
+                _whole(heartbeat, "account_observed_wall_ts_ms"),
             ),
         )
     )
@@ -131,6 +140,22 @@ def _health(heartbeat: dict[str, Any], now_ms: int) -> list[str]:
         for row in pending:
             lines.append(_row("", f"{_text(row, 'strategy')}: {_text(row, 'request_id')}"))
 
+    wal = _nested(heartbeat, "wal")
+    lines.append(
+        _row(
+            "wal",
+            "durability={} segment_bytes={} last_rotation_ms={}".format(
+                _text(wal, "durability_mode"),
+                _whole(wal, "segment_bytes"),
+                _number(wal, "last_rotation_ms"),
+            ),
+        )
+    )
+    # Unchanged between two readings is a loop that is alive and not turning.
+    lines.append(_row("loop iterations", _whole(heartbeat, "loop_iterations")))
+    lines.append(
+        _row("protective backlog ms", _whole(heartbeat, "protective_backlog_oldest_ms"))
+    )
     lines.append(_row("uptime s", _number(heartbeat, "uptime_s")))
     commit = _get(heartbeat, "engine_commit")
     lines.append(_row("engine commit", UNKNOWN if commit is None else str(commit)))
@@ -162,6 +187,29 @@ def _exposure(heartbeat: dict[str, Any]) -> list[str]:
                     ),
                 )
             )
+
+    canary = _nested(heartbeat, "canary")
+    # `blocked` null inside a published policy is a reading: it is refusing
+    # nothing. Only a heartbeat that carries no policy at all is unknown.
+    blocked = "none" if "blocked" in canary and canary["blocked"] is None else _text(canary, "blocked")
+    lines.append(
+        _row(
+            "canary policy",
+            "expires_in_s={} blocked={}".format(_number(canary, "expires_in_s"), blocked),
+        )
+    )
+    lines.append(
+        _row(
+            "canary book",
+            "gross={} USDT positions={} open_orders={} loss={} USDT unvalued_trips={}".format(
+                _number(canary, "gross_notional_usdt"),
+                _number(canary, "positions"),
+                _number(canary, "open_orders"),
+                _number(canary, "loss_usdt"),
+                _number(canary, "unvalued_trips"),
+            ),
+        )
+    )
 
     working = _rows(heartbeat, "working_entries")
     if working is None:

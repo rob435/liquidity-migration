@@ -37,12 +37,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use engine_types::risk::RollingLossView;
+use engine_types::wal::DurabilityMode;
 use engine_types::{AccountIdentity, Side};
 
 use crate::clock;
+use crate::engine::canary::CanaryStatus;
 use crate::engine::{ENGINE_COMMIT, ENGINE_VERSION};
 use crate::execution::Costs;
 use crate::ledger::Quantiles;
+use crate::venue_runtime::{DispatchClass, VenueQueueSnapshot};
 
 /// How often the file is rewritten. Far slower than the group-flush tick it
 /// rides on, so it costs nothing next to the trading it reports; far quicker
@@ -161,6 +164,24 @@ pub struct Facts<'a> {
     /// window, and whether that has stopped it opening. `None` from a kernel
     /// that keeps no such window.
     pub rolling_loss: Option<RollingLossView>,
+    /// One reading of what the venue task is holding: what is ready to send
+    /// per lane, how long the oldest has waited, what is on the wire, and
+    /// what the client refused because a lane was full. `None` from a run
+    /// with no venue queue to read.
+    pub venue_queue: Option<VenueQueueSnapshot>,
+    /// How long the oldest cancel or stop this engine has handed over has
+    /// gone unanswered. `None` when no protective work is outstanding, which
+    /// is not the same reading as an instant one.
+    pub protective_backlog_oldest_ms: Option<u64>,
+    /// Where the log's durability barriers run. `None` from a log that does
+    /// not say — the in-memory test doubles.
+    pub wal_durability_mode: Option<DurabilityMode>,
+    /// Bytes in the current log segment. `None` for a log that does not live
+    /// in a file, which is also a log that never rotates.
+    pub wal_segment_bytes: Option<u64>,
+    /// What the realm's canary operating policy is doing right now. `None` on
+    /// a realm that runs under no policy.
+    pub canary: Option<CanaryStatus>,
 }
 
 /// The heartbeat writer: where the file goes, how often, and the facts about
@@ -176,6 +197,27 @@ pub struct Heartbeat {
     /// wrong every few seconds, forever — is said once.
     last_complaint: Option<String>,
     notify: Option<std::os::unix::net::UnixDatagram>,
+    /// Turns of the engine's group-flush tick since this writer was
+    /// configured. Held here rather than gathered with the rest because it is
+    /// counted every tick and published every fifth second: a loop that is
+    /// alive but stuck reads as unchanged between two beats, and nothing else
+    /// in this file shows that.
+    loop_iterations: u64,
+    /// The last log rotation this run made. `None` until one happens, which
+    /// is most runs.
+    last_rotation: Option<Rotation>,
+}
+
+/// What one log rotation cost and what it left behind.
+#[derive(Copy, Clone, Debug)]
+struct Rotation {
+    /// Wall time inside the `rotate` call itself, on the engine loop — for a
+    /// durable log, two fdatasyncs and a directory fsync. Whole milliseconds,
+    /// so a rotation under one reads as 0.
+    took_ms: u64,
+    /// The fresh segment's size the moment rotation returned: the file magic,
+    /// one frame header, and the restatement record, which is all of it.
+    base_bytes: u64,
 }
 
 impl Heartbeat {
@@ -211,11 +253,30 @@ impl Heartbeat {
             lease_path,
             last_complaint: None,
             notify: notify::from_environment(),
+            loop_iterations: 0,
+            last_rotation: None,
         }
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// One turn of the engine loop. Called every tick, whether or not a beat
+    /// is due: what makes the published count worth reading is that it moves
+    /// between beats on a healthy engine.
+    pub fn count_iteration(&mut self) {
+        self.loop_iterations = self.loop_iterations.saturating_add(1);
+    }
+
+    /// What the rotation that just finished took, and the size of the segment
+    /// it started. `segment_bytes_after` is read straight off the log the
+    /// moment `rotate` returned.
+    pub fn record_rotation(&mut self, took_ns: u64, segment_bytes_after: u64) {
+        self.last_rotation = Some(Rotation {
+            took_ms: took_ns / 1_000_000,
+            base_bytes: segment_bytes_after,
+        });
     }
 
     /// Where the next heartbeat is built before it is renamed into place.
@@ -268,6 +329,15 @@ impl Heartbeat {
             amends_pulled_unconfirmed: facts.amends_pulled_unconfirmed,
             barrier_wait_p999_ns: figure(facts.barrier_wait.count, facts.barrier_wait.p999_ns),
             barrier_wait_p99_ns: figure(facts.barrier_wait.count, facts.barrier_wait.p99_ns),
+            canary: facts.canary.map(|status| CanaryOut {
+                blocked: status.blocked,
+                expires_in_s: status.expires_in_s,
+                gross_notional_usdt: amount(status.gross_notional_usdt),
+                loss_usdt: amount(status.loss_usdt),
+                open_orders: status.open_orders,
+                positions: status.positions,
+                unvalued_trips: status.unvalued_trips,
+            }),
             core_resume_p50_ns: figure(facts.core_resume.count, facts.core_resume.p50_ns),
             core_resume_p999_ns: figure(facts.core_resume.count, facts.core_resume.p999_ns),
             core_resume_p99_ns: figure(facts.core_resume.count, facts.core_resume.p99_ns),
@@ -304,6 +374,7 @@ impl Heartbeat {
             fills: facts.costs.fills,
             fills_maker_share: facts.costs.maker_share().and_then(share),
             lease_path: self.lease_path.as_ref().map(|p| p.display().to_string()),
+            loop_iterations: self.loop_iterations,
             market_events: facts.market_events,
             may_open: facts.may_open,
             mode: "live",
@@ -319,6 +390,7 @@ impl Heartbeat {
             pid: std::process::id(),
             private_stream_ready: facts.private_stream_ready,
             private_stream_unready_ms: facts.private_stream_unready_ms,
+            protective_backlog_oldest_ms: facts.protective_backlog_oldest_ms,
             account_metrics: facts.account_metrics,
             positions: facts
                 .holdings
@@ -365,9 +437,32 @@ impl Heartbeat {
             uptime_s: facts.uptime_s,
             venue: self.account.as_ref().map(|a| a.venue.as_str()),
             venue_clock_offset_ms: facts.venue_clock_offset_ms,
+            venue_queue: facts.venue_queue.map(|queue| VenueQueueOut {
+                in_flight_class: queue.in_flight_class.map(class_name),
+                // Nothing on the wire has no age, and nothing queued has no
+                // oldest. The gauges spell both as 0, which would read here
+                // as "measured, and it was instant".
+                in_flight_ms: queue.in_flight_class.map(|_| queue.in_flight_ms),
+                oldest_queued_ms: (queue.ready_ordinary + queue.ready_urgent > 0)
+                    .then_some(queue.oldest_ready_ms),
+                ordinary_capacity: queue.ordinary_capacity,
+                ready_ordinary: queue.ready_ordinary,
+                ready_urgent: queue.ready_urgent,
+                refused_ordinary: queue.refused_ordinary,
+                refused_urgent: queue.refused_urgent,
+                urgent_capacity: queue.urgent_capacity,
+            }),
             venue_task_p50_ns: figure(facts.venue_task.count, facts.venue_task.p50_ns),
             venue_task_p999_ns: figure(facts.venue_task.count, facts.venue_task.p999_ns),
             venue_task_p99_ns: figure(facts.venue_task.count, facts.venue_task.p99_ns),
+            wal: WalOut {
+                durability_mode: facts.wal_durability_mode.map(DurabilityMode::as_str),
+                last_rotation_base_bytes: self.last_rotation.map(|last| last.base_bytes),
+                last_rotation_ms: self.last_rotation.map(|last| last.took_ms),
+                // A log with no file is a log with no segment, not a segment
+                // of no bytes.
+                segment_bytes: facts.wal_segment_bytes.filter(|bytes| *bytes > 0),
+            },
             wall_ts_ms,
             wire_p50_ns: figure(facts.wire.count, facts.wire.p50_ns),
             wire_p999_ns: figure(facts.wire.count, facts.wire.p999_ns),
@@ -444,6 +539,7 @@ struct HeartbeatOutput<'a> {
     amends_pulled_unconfirmed: u64,
     barrier_wait_p999_ns: Option<u64>,
     barrier_wait_p99_ns: Option<u64>,
+    canary: Option<CanaryOut>,
     core_resume_p50_ns: Option<u64>,
     core_resume_p999_ns: Option<u64>,
     core_resume_p99_ns: Option<u64>,
@@ -469,6 +565,7 @@ struct HeartbeatOutput<'a> {
     fills: u64,
     fills_maker_share: Option<Number>,
     lease_path: Option<String>,
+    loop_iterations: u64,
     market_events: u64,
     may_open: bool,
     mode: &'a str,
@@ -478,6 +575,7 @@ struct HeartbeatOutput<'a> {
     positions: Vec<Position<'a>>,
     private_stream_ready: bool,
     private_stream_unready_ms: Option<u64>,
+    protective_backlog_oldest_ms: Option<u64>,
     quota_hold_p999_ns: Option<u64>,
     quota_hold_p99_ns: Option<u64>,
     realm: Option<&'a str>,
@@ -493,14 +591,79 @@ struct HeartbeatOutput<'a> {
     uptime_s: u64,
     venue: Option<&'a str>,
     venue_clock_offset_ms: Option<i64>,
+    venue_queue: Option<VenueQueueOut>,
     venue_task_p50_ns: Option<u64>,
     venue_task_p999_ns: Option<u64>,
     venue_task_p99_ns: Option<u64>,
+    wal: WalOut,
     wall_ts_ms: i64,
     wire_p50_ns: Option<u64>,
     wire_p999_ns: Option<u64>,
     wire_p99_ns: Option<u64>,
     working_entries: Vec<WorkingEntry<'a>>,
+}
+
+/// What the realm's canary operating policy is doing, as the watchdog reads
+/// it. `blocked` carries the refusal word every opening would get.
+#[derive(serde::Serialize)]
+struct CanaryOut {
+    blocked: Option<&'static str>,
+    expires_in_s: i64,
+    gross_notional_usdt: Option<Number>,
+    loss_usdt: Option<Number>,
+    open_orders: usize,
+    positions: usize,
+    unvalued_trips: usize,
+}
+
+/// One reading of the venue task's two lanes. Counts and capacities are
+/// readings, so a zero is a zero; the two ages are null when there is nothing
+/// to age.
+#[derive(serde::Serialize)]
+struct VenueQueueOut {
+    in_flight_class: Option<&'static str>,
+    in_flight_ms: Option<u64>,
+    oldest_queued_ms: Option<u64>,
+    ordinary_capacity: usize,
+    ready_ordinary: usize,
+    ready_urgent: usize,
+    refused_ordinary: u64,
+    refused_urgent: u64,
+    urgent_capacity: usize,
+}
+
+/// The log as the engine loop sees it: where its barriers run, what the last
+/// rotation cost, and how large the current segment is.
+#[derive(serde::Serialize)]
+struct WalOut {
+    durability_mode: Option<&'static str>,
+    last_rotation_base_bytes: Option<u64>,
+    last_rotation_ms: Option<u64>,
+    segment_bytes: Option<u64>,
+}
+
+fn class_name(class: DispatchClass) -> &'static str {
+    match class {
+        DispatchClass::RiskReducing => "risk-reducing",
+        DispatchClass::Amend => "amend",
+        DispatchClass::Opening => "opening",
+        DispatchClass::Administration => "administration",
+    }
+}
+
+/// Said once for the life of the process: the log has no durability thread,
+/// so every barrier the order path takes is paid on the engine loop itself.
+/// Same durability, and the loop waits for it.
+pub fn warn_once_on_caller_thread_barriers(mode: Option<DurabilityMode>) {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if mode == Some(DurabilityMode::CallerThread)
+        && !SAID.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        tracing::warn!(
+            "the log has no durability thread: every barrier runs on the engine loop, \
+             which waits for the disk before the send it protects"
+        );
+    }
 }
 
 #[derive(serde::Serialize)]

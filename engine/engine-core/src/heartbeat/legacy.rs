@@ -245,6 +245,14 @@ pub(super) fn render(heartbeat: &Heartbeat, facts: &Facts, wall_ts_ms: i64) -> S
             "venue_clock_offset_ms",
             or_null(facts.venue_clock_offset_ms.map(|ms| ms.to_string())),
         ),
+        ("canary", canary(facts.canary)),
+        ("loop_iterations", heartbeat.loop_iterations.to_string()),
+        (
+            "protective_backlog_oldest_ms",
+            or_null(facts.protective_backlog_oldest_ms.map(|ms| ms.to_string())),
+        ),
+        ("venue_queue", venue_queue(facts.venue_queue)),
+        ("wal", wal(heartbeat, facts)),
     ];
     fields.sort_by_key(|(key, _)| *key);
     let body: Vec<String> = fields
@@ -411,4 +419,90 @@ fn working_entries(rows: &[(String, String)]) -> String {
         })
         .collect();
     format!("[{}]", items.join(", "))
+}
+
+/// One object, keys in the order given. The typed writer emits struct fields
+/// in declaration order, and both spell a pair `"key": value`.
+fn object(pairs: &[(&str, String)]) -> String {
+    let body: Vec<String> = pairs
+        .iter()
+        .map(|(key, value)| format!("{}: {value}", quoted(key)))
+        .collect();
+    format!("{{{}}}", body.join(", "))
+}
+
+fn canary(status: Option<CanaryStatus>) -> String {
+    let Some(status) = status else {
+        return "null".to_string();
+    };
+    object(&[
+        ("blocked", or_null(status.blocked.map(quoted))),
+        ("expires_in_s", status.expires_in_s.to_string()),
+        ("gross_notional_usdt", amount(status.gross_notional_usdt)),
+        ("loss_usdt", amount(status.loss_usdt)),
+        ("open_orders", status.open_orders.to_string()),
+        ("positions", status.positions.to_string()),
+        ("unvalued_trips", status.unvalued_trips.to_string()),
+    ])
+}
+
+fn venue_queue(queue: Option<VenueQueueSnapshot>) -> String {
+    let Some(queue) = queue else {
+        return "null".to_string();
+    };
+    let waiting = queue.ready_ordinary + queue.ready_urgent > 0;
+    object(&[
+        (
+            "in_flight_class",
+            or_null(queue.in_flight_class.map(|class| quoted(class_name(class)))),
+        ),
+        (
+            "in_flight_ms",
+            or_null(
+                queue
+                    .in_flight_class
+                    .map(|_| queue.in_flight_ms.to_string()),
+            ),
+        ),
+        (
+            "oldest_queued_ms",
+            or_null(waiting.then(|| queue.oldest_ready_ms.to_string())),
+        ),
+        ("ordinary_capacity", queue.ordinary_capacity.to_string()),
+        ("ready_ordinary", queue.ready_ordinary.to_string()),
+        ("ready_urgent", queue.ready_urgent.to_string()),
+        ("refused_ordinary", queue.refused_ordinary.to_string()),
+        ("refused_urgent", queue.refused_urgent.to_string()),
+        ("urgent_capacity", queue.urgent_capacity.to_string()),
+    ])
+}
+
+fn wal(heartbeat: &Heartbeat, facts: &Facts) -> String {
+    object(&[
+        (
+            "durability_mode",
+            or_null(facts.wal_durability_mode.map(|mode| quoted(mode.as_str()))),
+        ),
+        (
+            "last_rotation_base_bytes",
+            or_null(
+                heartbeat
+                    .last_rotation
+                    .map(|last| last.base_bytes.to_string()),
+            ),
+        ),
+        (
+            "last_rotation_ms",
+            or_null(heartbeat.last_rotation.map(|last| last.took_ms.to_string())),
+        ),
+        (
+            "segment_bytes",
+            or_null(
+                facts
+                    .wal_segment_bytes
+                    .filter(|bytes| *bytes > 0)
+                    .map(|bytes| bytes.to_string()),
+            ),
+        ),
+    ])
 }

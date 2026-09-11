@@ -46,6 +46,22 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// engine is well, and an engine that stopped trading because it could
     /// not describe itself would be a worse answer than one nobody can see.
     pub(super) fn beat(&mut self, now_ns: u64) {
+        // Every tick, before anything can return: the count is worth reading
+        // only because a healthy loop moves it between two beats.
+        if let Some(heartbeat) = self.heartbeat.as_mut() {
+            heartbeat.count_iteration();
+        }
+        if !self.heartbeat.as_ref().is_some_and(|beat| beat.due(now_ns)) {
+            return;
+        }
+        // Gathered before the borrow below, because each of them reads a part
+        // of the engine the beat's own borrow does not name. All read-only.
+        let canary = self.canary_status();
+        let venue_queue = Some(self.venue.gauges().snapshot(now_ns));
+        let protective_backlog_oldest_ms = self.protective_backlog_oldest_ms(now_ns);
+        let wal_durability_mode = self.wal.durability_mode();
+        let wal_segment_bytes = Some(self.wal.segment_size());
+        crate::heartbeat::warn_once_on_caller_thread_barriers(wal_durability_mode);
         let Engine {
             heartbeat,
             host,
@@ -83,9 +99,6 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let Some(heartbeat) = heartbeat.as_mut() else {
             return;
         };
-        if !heartbeat.due(now_ns) {
-            return;
-        }
         // Why each asked-for name is not being opened, straight from the
         // strategies. This is read-only operator evidence for the native
         // reducer's desired entry.
@@ -236,8 +249,41 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 working_entries: &working_entries,
                 costs: &costs,
                 rolling_loss,
+                venue_queue,
+                protective_backlog_oldest_ms,
+                wal_durability_mode,
+                wal_segment_bytes,
+                canary,
             },
         );
+    }
+
+    /// How long the oldest protective mutation this engine handed the venue
+    /// has gone unanswered: a cancel, a position stop, or a send whose every
+    /// request reduces. `None` when none is outstanding.
+    ///
+    /// An opening that waits is an opportunity, not a fault, and the dispatch
+    /// TTL already refuses it; protective work never expires, so its age is
+    /// the only thing that says the venue has stopped answering it.
+    fn protective_backlog_oldest_ms(&self, now_ns: u64) -> Option<u64> {
+        self.pending_mutations
+            .values()
+            .filter_map(|pending| match pending {
+                PendingMutation::Cancels { queued_ns, .. }
+                | PendingMutation::SetStop { queued_ns, .. } => Some(*queued_ns),
+                PendingMutation::Orders {
+                    requests,
+                    queued_ns,
+                    ..
+                } if crate::venue_runtime::send_class(requests)
+                    == crate::venue_runtime::DispatchClass::RiskReducing =>
+                {
+                    Some(*queued_ns)
+                }
+                _ => None,
+            })
+            .min()
+            .map(|queued_ns| now_ns.saturating_sub(queued_ns) / 1_000_000)
     }
 
     pub fn strategy_names(&self) -> &[String] {
@@ -361,6 +407,173 @@ mod tests {
             fields["private_stream_unready_ms"],
             serde_json::json!(null),
             "a recovered stream must not keep reporting an outage"
+        );
+    }
+
+    /// A beat due on every tick, so one tick is one published heartbeat.
+    fn every_tick(path: &std::path::Path) -> Heartbeat {
+        Heartbeat::with_every(path.to_path_buf(), None, None, Duration::ZERO)
+    }
+
+    fn published(path: &std::path::Path) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_loop_counter_advances_once_per_tick() {
+        // What separates a wedged loop from a quiet market: every other
+        // since-boot counter can legitimately stand still for minutes.
+        let path = crate::testpath::temp_path("heartbeat-loop-iterations");
+        let (mut engine, _) = crate::tests::callback_test_fixture(Vec::new()).await;
+        engine.write_heartbeat(every_tick(path.path()));
+
+        for turn in 1..=3u64 {
+            engine.on_tick().await.unwrap();
+            assert_eq!(
+                published(path.path())["loop_iterations"],
+                serde_json::json!(turn),
+                "one turn of the engine loop is one count"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rotation_publishes_what_it_cost_and_the_segment_it_started() {
+        let family = crate::testpath::temp_path("heartbeat-rotation-cost");
+        let beat = crate::testpath::temp_path("heartbeat-rotation-beat");
+        let (wal, records) = engine_wal::WalWriter::open(family.path()).unwrap();
+        let records: Vec<WalRecord> = records.into_iter().map(|(_, row)| row).collect();
+        let mut engine =
+            crate::tests::shared_sleeves::restart_portfolio_with_wal(wal, &records, Vec::new())
+                .await;
+        engine.write_heartbeat(every_tick(beat.path()));
+
+        engine.on_tick().await.unwrap();
+        let before = published(beat.path());
+        assert!(
+            before["wal"]["last_rotation_ms"].is_null(),
+            "a run that has not rotated has no rotation to report"
+        );
+        assert!(before["wal"]["last_rotation_base_bytes"].is_null());
+        assert_eq!(before["wal"]["durability_mode"], "sync-thread");
+        assert!(
+            before["wal"]["segment_bytes"]
+                .as_u64()
+                .is_some_and(|n| n > 0),
+            "a log in a file has a segment size"
+        );
+
+        // Anything the log already holds is past the threshold.
+        engine.rotate_after_bytes = 1;
+        engine.on_tick().await.unwrap();
+
+        let after = published(beat.path());
+        assert!(
+            after["wal"]["last_rotation_ms"].as_u64().is_some(),
+            "the rotate call was not timed: {}",
+            after["wal"]
+        );
+        let base_bytes = after["wal"]["last_rotation_base_bytes"]
+            .as_u64()
+            .expect("the fresh segment's own size");
+        assert!(base_bytes > 0, "a restatement is not zero bytes");
+        // Read on the same tick, so the fresh segment is still the base alone.
+        assert_eq!(after["wal"]["segment_bytes"].as_u64(), Some(base_bytes));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_backlog_ages_protective_work_alone_and_reports_the_oldest() {
+        // An opening the venue is slow to take is an opportunity, and the
+        // dispatch TTL refuses it unsent. A cancel or a stop never expires, so
+        // its age is the only thing that says the venue stopped answering.
+        let (mut engine, _) = crate::tests::callback_test_fixture(Vec::new()).await;
+        let now_ns = 600 * NANOS_PER_SEC;
+
+        engine.pending_mutations.insert(
+            1,
+            PendingMutation::Orders {
+                requests: vec![opening("eng-open")],
+                timings: vec![None],
+                queued_ns: now_ns - 300 * NANOS_PER_SEC,
+                authority: None,
+            },
+        );
+        assert_eq!(
+            engine.protective_backlog_oldest_ms(now_ns),
+            None,
+            "an opening is not protective work"
+        );
+
+        engine.pending_mutations.insert(
+            2,
+            PendingMutation::Cancels {
+                requests: vec![(SymbolId(0), "eng-1".into())],
+                queued_ns: now_ns - 90 * NANOS_PER_SEC,
+            },
+        );
+        engine.pending_mutations.insert(
+            3,
+            PendingMutation::Orders {
+                requests: vec![exit("eng-exit")],
+                timings: vec![None],
+                queued_ns: now_ns - 200 * NANOS_PER_SEC,
+                authority: None,
+            },
+        );
+        assert_eq!(
+            engine.protective_backlog_oldest_ms(now_ns),
+            Some(200_000),
+            "the oldest unanswered exit, not the newest cancel"
+        );
+    }
+
+    fn opening(id: &str) -> OrderRequest {
+        OrderRequest {
+            client_order_id: id.into(),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            side: Side::Buy,
+            qty: 0.1,
+            kind: OrderKind::Market,
+            stop: None,
+            reduce_only: false,
+            close_position: false,
+            sleeve_effect: None,
+            exact_terms: None,
+        }
+    }
+
+    fn exit(id: &str) -> OrderRequest {
+        OrderRequest {
+            reduce_only: true,
+            side: Side::Sell,
+            ..opening(id)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_beat_carries_the_venue_queue_and_an_empty_protective_backlog() {
+        let path = crate::testpath::temp_path("heartbeat-venue-queue");
+        let (mut engine, _) = crate::tests::callback_test_fixture(Vec::new()).await;
+        engine.write_heartbeat(every_tick(path.path()));
+
+        engine.on_tick().await.unwrap();
+        let fields = published(path.path());
+
+        let queue = &fields["venue_queue"];
+        assert!(
+            queue["ordinary_capacity"].as_u64().is_some_and(|n| n > 0),
+            "the lane capacities are what a ready count is read against: {queue}"
+        );
+        assert_eq!(queue["ready_ordinary"], serde_json::json!(0));
+        assert!(queue["oldest_queued_ms"].is_null(), "nothing is queued");
+        assert!(
+            fields["protective_backlog_oldest_ms"].is_null(),
+            "no cancel or stop is outstanding"
+        );
+        assert!(
+            fields["canary"].is_null(),
+            "this realm runs under no canary policy"
         );
     }
 }

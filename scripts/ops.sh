@@ -107,6 +107,12 @@ Operator commands:
   why [REALM]                  why one engine is not trading, read on the host
                                from its heartbeat: health, exposure, blockers
                                (default: mainnet)
+  alert-drill [--scope host|REALM]
+                               prove the on-call routes end to end, on the host:
+                               one Telegram test message, one no-op incident
+                               routine fire, one dead-man ping, and nothing else.
+                               Only the host scope carries all three routes;
+                               see docs/notifications.md §Drill
   flatten --environment REALM [--reason TEXT] [--execute]
                                ask each native directional reducer to close its
                                attributed exposure through durable Rust control
@@ -330,6 +336,39 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
     [[ "$curve_samples" =~ ^[1-9][0-9]*$ ]] || die_usage "curve samples must be a positive integer"
     remote_exec 'exec /opt/liquidity-migration-engine/bin/engine-tools record-equity \
       --show "${REMOTE_ARGS[0]}" --samples "${REMOTE_ARGS[1]}"' "$curve_realm" "$curve_samples"
+    ;;
+  alert-drill)
+    # The delivery drill from docs/notifications.md, run where the private
+    # files are. Read-only apart from the three messages the drill itself
+    # sends. PID 1 reads the credential files; no value enters this router, the
+    # argv, or the output.
+    drill_scope=host
+    while [[ "$#" -gt 0 ]]; do
+      case "$1" in
+        --scope) drill_scope="${2:-}"; shift 2 ;;
+        *) die_usage "alert-drill does not take '$1'" ;;
+      esac
+    done
+    if [[ "$drill_scope" != host ]]; then
+      require_realm alert-drill "$drill_scope"
+      # `run_delivery_drill` in check_fleet_liveness.py answers any other scope
+      # with "delivery drill requires --account-scope host": the dead-man is the
+      # host scope's alone, and no realm scope pings it.
+      die_usage "alert-drill --scope must be host; the realm scopes carry no dead-man route"
+    fi
+    # The unit name carries this shell's pid: a leftover unit from an
+    # interrupted drill would otherwise refuse the start.
+    remote_exec 'exec systemd-run --wait --pipe --collect \
+  --unit="liquidity-migration-oncall-drill-$$" \
+  --property=Type=oneshot \
+  --property=User=liquidity-observer \
+  --property=Group=liquidity-migration \
+  --property="WorkingDirectory=$REPO_DIR" \
+  --property=EnvironmentFile=/etc/liquidity-migration/notifications.env \
+  --property=EnvironmentFile=/etc/liquidity-migration/oncall.env \
+  "$REPO_DIR/.venv/bin/python" \
+  "$REPO_DIR/scripts/runtime/check_fleet_liveness.py" \
+  --account-scope "${REMOTE_ARGS[0]}" --require-oncall --delivery-drill' "$drill_scope"
     ;;
   why)
     # The engine's own heartbeat, read where it is written. Read-only: no venue

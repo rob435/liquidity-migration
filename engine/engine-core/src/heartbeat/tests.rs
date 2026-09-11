@@ -4,7 +4,7 @@ use super::*;
 use crate::testpath::temp_path;
 
 /// Every key the file carries, in the order it must read in.
-const KEYS: [&str; 68] = [
+const KEYS: [&str; 73] = [
     "account_available_usdt",
     "account_equity_usdt",
     "account_observed_wall_ts_ms",
@@ -16,6 +16,7 @@ const KEYS: [&str; 68] = [
     "amends_pulled_unconfirmed",
     "barrier_wait_p999_ns",
     "barrier_wait_p99_ns",
+    "canary",
     "core_resume_p50_ns",
     "core_resume_p999_ns",
     "core_resume_p99_ns",
@@ -41,6 +42,7 @@ const KEYS: [&str; 68] = [
     "fills",
     "fills_maker_share",
     "lease_path",
+    "loop_iterations",
     "market_events",
     "may_open",
     "mode",
@@ -50,6 +52,7 @@ const KEYS: [&str; 68] = [
     "positions",
     "private_stream_ready",
     "private_stream_unready_ms",
+    "protective_backlog_oldest_ms",
     "quota_hold_p999_ns",
     "quota_hold_p99_ns",
     "realm",
@@ -65,9 +68,11 @@ const KEYS: [&str; 68] = [
     "uptime_s",
     "venue",
     "venue_clock_offset_ms",
+    "venue_queue",
     "venue_task_p50_ns",
     "venue_task_p999_ns",
     "venue_task_p99_ns",
+    "wal",
     "wall_ts_ms",
     "wire_p50_ns",
     "wire_p999_ns",
@@ -157,6 +162,11 @@ fn facts<'a>(
         strategy_errors: NO_STRATEGY_ERRORS.get_or_init(Vec::new),
         working_entries: NO_WORKING.get_or_init(Vec::new),
         rolling_loss: None,
+        venue_queue: None,
+        protective_backlog_oldest_ms: None,
+        wal_durability_mode: None,
+        wal_segment_bytes: None,
+        canary: None,
     }
 }
 
@@ -850,4 +860,230 @@ fn typed_output_matches_legacy_bytes_for_missing_extreme_and_escaped_values() {
             );
         }
     }
+}
+
+/// One venue-queue reading with everything moving: both lanes hold work, a
+/// risk-off command is on the wire, and each lane has refused something.
+fn busy_queue() -> VenueQueueSnapshot {
+    VenueQueueSnapshot {
+        ready_ordinary: 3,
+        ready_urgent: 1,
+        oldest_ready_ms: 640,
+        in_flight_ms: 45,
+        in_flight_class: Some(DispatchClass::RiskReducing),
+        refused_ordinary: 2,
+        refused_urgent: 1,
+        ordinary_capacity: 256,
+        urgent_capacity: 32,
+    }
+}
+
+#[test]
+fn the_venue_queue_the_watchdog_reads_is_the_task_s_own_reading() {
+    let names = vec!["long".to_string()];
+    let held = one_holding();
+    let mut facts = facts(&names, &held);
+    facts.venue_queue = Some(busy_queue());
+
+    let fields = parsed(&on_the_demo_account("unused.json".into()).render(&facts, 1));
+    let queue = &fields["venue_queue"];
+
+    assert_eq!(queue["ready_ordinary"], 3);
+    assert_eq!(queue["ready_urgent"], 1);
+    assert_eq!(queue["oldest_queued_ms"], 640);
+    assert_eq!(queue["in_flight_class"], "risk-reducing");
+    assert_eq!(queue["in_flight_ms"], 45);
+    assert_eq!(queue["refused_ordinary"], 2);
+    assert_eq!(queue["refused_urgent"], 1);
+    assert_eq!(queue["ordinary_capacity"], 256);
+    assert_eq!(queue["urgent_capacity"], 32);
+}
+
+#[test]
+fn an_idle_venue_queue_ages_nothing_and_still_reports_its_capacities() {
+    // The gauges spell "nothing queued" and "nothing in flight" as 0. A 0 in
+    // an age field here would read as a measured, instant answer.
+    let names = vec!["long".to_string()];
+    let held = one_holding();
+    let mut facts = facts(&names, &held);
+    facts.venue_queue = Some(VenueQueueSnapshot {
+        ready_ordinary: 0,
+        ready_urgent: 0,
+        oldest_ready_ms: 0,
+        in_flight_ms: 0,
+        in_flight_class: None,
+        refused_ordinary: 0,
+        refused_urgent: 0,
+        ordinary_capacity: 256,
+        urgent_capacity: 32,
+    });
+
+    let fields = parsed(&on_the_demo_account("unused.json".into()).render(&facts, 1));
+    let queue = &fields["venue_queue"];
+
+    assert!(queue["oldest_queued_ms"].is_null(), "{queue}");
+    assert!(queue["in_flight_ms"].is_null(), "{queue}");
+    assert!(queue["in_flight_class"].is_null(), "{queue}");
+    assert_eq!(queue["ready_ordinary"], 0, "a count of zero is a count");
+    assert_eq!(queue["refused_urgent"], 0);
+    assert_eq!(queue["ordinary_capacity"], 256);
+}
+
+#[test]
+fn unanswered_protective_work_publishes_its_age_and_absence_is_null() {
+    let names = vec!["long".to_string()];
+    let held = one_holding();
+    let mut facts = facts(&names, &held);
+    let beat = on_the_demo_account("unused.json".into());
+
+    assert!(
+        parsed(&beat.render(&facts, 1))["protective_backlog_oldest_ms"].is_null(),
+        "no outstanding cancel is not a cancel answered instantly"
+    );
+
+    facts.protective_backlog_oldest_ms = Some(61_000);
+    assert_eq!(
+        parsed(&beat.render(&facts, 1))["protective_backlog_oldest_ms"],
+        61_000
+    );
+}
+
+#[test]
+fn the_log_says_where_its_barriers_run_and_what_the_last_rotation_cost() {
+    let names = vec!["long".to_string()];
+    let held = one_holding();
+    let mut facts = facts(&names, &held);
+    let mut beat = on_the_demo_account("unused.json".into());
+
+    // Before any rotation, and from a log that answers nothing.
+    let quiet = parsed(&beat.render(&facts, 1));
+    assert!(quiet["wal"]["durability_mode"].is_null());
+    assert!(
+        quiet["wal"]["segment_bytes"].is_null(),
+        "a log with no file"
+    );
+    assert!(quiet["wal"]["last_rotation_ms"].is_null());
+    assert!(quiet["wal"]["last_rotation_base_bytes"].is_null());
+
+    facts.wal_durability_mode = Some(DurabilityMode::SyncThread);
+    facts.wal_segment_bytes = Some(268_435_456);
+    beat.record_rotation(7_400_000, 51_200);
+    let rotated = parsed(&beat.render(&facts, 2));
+    assert_eq!(rotated["wal"]["durability_mode"], "sync-thread");
+    assert_eq!(rotated["wal"]["segment_bytes"], 268_435_456u64);
+    assert_eq!(rotated["wal"]["last_rotation_ms"], 7);
+    assert_eq!(rotated["wal"]["last_rotation_base_bytes"], 51_200);
+}
+
+#[test]
+fn every_durability_mode_has_one_spelling_the_watchdog_knows() {
+    let names = vec!["long".to_string()];
+    let held = one_holding();
+    let mut facts = facts(&names, &held);
+    let beat = on_the_demo_account("unused.json".into());
+    for (mode, spelled) in [
+        (DurabilityMode::Unsynced, "unsynced"),
+        (DurabilityMode::SyncThread, "sync-thread"),
+        (DurabilityMode::CallerThread, "caller-thread"),
+    ] {
+        facts.wal_durability_mode = Some(mode);
+        assert_eq!(
+            parsed(&beat.render(&facts, 1))["wal"]["durability_mode"],
+            spelled
+        );
+    }
+}
+
+#[test]
+fn the_loop_count_moves_with_the_tick_and_not_with_the_beat() {
+    // A loop that is alive but wedged writes a heartbeat with everything else
+    // unchanged too. This is the one field that separates the two.
+    let names = vec!["long".to_string()];
+    let held = one_holding();
+    let facts = facts(&names, &held);
+    let mut beat = on_the_demo_account("unused.json".into());
+
+    assert_eq!(parsed(&beat.render(&facts, 1))["loop_iterations"], 0);
+    for _ in 0..120 {
+        beat.count_iteration();
+    }
+    assert_eq!(parsed(&beat.render(&facts, 2))["loop_iterations"], 120);
+    assert_eq!(
+        parsed(&beat.render(&facts, 3))["loop_iterations"],
+        120,
+        "rendering twice is not a turn of the loop"
+    );
+}
+
+#[test]
+fn a_realm_under_a_canary_policy_publishes_what_the_policy_is_doing() {
+    let names = vec!["long".to_string()];
+    let held = one_holding();
+    let mut facts = facts(&names, &held);
+    let beat = on_the_demo_account("unused.json".into());
+
+    assert!(
+        parsed(&beat.render(&facts, 1))["canary"].is_null(),
+        "a realm with no policy has no canary reading"
+    );
+
+    facts.canary = Some(CanaryStatus {
+        expires_in_s: 3_600,
+        gross_notional_usdt: 42.5,
+        positions: 2,
+        open_orders: 1,
+        loss_usdt: 0.0,
+        unvalued_trips: 1,
+        blocked: Some("canary_gross_notional_at_cap"),
+    });
+    let fields = parsed(&beat.render(&facts, 2));
+    let canary = &fields["canary"];
+    assert_eq!(canary["expires_in_s"], 3_600);
+    assert_eq!(canary["gross_notional_usdt"].as_f64(), Some(42.5));
+    assert_eq!(canary["positions"], 2);
+    assert_eq!(canary["open_orders"], 1);
+    assert_eq!(canary["loss_usdt"].as_f64(), Some(0.0));
+    assert_eq!(canary["unvalued_trips"], 1);
+    assert_eq!(canary["blocked"], "canary_gross_notional_at_cap");
+
+    facts.canary = Some(CanaryStatus {
+        blocked: None,
+        ..facts.canary.expect("set above")
+    });
+    assert!(
+        parsed(&beat.render(&facts, 3))["canary"]["blocked"].is_null(),
+        "a policy refusing nothing must not name a refusal"
+    );
+}
+
+#[test]
+fn barriers_that_moved_onto_the_engine_loop_are_said_once_for_the_process() {
+    // The flag behind this is process-wide, so this is the only test that
+    // reads `CallerThread`: nothing else in this binary can build a log whose
+    // durability thread is missing.
+    let heard = crate::tests::Heard::default();
+    let guard = tracing::subscriber::set_default(heard.clone());
+
+    for quiet in [
+        None,
+        Some(DurabilityMode::SyncThread),
+        Some(DurabilityMode::Unsynced),
+    ] {
+        warn_once_on_caller_thread_barriers(quiet);
+    }
+    assert_eq!(
+        heard.about("durability thread"),
+        Vec::<String>::new(),
+        "only the fallback is worth saying"
+    );
+
+    warn_once_on_caller_thread_barriers(Some(DurabilityMode::CallerThread));
+    let said = heard.about("durability thread");
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(said[0].contains("runs on the engine loop"), "{said:?}");
+
+    // Boot says it, and so would every later rotation.
+    warn_once_on_caller_thread_barriers(Some(DurabilityMode::CallerThread));
+    assert_eq!(heard.about("durability thread").len(), 1);
+    drop(guard);
 }

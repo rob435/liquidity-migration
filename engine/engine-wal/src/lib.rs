@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Instant;
 
-pub use engine_types::wal::{PendingBarrier, Wal, WalError, WalRecord};
+pub use engine_types::wal::{DurabilityMode, PendingBarrier, Wal, WalError, WalRecord};
 
 mod callback_reader;
 pub mod conversion;
@@ -426,23 +426,6 @@ impl SyncThread {
     }
 }
 
-/// Where a durability barrier actually runs.
-///
-/// [`WalWriter::barrier_begin`] is only asynchronous while the log has its
-/// own sync thread. A writer whose thread could not be started keeps the same
-/// durability promise by running every barrier on the caller — the engine
-/// loop — so the difference is in responsiveness, not in correctness, and
-/// nothing else makes it observable.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DurabilityMode {
-    /// No barrier waits for the disk.
-    Unsynced,
-    /// `barrier_begin` hands the fsync to the log's own thread.
-    SyncThread,
-    /// No thread; every barrier runs on the caller.
-    CallerThread,
-}
-
 pub struct WalWriter {
     file: File,
     /// Absent for a writer whose thread could not be started, which falls
@@ -753,6 +736,10 @@ impl Wal for WalWriter {
 
     fn rotate(&mut self, base: &WalRecord) -> Result<bool, WalError> {
         self.rotate_measured(base).map(|(rotated, _)| rotated)
+    }
+
+    fn durability_mode(&self) -> Option<DurabilityMode> {
+        Some(WalWriter::durability_mode(self))
     }
 }
 

@@ -22,6 +22,27 @@ another: the heartbeat says how the engine is **now**, `trades.jsonl` says what
 was **realized**, and the equity samples say what the account was **worth over
 time**, including the minutes it lost money without closing anything.
 
+### Engine Heartbeat Fields
+
+One line of JSON, keys sorted, rewritten every 5 s. Everything the engine has
+not measured is `null` and never `0`. The account, exposure, cost and
+order-path fields are in the Sample Schema below, because the equity recorder
+forwards them; the fields here are read by
+[`scripts/runtime/engine_status.py`](../scripts/runtime/engine_status.py) and
+[`scripts/runtime/check_fleet_liveness.py`](../scripts/runtime/check_fleet_liveness.py)
+off the file itself, and the recorder does not forward them.
+
+| Field | Meaning |
+| :--- | :--- |
+| `loop_iterations` | Turns of the engine's group-flush tick since the heartbeat writer was configured, counted whether or not a beat was due. Unchanged between two readings of one live process is a loop that is running and not advancing |
+| `protective_backlog_oldest_ms` | Age of the oldest cancel, position stop, or reduce-only send this engine has handed the venue and the venue has not answered. `null` when none is outstanding — which is a different reading from an age of 0 |
+| `venue_queue` | One reading of the venue task's two lanes: `ready_ordinary`, `ready_urgent`, `ordinary_capacity`, `urgent_capacity`, `refused_ordinary`, `refused_urgent` (client-side refusals since boot, a full lane being a never-sent answer), `oldest_queued_ms` (`null` when nothing is queued), `in_flight_class` (`risk-reducing`, `amend`, `opening`, `administration`, or `null`) and `in_flight_ms` (`null` when nothing is on the wire) |
+| `wal.durability_mode` | `sync-thread` (barriers on the log's own thread), `caller-thread` (no thread; every barrier runs on the engine loop, same durability and a slower loop) or `unsynced` (no barrier waits for the disk). `null` from a log that does not say |
+| `wal.segment_bytes` | Bytes in the current segment, buffered ones included. `null` for a log that does not live in a file, which is also a log that never rotates |
+| `wal.last_rotation_ms` | Wall time inside the last `rotate` call on the engine loop — for a durable log, two fdatasyncs and a directory fsync — in whole milliseconds, so a rotation under one reads as `0`. `null` until this run rotates |
+| `wal.last_rotation_base_bytes` | The fresh segment's size the moment that rotation returned: the file magic, one frame header, and the restatement record, which is all it holds at that point |
+| `canary` | The realm's canary operating policy as it stands: `expires_in_s`, `gross_notional_usdt`, `positions`, `open_orders`, `loss_usdt`, `unvalued_trips` (closed trips the log could not value, which the loss ceiling is therefore not counting), and `blocked` — the refusal word every opening would get, `null` while the policy refuses nothing. The whole object is `null` on a realm that runs under no policy |
+
 ### Sample Schema
 
 `engine-tools record-equity` reads every artifact the fleet manifest
