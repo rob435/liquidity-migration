@@ -670,6 +670,75 @@ def test_a_blocked_spool_class_is_named_beside_the_stalled_lane(tmp_path: Path) 
         )
 
 
+def test_quarantined_spool_files_warn_and_unisolated_ones_page(tmp_path: Path) -> None:
+    heartbeat = tmp_path / "heartbeat.json"
+    base = {
+        "kind": "liquidity_migration_signal_worker_heartbeat",
+        "status": "ready",
+        "bybit_ws_connected": True,
+        "bybit_ws_gap_open": False,
+        "bybit_ws_ticker_coverage_complete": True,
+        "bybit_ws_ticker_topics_quarantined": 0,
+        "bybit_ws_kline_topics_quarantined": 0,
+        "last_long_cycle_completed_wall_ts_ms": 900_000,
+        "last_carry_cycle_completed_wall_ts_ms": 900_000,
+        "long_cycle_cadence_ms": 60_000,
+        "carry_cycle_cadence_ms": 60_000,
+        "spool_backpressured": False,
+        "spool_quarantined_files": 0,
+        "spool_quarantined_bytes": 0,
+        "spool_unreadable_files": 0,
+        "spool_quarantine_reasons": [],
+    }
+    heartbeat.write_text(json.dumps(base))
+    assert liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0) == []
+
+    quarantined = dict(
+        base,
+        spool_quarantined_files=2,
+        spool_quarantined_bytes=4_096,
+        spool_quarantine_reasons=[
+            ["00000000000000000009-ab.json", "not valid JSON: EOF while parsing a string"],
+            ["notes.json", "unnamed"],
+        ],
+    )
+    heartbeat.write_text(json.dumps(quarantined))
+    alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0)
+    assert [(alert.key, alert.severity) for alert in alerts] == [
+        ("worker-spool-quarantine:worker", "WARNING")
+    ]
+    assert "isolated 2 signal spool files" in alerts[0].message
+    assert "00000000000000000009-ab.json: not valid JSON" in alerts[0].message
+
+    # Evidence without a readable sidecar still names the count.
+    heartbeat.write_text(json.dumps(dict(quarantined, spool_quarantine_reasons=[])))
+    alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0)
+    assert "no reason published" in alerts[0].message
+
+    unreadable = dict(base, spool_quarantined_files=1, spool_unreadable_files=3)
+    unreadable["spool_quarantine_reasons"] = [["notes.json", "unnamed"]]
+    heartbeat.write_text(json.dumps(unreadable))
+    alerts = liveness.evaluate_engine_heartbeat("worker", heartbeat, now=1_000.0)
+    assert [(alert.key, alert.severity) for alert in alerts] == [
+        ("worker-spool-quarantine:worker", "WARNING"),
+        ("worker-spool-unreadable:worker", "CRITICAL"),
+    ]
+    assert "could not isolate 3 signal spool files" in alerts[1].message
+
+
+def test_a_worker_that_cannot_isolate_a_spool_file_gets_its_journal(tmp_path: Path) -> None:
+    alerts = [
+        liveness.Alert(
+            "worker-spool-unreadable:liquidity-migration-signal-worker-mainnet.service",
+            "CRITICAL",
+            "cannot isolate",
+        )
+    ]
+    assert liveness._incident_units("mainnet", alerts) == [
+        "liquidity-migration-signal-worker-mainnet.service"
+    ]
+
+
 def test_incomplete_ticker_coverage_says_how_short_the_fill_is(tmp_path: Path) -> None:
     heartbeat = tmp_path / "heartbeat.json"
     payload = {

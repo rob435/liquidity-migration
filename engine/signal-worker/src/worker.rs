@@ -2565,6 +2565,10 @@ pub struct DurabilityMetrics {
     pub spool_class_byte_caps: BTreeMap<String, u64>,
     pub spool_class_byte_soft_thresholds: BTreeMap<String, u64>,
     pub spool_backpressured_classes: Vec<String>,
+    pub spool_quarantined_files: u64,
+    pub spool_quarantined_bytes: u64,
+    pub spool_unreadable_files: u64,
+    pub spool_quarantine_reasons: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2597,6 +2601,10 @@ pub struct DurableSignalWorker {
     replaceable_outputs_coalesced: u64,
     spool_backpressured: bool,
     spool_backpressured_classes: BTreeSet<String>,
+    spool_quarantined_files: u64,
+    spool_quarantined_bytes: u64,
+    spool_unreadable_files: u64,
+    spool_quarantine_reasons: Vec<(String, String)>,
     publication_pending: bool,
 }
 
@@ -2809,6 +2817,10 @@ impl DurableSignalWorker {
             replaceable_outputs_coalesced: 0,
             spool_backpressured: false,
             spool_backpressured_classes: BTreeSet::new(),
+            spool_quarantined_files: spool_inventory.quarantined_files,
+            spool_quarantined_bytes: spool_inventory.quarantined_bytes,
+            spool_unreadable_files: spool_inventory.unreadable_files,
+            spool_quarantine_reasons: spool_inventory.quarantine_reasons,
             publication_pending: false,
         })
     }
@@ -3108,6 +3120,10 @@ impl DurableSignalWorker {
             spool_class_byte_caps,
             spool_class_byte_soft_thresholds,
             spool_backpressured_classes: self.spool_backpressured_classes.iter().cloned().collect(),
+            spool_quarantined_files: self.spool_quarantined_files,
+            spool_quarantined_bytes: self.spool_quarantined_bytes,
+            spool_unreadable_files: self.spool_unreadable_files,
+            spool_quarantine_reasons: self.spool_quarantine_reasons.clone(),
         })
     }
 
@@ -3267,6 +3283,10 @@ impl DurableSignalWorker {
             self.spool_bytes = inventory.bytes;
             self.pending_replaceable_paths = inventory.replaceable_paths;
             self.spool_classes = inventory.classes;
+            self.spool_quarantined_files = inventory.quarantined_files;
+            self.spool_quarantined_bytes = inventory.quarantined_bytes;
+            self.spool_unreadable_files = inventory.unreadable_files;
+            self.spool_quarantine_reasons = inventory.quarantine_reasons;
             self.spool_backpressured = false;
             self.spool_backpressured_classes.retain(|class| {
                 let inventory = self.spool_classes.get(class);

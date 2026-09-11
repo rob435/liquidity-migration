@@ -89,7 +89,7 @@ _DEPLOY_TRANSITIONAL_ALERT_PREFIXES = (
     "rolling-loss:",
     "strategy-errors:",
     "worker-status:",
-    "worker-spool:",
+    "worker-spool",
     "capture-",
     "watchdog:",
     "engine-",
@@ -288,6 +288,20 @@ def _transport_reasons(payload: dict[str, object], *, now: float) -> list[str]:
     return reasons
 
 
+def _first_quarantine_reason(payload: dict[str, object]) -> str:
+    """The worker publishes (file name, reason) pairs for what its spool scan
+    set aside; the page names the first so the reason reaches the operator
+    without a host login."""
+
+    rows = payload.get("spool_quarantine_reasons")
+    if not isinstance(rows, list) or not rows:
+        return "no reason published"
+    first = rows[0]
+    if isinstance(first, list) and len(first) == 2:
+        return f"{first[0]}: {first[1]}"
+    return str(first)
+
+
 def _signal_worker_detail(payload: dict[str, object], *, now: float) -> str:
     reasons: list[str] = []
     if payload.get("bybit_ws_connected") is not True:
@@ -406,6 +420,25 @@ def evaluate_engine_heartbeat(unit: str, path: Path, *, now: float | None = None
                     f"worker-spool:{unit}",
                     "CRITICAL",
                     f"{unit} signal spool is backpressured",
+                )
+            )
+        quarantined = _number(payload.get("spool_quarantined_files"))
+        if quarantined is not None and quarantined > 0:
+            alerts.append(
+                Alert(
+                    f"worker-spool-quarantine:{unit}",
+                    "WARNING",
+                    f"{unit} isolated {quarantined:g} signal spool files: "
+                    f"{_first_quarantine_reason(payload)}",
+                )
+            )
+        unreadable = _number(payload.get("spool_unreadable_files"))
+        if unreadable is not None and unreadable > 0:
+            alerts.append(
+                Alert(
+                    f"worker-spool-unreadable:{unit}",
+                    "CRITICAL",
+                    f"{unit} could not isolate {unreadable:g} signal spool files",
                 )
             )
     if unit in _ENGINE_UNITS:
@@ -1225,7 +1258,7 @@ def _incident_units(scope: str, alerts: list[Alert]) -> list[str]:
         "private-stream:",
         "strategy-errors:",
         "worker-status:",
-        "worker-spool:",
+        "worker-spool",
         "engine-wal-rate:",
         "engine-rss:",
         "engine-restarts:",

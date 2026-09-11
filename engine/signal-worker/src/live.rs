@@ -136,6 +136,12 @@ pub struct WorkerHeartbeat {
     pub spool_class_byte_caps: BTreeMap<String, u64>,
     pub spool_class_byte_soft_thresholds: BTreeMap<String, u64>,
     pub spool_backpressured_classes: Vec<String>,
+    pub spool_quarantined_files: u64,
+    pub spool_quarantined_bytes: u64,
+    pub spool_unreadable_files: u64,
+    /// (file name, reason) for what the scan set aside, bounded by the
+    /// inventory; the watchdog names the first.
+    pub spool_quarantine_reasons: Vec<(String, String)>,
 }
 
 pub struct LiveRunner {
@@ -2366,6 +2372,10 @@ impl LiveRunner {
             spool_class_byte_caps: durability.spool_class_byte_caps,
             spool_class_byte_soft_thresholds: durability.spool_class_byte_soft_thresholds,
             spool_backpressured_classes: durability.spool_backpressured_classes,
+            spool_quarantined_files: durability.spool_quarantined_files,
+            spool_quarantined_bytes: durability.spool_quarantined_bytes,
+            spool_unreadable_files: durability.spool_unreadable_files,
+            spool_quarantine_reasons: durability.spool_quarantine_reasons,
         };
         let bytes = serde_json::to_vec(&heartbeat)
             .map_err(|error| WorkerError::json("encode worker heartbeat", error))?;
@@ -2487,6 +2497,10 @@ fn write_provisional_heartbeat(
             .map(|class| (class.to_owned(), 0))
             .collect(),
         spool_backpressured_classes: Vec::new(),
+        spool_quarantined_files: 0,
+        spool_quarantined_bytes: 0,
+        spool_unreadable_files: 0,
+        spool_quarantine_reasons: Vec::new(),
     };
     let bytes = serde_json::to_vec(&heartbeat)
         .map_err(|error| WorkerError::json("encode provisional worker heartbeat", error))?;

@@ -1507,6 +1507,45 @@ fn paused_engine_coalesces_actionable_generations_and_republishes_current_state(
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// A row the scan cannot read used to fail `open`, so the unit restarted into
+/// the same file. The engine reports the missing sequence as a gap on its own
+/// side; the worker keeps the evidence and starts.
+#[test]
+fn open_isolates_an_unreadable_spool_row_instead_of_refusing_to_start() {
+    let root = temporary_root("spool-quarantine");
+    let state_dir = root.join("state");
+    let spool_dir = root.join("spool");
+    std::fs::create_dir_all(&spool_dir).unwrap();
+    let name = format!("{:020}-{}.json", 9, "ab".repeat(32));
+    std::fs::write(spool_dir.join(&name), br#"{"kind":"#).unwrap();
+
+    let durable = DurableSignalWorker::open_with_universe(
+        test_config(),
+        test_universe(),
+        &state_dir,
+        &spool_dir,
+    )
+    .unwrap();
+
+    let metrics = durable.durability_metrics().unwrap();
+    assert_eq!(metrics.spool_files, 0);
+    assert_eq!(metrics.spool_quarantined_files, 1);
+    assert_eq!(metrics.spool_quarantined_bytes, 8);
+    assert_eq!(metrics.spool_unreadable_files, 0);
+    assert_eq!(metrics.spool_quarantine_reasons.len(), 1);
+    assert_eq!(metrics.spool_quarantine_reasons[0].0, name);
+    assert!(
+        metrics.spool_quarantine_reasons[0]
+            .1
+            .starts_with("not valid JSON: "),
+        "{:?}",
+        metrics.spool_quarantine_reasons[0]
+    );
+    assert!(!spool_dir.join(&name).exists());
+    assert!(spool_dir.join("quarantine").join(&name).exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn one_spool_class_at_cap_does_not_block_unrelated_source_commits() {
     let root = temporary_root("class-backpressure");

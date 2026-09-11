@@ -724,12 +724,24 @@ engine-tools wal-retention --wal /var/lib/liquidity-migration-engine-mainnet/eng
 | Missing history is irrecoverable | Reconcile strategy state, venue exposure and producer history. For a permanently stopped legacy source, the offline retirement command records the final published ceiling and disposition of its unprocessed suffix without advancing its accepted cursor. Managed sources cannot use this transition |
 | Accepted legacy cursor already skipped history | The missing history is not recoverable from the cursor; assess the producer/account evidence separately |
 | Binary rollback | Required WAL records and `segment_base_v7` make incompatible readers refuse; deployment permits predecessor recovery only when its runtime inputs match. Preserve all durable state and repair forward otherwise |
+| The worker quarantined a candidate | Its sequence is missing from the spool, so the engine treats it as a gap. Read the `.reason` sidecar, then either repair-and-republish the exact envelope or accept the gap through the rows above; the quarantined pair is removed by hand afterwards |
+| The worker reports `spool_unreadable_files` | The candidate is still in the engine's scan path: quarantine is at its 256-file / 256 MiB bound, already holds that file name, or the rename failed. Clear the quarantine directory of resolved pairs, or repair the filesystem fault the reason names |
 
-Must never delete later-generation rows, rewrite accepted hashes, or edit a live cursor to clear a gap. Inspect logs read-only before selecting a recovery action (`<realm>` is `demo`, `mainnet`, `mexc`, or `hyperliquid`):
+Must never delete later-generation rows, rewrite accepted hashes, or edit a live cursor to clear a gap. Inspect logs and quarantined evidence read-only before selecting a recovery action (`<realm>` is `demo`, `mainnet`, `mexc`, or `hyperliquid`):
 
 ```bash
 journalctl -u liquidity-migration-signal-worker-<realm> -n 100 --no-pager
 journalctl -u liquidity-migration-engine<-mainnet or empty> -n 100 --no-pager
+ls -l /var/lib/liquidity-migration/signals/<realm>/quarantine/
+cat /var/lib/liquidity-migration/signals/<realm>/quarantine/*.reason
+```
+
+After the sequence is republished or its gap accepted, remove the pair by hand; the worker never deletes it:
+
+```bash
+sudo -u liquidity-signal-worker rm \
+  /var/lib/liquidity-migration/signals/<realm>/quarantine/<name> \
+  /var/lib/liquidity-migration/signals/<realm>/quarantine/<name>.reason
 ```
 
 ### Resolve verified historical physical residue

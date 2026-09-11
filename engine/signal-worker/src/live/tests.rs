@@ -759,6 +759,38 @@ async fn the_heartbeat_publishes_when_the_carry_cycle_is_first_due() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[tokio::test(start_paused = true)]
+async fn the_heartbeat_publishes_what_the_spool_scan_set_aside() {
+    let root = temporary_root("heartbeat-spool-quarantine");
+    let _ = std::fs::remove_dir_all(&root);
+    let spool_dir = root.join("spool");
+    std::fs::create_dir_all(&spool_dir).unwrap();
+    let name = format!("{:020}-{}.json", 9, "ab".repeat(32));
+    std::fs::write(spool_dir.join(&name), br#"{"kind":"#).unwrap();
+    let options = LiveRunOptions {
+        state_dir: root.join("state"),
+        spool_dir,
+        heartbeat: root.join("heartbeat.json"),
+    };
+    let runner =
+        LiveRunner::new_with_universe(checked_demo_config(), test_universe(), options).unwrap();
+
+    runner.write_heartbeat("ready", None).unwrap();
+
+    let payload: Value =
+        serde_json::from_slice(&std::fs::read(root.join("heartbeat.json")).unwrap()).unwrap();
+    assert_eq!(payload["spool_files"], Value::from(0));
+    assert_eq!(payload["spool_quarantined_files"], Value::from(1));
+    assert_eq!(payload["spool_quarantined_bytes"], Value::from(8));
+    assert_eq!(payload["spool_unreadable_files"], Value::from(0));
+    assert_eq!(payload["spool_quarantine_reasons"][0][0], Value::from(name));
+    assert!(payload["spool_quarantine_reasons"][0][1]
+        .as_str()
+        .is_some_and(|reason| reason.starts_with("not valid JSON: ")));
+    drop(runner);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn runtime_ready_requires_exact_live_ticker_and_kline_topics() {
     let now_ms = 1_000_000;
