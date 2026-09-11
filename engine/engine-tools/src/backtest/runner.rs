@@ -399,7 +399,7 @@ pub async fn run(opts: BacktestOptions) -> Result<BacktestReport, EngineError> {
     let fees = super::fees::resolve(
         opts.taker_fee_rate,
         opts.maker_fee_rate,
-        &super::fees::default_path(),
+        super::fees::default_source(),
     )
     .map_err(EngineError::Boot)?;
     let scheduler = Scheduler::default();

@@ -1133,7 +1133,8 @@ pub fn open_current(
 /// Replay the newest segment boot can trust without opening it for writing:
 /// the records [`open_current`] would hand the engine, read-only. The flag
 /// says whether that segment ends in a torn tail. One segment of memory,
-/// where [`replay_chain`] needs the whole family's.
+/// where [`replay_chain`] holds the whole family's and
+/// [`replay_chain_visit`] holds one record's.
 pub fn replay_current(family: impl AsRef<Path>) -> Result<(Vec<(u64, WalRecord)>, bool), WalError> {
     let family = family.as_ref();
     let mut chain = segments(family)?;
@@ -1146,35 +1147,70 @@ pub fn replay_current(family: impl AsRef<Path>) -> Result<(Vec<(u64, WalRecord)>
     Ok((Vec::new(), false))
 }
 
-/// Replay a whole family in order, for the offline readers: every good record
-/// of every segment, renumbered consecutively. The flag says whether the
-/// NEWEST trusted segment ends in a torn tail — the crash point a writer
-/// would truncate. Torn leftovers of abandoned rotations (a numbered segment
-/// with no complete restatement) hold no records of their own and are
-/// skipped without raising it.
+/// Walk a whole family in order, for the offline readers: every good record
+/// of every segment, renumbered consecutively, handed to `visit` as it is
+/// decoded rather than collected. The flag says whether ANY trusted segment
+/// read ended in a torn tail — the crash point a writer would truncate. Torn
+/// leftovers of abandoned rotations (a numbered segment with no complete
+/// restatement) hold no records of their own and are skipped without raising
+/// it.
 ///
 /// Restatement records are left in the stream. They are written as "set
 /// state to this", and at their position in the chain that state is exactly
 /// what the records before them already produced, so readers that apply them
 /// see the same history either way.
-pub fn replay_chain(family: impl AsRef<Path>) -> Result<(Vec<(u64, WalRecord)>, bool), WalError> {
+pub fn replay_chain_visit(
+    family: impl AsRef<Path>,
+    mut visit: impl FnMut(u64, WalRecord) -> Result<(), WalError>,
+) -> Result<bool, WalError> {
     let family = family.as_ref();
-    let chain = segments(family)?;
-    let mut out: Vec<(u64, WalRecord)> = Vec::new();
     let mut damaged = false;
-    for (index, path) in &chain {
-        let (records, torn) = scan_candidate(*index, path)?;
-        if !trusted(*index, &records) {
-            // An abandoned rotation: its only content was a restatement that
-            // never finished. Boot never replayed it and neither do we.
+    let mut sequence = 0u64;
+    for (index, path) in segments(family)? {
+        let mut file = File::open(&path)?;
+        let len = file.metadata()?.len();
+        if len == 0 {
             continue;
         }
-        damaged |= torn;
-        for (_, record) in records {
-            let seq = out.len() as u64 + 1;
-            out.push((seq, record));
+        let mut trusted = index <= 1;
+        let mut decided = false;
+        // An untrusted segment is read to its end anyway: real records that
+        // cannot be decoded are refused here as they are for a trusted one.
+        let scan = scan_frames(&mut file, len, read_record, |_, _, _, record| {
+            if !decided {
+                decided = true;
+                if index > 1 {
+                    trusted = matches!(record, WalRecord::SegmentBase { .. });
+                }
+            }
+            if !trusted {
+                return Ok(());
+            }
+            sequence += 1;
+            visit(sequence, record)
+        });
+        let good_end = match scan {
+            Ok(good_end) => good_end,
+            // A numbered segment whose own header never finished: the same
+            // tolerance [`scan_candidate`] gives the trust decision.
+            Err(WalError::Corrupt { offset: 0, .. }) if index > 1 => continue,
+            Err(error) => return Err(error),
+        };
+        if trusted {
+            damaged |= good_end < len;
         }
     }
+    Ok(damaged)
+}
+
+/// [`replay_chain_visit`] collected: the whole family in memory, with that
+/// walk's torn-tail flag.
+pub fn replay_chain(family: impl AsRef<Path>) -> Result<(Vec<(u64, WalRecord)>, bool), WalError> {
+    let mut out: Vec<(u64, WalRecord)> = Vec::new();
+    let damaged = replay_chain_visit(family, |sequence, record| {
+        out.push((sequence, record));
+        Ok(())
+    })?;
     Ok((out, damaged))
 }
 

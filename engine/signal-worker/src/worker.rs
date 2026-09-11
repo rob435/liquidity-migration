@@ -3026,7 +3026,7 @@ impl DurableSignalWorker {
             replay_config: self.worker.config.clone(),
             events,
             suppressed_output_kinds,
-            observation_json: observation_json.clone(),
+            observation_json,
         };
         let entry_bytes = json_size(&entry)?;
         let projected_bytes = self
@@ -3038,14 +3038,14 @@ impl DurableSignalWorker {
             || projected_bytes > MAX_INPUT_JOURNAL_BYTES
             || self.journal_entries_retained.saturating_add(1) > MAX_INPUT_JOURNAL_ENTRIES
         {
-            self.compact_candidate_checkpoint(&candidate, &observation_json)?;
+            self.compact_candidate_checkpoint(&candidate, entry.observation_json)?;
             self.worker = candidate;
         } else {
             self.journal.append(&entry)?;
             self.worker = candidate;
             self.journal_entries_retained = self.journal_entries_retained.saturating_add(1);
             self.publication_pending = true;
-            for json in &observation_json {
+            for json in &entry.observation_json {
                 self.record_spool_write(json)?;
             }
             self.publication_pending = false;
@@ -3324,14 +3324,14 @@ impl DurableSignalWorker {
             || self.journal.len()? >= MAX_INPUT_JOURNAL_BYTES
             || checkpoint_old
         {
-            self.compact_current_checkpoint(&[])?;
+            self.compact_current_checkpoint(Vec::new())?;
         }
         Ok(())
     }
 
     fn compact_current_checkpoint(
         &mut self,
-        observation_json: &[String],
+        observation_json: Vec<String>,
     ) -> Result<(), WorkerError> {
         let candidate = self.worker.clone();
         self.compact_candidate_checkpoint(&candidate, observation_json)
@@ -3340,7 +3340,7 @@ impl DurableSignalWorker {
     fn compact_candidate_checkpoint(
         &mut self,
         candidate: &SignalWorker,
-        observation_json: &[String],
+        observation_json: Vec<String>,
     ) -> Result<(), WorkerError> {
         self.pending_next.save(candidate.state())?;
         let next_state_sha256 = self
@@ -3351,10 +3351,10 @@ impl DurableSignalWorker {
             schema_version: SCHEMA_VERSION,
             prior_state_sha256: self.checkpoint_sha256.clone(),
             next_state_sha256: next_state_sha256.clone(),
-            observation_json: observation_json.to_vec(),
+            observation_json,
         };
         self.pending.save(&transaction)?;
-        for json in observation_json {
+        for json in &transaction.observation_json {
             self.record_spool_write(json)?;
         }
         self.checkpoint.replace_from(&self.pending_next)?;

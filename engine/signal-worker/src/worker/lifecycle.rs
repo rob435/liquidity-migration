@@ -73,7 +73,7 @@ impl DurableSignalWorker {
             epoch,
             sealed: true,
         });
-        self.compact_candidate_checkpoint(&candidate, &[])?;
+        self.compact_candidate_checkpoint(&candidate, Vec::new())?;
         self.worker = candidate;
         Ok(())
     }
@@ -167,7 +167,7 @@ impl DurableSignalWorker {
                     });
                     candidate.state.long_output_sequence = 0;
                     candidate.state.carry_output_sequence = 0;
-                    self.compact_candidate_checkpoint(&candidate, &[])?;
+                    self.compact_candidate_checkpoint(&candidate, Vec::new())?;
                     self.worker = candidate;
                 } else if active.epoch != epoch {
                     return Err(WorkerError::state(

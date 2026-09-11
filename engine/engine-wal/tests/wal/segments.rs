@@ -6,7 +6,8 @@ use std::path::PathBuf;
 
 use engine_types::wal::AnchorState;
 use engine_wal::{
-    open_current, replay, replay_chain, replay_current, segments, Wal, WalRecord, WalWriter,
+    open_current, replay, replay_chain, replay_chain_visit, replay_current, segments, Wal,
+    WalRecord, WalWriter,
 };
 use tempfile::TempDir;
 
@@ -952,4 +953,42 @@ fn streamed_callback_lineage_and_epoch_reads_refuse_removed_tags_without_a_match
             }
         }
     }
+}
+
+/// A family with a torn tail on the newest trusted segment and an abandoned
+/// rotation above it.
+fn torn_and_abandoned_family(dir: &TempDir) -> PathBuf {
+    let family = rotated_family(dir);
+    let second = dir.path().join("engine.wal.000002");
+    let whole = fs::read(&second).unwrap();
+    fs::write(&second, &whole[..whole.len() - 2]).unwrap();
+    fs::write(dir.path().join("engine.wal.000003"), b"EWAL0001\x99\x99").unwrap();
+    family
+}
+
+#[test]
+fn the_visitor_reads_the_family_exactly_as_the_collector_does() {
+    let dir = TempDir::new().unwrap();
+    let family = torn_and_abandoned_family(&dir);
+    let (collected, damaged) = replay_chain(&family).unwrap();
+
+    // Segment 1's three records, the restatement, and the one record the torn
+    // tail left whole, renumbered across the seam. The abandoned rotation
+    // above contributes nothing; the torn tail is the flag.
+    assert_eq!(texts(&collected), ["one", "two", "three", "four"]);
+    assert_eq!(
+        collected.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+        [1, 2, 3, 4, 5]
+    );
+    assert!(matches!(collected[3].1, WalRecord::SegmentBase { .. }));
+    assert!(damaged);
+
+    let mut visited = Vec::new();
+    let streamed = replay_chain_visit(&family, |seq, record| {
+        visited.push((seq, record));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(visited, collected);
+    assert_eq!(streamed, damaged);
 }

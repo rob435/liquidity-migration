@@ -119,7 +119,7 @@ impl DurableSignalWorker {
         candidate.config.carry_destination = carry;
         candidate.routing_verification_required = false;
         if candidate.state.destination_sleeves != self.worker.state.destination_sleeves {
-            self.compact_candidate_checkpoint(&candidate, &[])?;
+            self.compact_candidate_checkpoint(&candidate, Vec::new())?;
         }
         self.worker = candidate;
         Ok(())

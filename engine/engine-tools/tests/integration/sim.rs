@@ -23,10 +23,10 @@ fn options(seed: u64, tag: &str) -> SimOptions {
     opts
 }
 
-/// The fee snapshot the quoter fingerprints below were taken against.
-/// `configs/bybit_fee_rates.json` is a refreshed authenticated snapshot and
-/// its maximum maker and taker rate price every fill, so a new snapshot moves
-/// every quoter log without changing a single record.
+/// The fee snapshot the quoter fingerprints below were taken against: the
+/// `configs/bybit_fee_rates.json` bytes the binary embeds. Its maximum maker
+/// and taker rate price every fill, so a refreshed snapshot moves every
+/// quoter log without changing a single record.
 const PINNED_FEE_SNAPSHOT: &str =
     "13ea6684a9f394b3dd83663f538bf0b5af3ab09d6c17f2deac5254be9c25bd1d";
 

@@ -341,7 +341,7 @@ impl World {
 
         let defaults = BacktestOptions::default();
         let fees =
-            crate::backtest::fees::resolve(None, None, &crate::backtest::fees::default_path())
+            crate::backtest::fees::resolve(None, None, crate::backtest::fees::default_source())
                 .map_err(boot)?;
         let rtt = Duration::from_millis(defaults.order_rtt_ms);
         let private_latency = Duration::from_millis(defaults.private_latency_ms);

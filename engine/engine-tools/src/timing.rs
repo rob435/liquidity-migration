@@ -112,51 +112,56 @@ impl Timings {
     pub fn from_records(records: &[WalRecord]) -> Self {
         let mut out = Self::default();
         for record in records {
-            let WalRecord::VenueTiming {
-                operation,
-                queued_ns,
-                task_started_ns,
-                socket_write_ns,
-                ack_ns,
-                rate_wait_ns,
-                task_completed_ns,
-                core_handled_ns,
-                ..
-            } = record
-            else {
-                continue;
-            };
-            let steps = out.by_operation.entry(operation.clone()).or_default();
-            let mut add = |step: Step, ns: u64| steps.entry(step).or_default().push(ns);
-
-            add(Step::Queue, task_started_ns.saturating_sub(*queued_ns));
-            add(Step::Total, core_handled_ns.saturating_sub(*queued_ns));
-            add(
-                Step::Resume,
-                core_handled_ns.saturating_sub(*task_completed_ns),
-            );
-            if let Some(paced) = rate_wait_ns {
-                add(Step::Paced, *paced);
-            }
-            match (socket_write_ns, ack_ns) {
-                (Some(written), Some(acked)) => {
-                    // The hold happens before the bytes are signed, so it
-                    // comes out of this leg rather than sitting beside it.
-                    add(
-                        Step::Encode,
-                        written
-                            .saturating_sub(*task_started_ns)
-                            .saturating_sub(rate_wait_ns.unwrap_or(0)),
-                    );
-                    add(Step::Venue, acked.saturating_sub(*written));
-                    add(Step::Reply, task_completed_ns.saturating_sub(*acked));
-                }
-                _ => {
-                    *out.unstamped.entry(operation.clone()).or_default() += 1;
-                }
-            }
+            out.push(record);
         }
         out
+    }
+
+    /// One record, for readers that walk a log rather than hold it.
+    pub fn push(&mut self, record: &WalRecord) {
+        let WalRecord::VenueTiming {
+            operation,
+            queued_ns,
+            task_started_ns,
+            socket_write_ns,
+            ack_ns,
+            rate_wait_ns,
+            task_completed_ns,
+            core_handled_ns,
+            ..
+        } = record
+        else {
+            return;
+        };
+        let steps = self.by_operation.entry(operation.clone()).or_default();
+        let mut add = |step: Step, ns: u64| steps.entry(step).or_default().push(ns);
+
+        add(Step::Queue, task_started_ns.saturating_sub(*queued_ns));
+        add(Step::Total, core_handled_ns.saturating_sub(*queued_ns));
+        add(
+            Step::Resume,
+            core_handled_ns.saturating_sub(*task_completed_ns),
+        );
+        if let Some(paced) = rate_wait_ns {
+            add(Step::Paced, *paced);
+        }
+        match (socket_write_ns, ack_ns) {
+            (Some(written), Some(acked)) => {
+                // The hold happens before the bytes are signed, so it comes
+                // out of this leg rather than sitting beside it.
+                add(
+                    Step::Encode,
+                    written
+                        .saturating_sub(*task_started_ns)
+                        .saturating_sub(rate_wait_ns.unwrap_or(0)),
+                );
+                add(Step::Venue, acked.saturating_sub(*written));
+                add(Step::Reply, task_completed_ns.saturating_sub(*acked));
+            }
+            _ => {
+                *self.unstamped.entry(operation.clone()).or_default() += 1;
+            }
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -342,6 +347,24 @@ mod tests {
         let text = report(&timings);
         assert!(text.contains("cancel — 2 command(s)"), "{text}");
         assert!(text.contains("place — 1 command(s)"), "{text}");
+    }
+
+    #[test]
+    fn one_record_at_a_time_reports_what_the_whole_slice_does() {
+        let records = vec![
+            timing("place", [0, 100, 700, 900, 950, 1_000], Some(500)),
+            timing("cancel", [0, 1, 2, 3, 4, 900], None),
+            WalRecord::Note {
+                source: "engine".into(),
+                text: "not a timing record".into(),
+            },
+        ];
+        let mut folded = Timings::default();
+        for record in &records {
+            folded.push(record);
+        }
+        assert_eq!(report(&folded), of_log(&records));
+        assert!(report(&folded).contains("place — 1 command(s)"));
     }
 
     #[test]

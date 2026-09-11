@@ -45,9 +45,10 @@ engine — the execution loop
       features carry an entry trigger.
 
   engine bench [--events N] [--rate PER_SEC] [--every N] [--symbols A,B]
-               [--wal PATH] [--fills] [--venue-delay-ms MS]
+               [--wal PATH] [--fills] [--venue-delay-ms MS] [--json]
                [--contention [--cancel-after N] [--ttl-ms MS]]
       Measure the real loop through a local submit response on this box.
+      --json prints the whole result as one JSON object instead of the table.
       --venue-delay-ms holds the pretend venue's reply for that long, which is
       the one thing a localhost socket cannot model: whether work on this
       side is hidden by the flight to the venue or added to it depends on

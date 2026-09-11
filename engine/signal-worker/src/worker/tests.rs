@@ -3079,7 +3079,7 @@ fn bounded_source_deltas_compact_into_one_checkpoint() {
     assert_eq!(journaled.checkpoint_writes_session, initial_writes);
     assert_eq!(journaled.journal_entries_retained, 2);
     assert!(journaled.journal_bytes > 0);
-    durable.compact_current_checkpoint(&[]).unwrap();
+    durable.compact_current_checkpoint(Vec::new()).unwrap();
     let compacted = durable.durability_metrics().unwrap();
     assert_eq!(compacted.checkpoint_writes_session, initial_writes + 1);
     assert_eq!(compacted.journal_bytes, 0);

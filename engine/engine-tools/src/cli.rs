@@ -41,6 +41,60 @@ pub(super) fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
     }
 }
 
+/// One subcommand's declared options. Every argument must be claimed by a
+/// `value` or `flag` call; `finish` refuses what is left, so a misspelled or
+/// misplaced flag stops the command instead of silently running a different
+/// one.
+pub(super) struct Args {
+    args: Vec<String>,
+    used: Vec<bool>,
+}
+
+impl Args {
+    pub(super) fn new(args: &[String]) -> Self {
+        let mut used = vec![false; args.len()];
+        // args[0] is the subcommand name.
+        if let Some(command) = used.first_mut() {
+            *command = true;
+        }
+        Self {
+            args: args.to_vec(),
+            used,
+        }
+    }
+
+    pub(super) fn value(&mut self, flag: &str) -> Option<String> {
+        let at = self.args.iter().position(|arg| arg == flag)?;
+        self.used[at] = true;
+        let value = self.args.get(at + 1)?.clone();
+        self.used[at + 1] = true;
+        Some(value)
+    }
+
+    pub(super) fn flag(&mut self, flag: &str) -> bool {
+        let Some(at) = self.args.iter().position(|arg| arg == flag) else {
+            return false;
+        };
+        self.used[at] = true;
+        true
+    }
+
+    pub(super) fn finish(self) -> Result<(), Box<dyn Error>> {
+        let left: Vec<&str> = self
+            .args
+            .iter()
+            .zip(&self.used)
+            .filter(|(_, used)| !**used)
+            .map(|(arg, _)| arg.as_str())
+            .collect();
+        if left.is_empty() {
+            return Ok(());
+        }
+        let command = self.args.first().map_or("this command", String::as_str);
+        Err(format!("{command} does not take {}", left.join(" ")).into())
+    }
+}
+
 fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     use std::os::unix::process::CommandExt;
     let executable = std::env::current_exe()?.with_file_name("engine");
@@ -71,11 +125,23 @@ fn sim(args: &[String]) -> Result<(), Box<dyn Error>> {
 }
 
 fn bench(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let options = parse_bench_options(args)?;
+    let (options, json) = parse_bench_options(args)?;
     let result = runtime()?.block_on(bench::run(&options))?;
+    if json {
+        println!("{}", result.as_json());
+        return Ok(());
+    }
     println!(
         "\nbench: {} quotes in, {} completed submit attempts, against a local synthetic venue",
         result.events, result.orders
+    );
+    println!(
+        "workload: {}",
+        if options.contention {
+            "contention"
+        } else {
+            "default"
+        }
     );
     println!("{}", result.table());
     println!(
@@ -88,13 +154,14 @@ fn bench(args: &[String]) -> Result<(), Box<dyn Error>> {
 }
 
 fn wal_cost(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let path = PathBuf::from(value(args, "--wal").ok_or("wal-cost needs --wal PATH")?);
-    let appends: usize = value(args, "--appends")
-        .unwrap_or_else(|| "20000".into())
-        .parse()?;
-    let barriers: usize = value(args, "--barriers")
-        .unwrap_or_else(|| "200".into())
-        .parse()?;
+    let mut args = Args::new(args);
+    let path = args.value("--wal");
+    let appends = args.value("--appends");
+    let barriers = args.value("--barriers");
+    args.finish()?;
+    let path = PathBuf::from(path.ok_or("wal-cost needs --wal PATH")?);
+    let appends: usize = appends.unwrap_or_else(|| "20000".into()).parse()?;
+    let barriers: usize = barriers.unwrap_or_else(|| "200".into()).parse()?;
     let costs = engine_wal::measure(&path, appends, barriers)?;
     println!("wal-cost path={}", path.display());
     println!("{costs}");
@@ -104,9 +171,13 @@ fn wal_cost(args: &[String]) -> Result<(), Box<dyn Error>> {
 }
 
 fn wal_retention(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let path = PathBuf::from(value(args, "--wal").ok_or("wal-retention needs --wal PATH")?);
+    let mut args = Args::new(args);
+    let path = args.value("--wal");
+    let json = args.flag("--json");
+    args.finish()?;
+    let path = PathBuf::from(path.ok_or("wal-retention needs --wal PATH")?);
     let report = engine_tools::wal_retention::read(&path)?;
-    if args.iter().any(|arg| arg == "--json") {
+    if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
@@ -120,10 +191,12 @@ fn wal_retention(args: &[String]) -> Result<(), Box<dyn Error>> {
 }
 
 fn wal_convert_v5(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let input = PathBuf::from(value(args, "--wal").ok_or("wal-convert-v5 needs --wal PATH")?);
-    let output = PathBuf::from(
-        value(args, "--output-dir").ok_or("wal-convert-v5 needs --output-dir NEW_DIRECTORY")?,
-    );
+    let mut args = Args::new(args);
+    let input = args.value("--wal");
+    let output = args.value("--output-dir");
+    args.finish()?;
+    let input = PathBuf::from(input.ok_or("wal-convert-v5 needs --wal PATH")?);
+    let output = PathBuf::from(output.ok_or("wal-convert-v5 needs --output-dir NEW_DIRECTORY")?);
     let result = engine_tools::wal_conversion::convert(&input, &output)?;
     println!(
         "family={} segments={} records={} upgraded_bases={} relocated_bases={}",
@@ -137,7 +210,10 @@ fn wal_convert_v5(args: &[String]) -> Result<(), Box<dyn Error>> {
 }
 
 fn venue_key(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let path = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
+    let mut args = Args::new(args);
+    let path = args.value("--config");
+    args.finish()?;
+    let path = PathBuf::from(path.unwrap_or_else(|| "engine.toml".into()));
     let loaded = engine_core::config::load(&path)?;
     let chosen = engine_core::assembly::venue_name(&loaded.config.engine.venue)?;
     // No symbols: nothing here sends anything, and the table is only
@@ -186,21 +262,41 @@ fn strategies(_args: &[String]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn attest_flat(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let config = PathBuf::from(
-        value(args, "--config")
+/// What [`engine_wal::replay_chain`]'s flag means: some trusted segment of
+/// the family ended part-way through a record, not necessarily the newest.
+/// The three log readers below say it in one voice.
+const TORN_TAIL: &str = "\n  a log segment ends part-way through a record; the records after that \
+     point in that segment are not in these numbers.";
+
+/// `--config`, the runtime unit's `ENGINE_CONFIG_FILE`, then the working
+/// directory's `engine.toml`.
+fn config_with_env(args: &[String]) -> Result<PathBuf, Box<dyn Error>> {
+    let mut args = Args::new(args);
+    let config = args.value("--config");
+    args.finish()?;
+    Ok(PathBuf::from(
+        config
             .or_else(|| std::env::var("ENGINE_CONFIG_FILE").ok())
             .unwrap_or_else(|| "engine.toml".into()),
-    );
+    ))
+}
+
+fn config_or_default(args: &[String]) -> Result<PathBuf, Box<dyn Error>> {
+    let mut args = Args::new(args);
+    let config = args.value("--config");
+    args.finish()?;
+    Ok(PathBuf::from(
+        config.unwrap_or_else(|| "engine.toml".into()),
+    ))
+}
+
+fn attest_flat(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let config = config_with_env(args)?;
     runtime()?.block_on(engine_tools::flatness::run(&config))
 }
 
 fn verify_account_identity(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let config = PathBuf::from(
-        value(args, "--config")
-            .or_else(|| std::env::var("ENGINE_CONFIG_FILE").ok())
-            .unwrap_or_else(|| "engine.toml".into()),
-    );
+    let config = config_with_env(args)?;
     runtime()?.block_on(engine_tools::flatness::verify_account_identity(&config))
 }
 
@@ -211,15 +307,20 @@ fn canary_order(_args: &[String]) -> Result<(), Box<dyn Error>> {
 
 #[cfg(any(feature = "bybit", feature = "mexc", feature = "hyperliquid"))]
 fn canary_order(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let mut args = Args::new(args);
+    let config = args.value("--config");
+    let symbol = args.value("--symbol");
+    let expected_user_id = args.value("--expected-user-id");
+    let execute = args.flag("--execute");
+    args.finish()?;
     let config = PathBuf::from(
-        value(args, "--config")
+        config
             .or_else(|| std::env::var("ENGINE_CONFIG_FILE").ok())
             .unwrap_or_else(|| "engine.toml".into()),
     );
-    let symbol = value(args, "--symbol").ok_or("canary-order needs --symbol SYMBOL")?;
+    let symbol = symbol.ok_or("canary-order needs --symbol SYMBOL")?;
     let expected_user_id =
-        value(args, "--expected-user-id").ok_or("canary-order needs --expected-user-id USER_ID")?;
-    let execute = args.iter().any(|arg| arg == "--execute");
+        expected_user_id.ok_or("canary-order needs --expected-user-id USER_ID")?;
     runtime()?.block_on(engine_tools::canary::run(
         &config,
         &symbol,
@@ -229,7 +330,10 @@ fn canary_order(args: &[String]) -> Result<(), Box<dyn Error>> {
 }
 
 fn replay(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let path = value(args, "--wal").ok_or("replay needs --wal PATH")?;
+    let mut args = Args::new(args);
+    let path = args.value("--wal");
+    args.finish()?;
+    let path = path.ok_or("replay needs --wal PATH")?;
     let report = replay::read(&PathBuf::from(path))?;
     for line in &report.lines {
         println!("{line}");
@@ -244,7 +348,10 @@ fn replay(args: &[String]) -> Result<(), Box<dyn Error>> {
 }
 
 fn fills(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let path = value(args, "--wal").ok_or("fills needs --wal PATH")?;
+    let mut args = Args::new(args);
+    let path = args.value("--wal");
+    args.finish()?;
+    let path = path.ok_or("fills needs --wal PATH")?;
     // The whole family, oldest segment first. A log that was never
     // rotated is a family of one, so a plain file path still means
     // what it always did.
@@ -276,41 +383,45 @@ fn fills(args: &[String]) -> Result<(), Box<dyn Error>> {
         );
     }
     if torn {
-        println!(
-            "\n  the log ends part-way through a record; anything after that point is \
-             not in these numbers."
-        );
+        println!("{TORN_TAIL}");
     }
     Ok(())
 }
 
 fn latency(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let path = value(args, "--wal").ok_or("latency needs --wal PATH")?;
-    let (replayed, torn) = engine_wal::replay_chain(Path::new(&path))?;
+    let mut args = Args::new(args);
+    let path = args.value("--wal");
+    args.finish()?;
+    let path = path.ok_or("latency needs --wal PATH")?;
+    // The whole family, one record at a time: the table is a running fold,
+    // so nothing here holds the log.
+    let mut timings = engine_tools::timing::Timings::default();
+    let mut records = 0_usize;
+    let torn = engine_wal::replay_chain_visit(Path::new(&path), |_, record| {
+        records += 1;
+        timings.push(&record);
+        Ok(())
+    })?;
     let segments = engine_wal::segments(Path::new(&path))?.len();
-    let records: Vec<_> = replayed.into_iter().map(|(_, r)| r).collect();
-    print!("{}", engine_tools::timing::of_log(&records));
-    println!(
-        "\n  {} record(s), from {} log segment(s) under {path}.",
-        records.len(),
-        segments
-    );
+    print!("{}", engine_tools::timing::report(&timings));
+    println!("\n  {records} record(s), from {segments} log segment(s) under {path}.");
     if torn {
-        println!(
-            "\n  the log ends part-way through a record; anything after that point is \
-             not in these numbers."
-        );
+        println!("{TORN_TAIL}");
     }
     Ok(())
 }
 
 fn cohort(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let path = value(args, "--wal").ok_or("cohort needs --wal PATH")?;
+    let mut args = Args::new(args);
+    let path = args.value("--wal");
+    let json = args.flag("--json");
+    args.finish()?;
+    let path = path.ok_or("cohort needs --wal PATH")?;
     let (replayed, torn) = engine_wal::replay_chain(Path::new(&path))?;
     let segments = engine_wal::segments(Path::new(&path))?.len();
     let records: Vec<_> = replayed.into_iter().map(|(_, r)| r).collect();
     let report = engine_tools::cohort::of_log(&records);
-    if args.iter().any(|arg| arg == "--json") {
+    if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
@@ -321,60 +432,61 @@ fn cohort(args: &[String]) -> Result<(), Box<dyn Error>> {
         segments
     );
     if torn {
-        println!(
-            "\n  the log ends part-way through a record; anything after that point is \
-             not in these numbers."
-        );
+        println!("{TORN_TAIL}");
     }
     Ok(())
 }
 
 fn reconcile_clear(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let config = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
-    let note = value(args, "--note").unwrap_or_else(|| "operator reconcile-clear".into());
-    let execute = args.iter().any(|a| a == "--execute");
+    let mut args = Args::new(args);
+    let config = args.value("--config");
+    let note = args.value("--note");
+    let execute = args.flag("--execute");
+    args.finish()?;
+    let config = PathBuf::from(config.unwrap_or_else(|| "engine.toml".into()));
+    let note = note.unwrap_or_else(|| "operator reconcile-clear".into());
     runtime()?.block_on(engine_core::clear::run(&config, &note, execute))
 }
 
 fn initialize_native_strategy_state(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let config = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
+    let config = config_or_default(args)?;
     runtime()?.block_on(engine_tools::takeover::initialize_native_strategy_state(
         &config,
     ))
 }
 
 fn verify_native_strategy_state(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let config = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
+    let config = config_or_default(args)?;
     engine_tools::takeover::verify_native_strategy_state(&config)
 }
 
 fn rebind_native_strategy_state(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let previous = PathBuf::from(
-        value(args, "--previous-config").ok_or("checkpoint rebind needs --previous-config PATH")?,
-    );
-    let config =
-        PathBuf::from(value(args, "--config").ok_or("checkpoint rebind needs --config PATH")?);
+    let mut args = Args::new(args);
+    let previous = args.value("--previous-config");
+    let config = args.value("--config");
+    let execute = args.flag("--execute");
+    args.finish()?;
+    let previous = PathBuf::from(previous.ok_or("checkpoint rebind needs --previous-config PATH")?);
+    let config = PathBuf::from(config.ok_or("checkpoint rebind needs --config PATH")?);
     runtime()?.block_on(engine_tools::takeover::rebind_native_strategy_state(
-        &previous,
-        &config,
-        args.iter().any(|arg| arg == "--execute"),
+        &previous, &config, execute,
     ))
 }
 
 fn retire_legacy_signal_sources(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let config = PathBuf::from(
-        value(args, "--config").ok_or("retire-legacy-signal-sources needs --config PATH")?,
-    );
-    let plan = PathBuf::from(
-        value(args, "--plan").ok_or("retire-legacy-signal-sources needs --plan PATH")?,
-    );
+    let mut args = Args::new(args);
+    let config = args.value("--config");
+    let plan = args.value("--plan");
+    let execute = args.flag("--execute");
+    args.finish()?;
+    let config = PathBuf::from(config.ok_or("retire-legacy-signal-sources needs --config PATH")?);
+    let plan = PathBuf::from(plan.ok_or("retire-legacy-signal-sources needs --plan PATH")?);
     let requests = serde_json::from_reader::<_, Vec<engine_core::legacy_signals::RetirementRequest>>(
         std::io::BufReader::new(std::fs::File::open(plan)?),
     )?;
     if requests.is_empty() {
         return Err("legacy source retirement plan is empty".into());
     }
-    let execute = args.iter().any(|arg| arg == "--execute");
     let retired = engine_core::legacy_signals::retire(&config, &requests, execute)?;
     println!("{}", serde_json::to_string_pretty(&retired)?);
     println!("legacy-source-retirement execute={execute}");
@@ -382,19 +494,22 @@ fn retire_legacy_signal_sources(args: &[String]) -> Result<(), Box<dyn Error>> {
 }
 
 fn set_strategy_entry_permission(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let config = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
-    let strategy =
-        value(args, "--strategy").ok_or("set-strategy-entry-permission needs --strategy SLEEVE")?;
-    let enabled = match value(args, "--entries-enabled").as_deref() {
+    let mut args = Args::new(args);
+    let config = args.value("--config");
+    let strategy = args.value("--strategy");
+    let entries_enabled = args.value("--entries-enabled");
+    let request_id = args.value("--request-id");
+    let wait_ms = args.value("--wait-ms");
+    args.finish()?;
+    let config = PathBuf::from(config.unwrap_or_else(|| "engine.toml".into()));
+    let strategy = strategy.ok_or("set-strategy-entry-permission needs --strategy SLEEVE")?;
+    let enabled = match entries_enabled.as_deref() {
         Some("true") => true,
         Some("false") => false,
         _ => return Err("--entries-enabled must be true or false".into()),
     };
-    let request_id =
-        value(args, "--request-id").ok_or("set-strategy-entry-permission needs --request-id ID")?;
-    let wait_ms = value(args, "--wait-ms")
-        .unwrap_or_else(|| "30000".into())
-        .parse::<u64>()?;
+    let request_id = request_id.ok_or("set-strategy-entry-permission needs --request-id ID")?;
+    let wait_ms = wait_ms.unwrap_or_else(|| "30000".into()).parse::<u64>()?;
     runtime()?.block_on(submit_runtime_control(
         &config,
         &strategy,
@@ -407,12 +522,16 @@ fn set_strategy_entry_permission(args: &[String]) -> Result<(), Box<dyn Error>> 
 }
 
 fn flatten_strategy(args: &[String]) -> Result<(), Box<dyn Error>> {
-    let config = PathBuf::from(value(args, "--config").unwrap_or_else(|| "engine.toml".into()));
-    let strategy = value(args, "--strategy").ok_or("flatten-strategy needs --strategy SLEEVE")?;
-    let request_id = value(args, "--request-id").ok_or("flatten-strategy needs --request-id ID")?;
-    let wait_ms = value(args, "--wait-ms")
-        .unwrap_or_else(|| "30000".into())
-        .parse::<u64>()?;
+    let mut args = Args::new(args);
+    let config = args.value("--config");
+    let strategy = args.value("--strategy");
+    let request_id = args.value("--request-id");
+    let wait_ms = args.value("--wait-ms");
+    args.finish()?;
+    let config = PathBuf::from(config.unwrap_or_else(|| "engine.toml".into()));
+    let strategy = strategy.ok_or("flatten-strategy needs --strategy SLEEVE")?;
+    let request_id = request_id.ok_or("flatten-strategy needs --request-id ID")?;
+    let wait_ms = wait_ms.unwrap_or_else(|| "30000".into()).parse::<u64>()?;
     runtime()?.block_on(submit_runtime_control(
         &config,
         &strategy,
@@ -423,34 +542,36 @@ fn flatten_strategy(args: &[String]) -> Result<(), Box<dyn Error>> {
 }
 
 pub(super) fn parse_backtest_options(args: &[String]) -> Result<BacktestOptions, Box<dyn Error>> {
-    let required = |flag: &str| -> Result<PathBuf, Box<dyn Error>> {
-        value(args, flag)
+    let mut args = Args::new(args);
+    let required = |args: &mut Args, flag: &str| -> Result<PathBuf, Box<dyn Error>> {
+        args.value(flag)
             .map(PathBuf::from)
             .ok_or_else(|| format!("engine backtest needs {flag} PATH").into())
     };
     let mut options = BacktestOptions {
-        engine_config_path: required("--config")?,
-        tape_path: required("--tape")?,
-        instruments_path: required("--instruments")?,
-        wal_path: required("--wal")?,
+        engine_config_path: required(&mut args, "--config")?,
+        tape_path: required(&mut args, "--tape")?,
+        instruments_path: required(&mut args, "--instruments")?,
+        wal_path: required(&mut args, "--wal")?,
         ..BacktestOptions::default()
     };
-    options.source_format = match value(args, "--source").as_deref().unwrap_or("tape") {
+    options.source_format = match args.value("--source").as_deref().unwrap_or("tape") {
         "tape" => engine_tools::backtest::source::SourceFormat::Tape,
         "normalized" => engine_tools::backtest::source::SourceFormat::Normalized,
         other => return Err(format!("unsupported historical source {other}").into()),
     };
-    options.execution = match value(args, "--execution").as_deref().unwrap_or("books") {
+    options.execution = match args.value("--execution").as_deref().unwrap_or("books") {
         "books" => engine_tools::backtest::execution::ExecutionModel::Books,
         mode @ ("trades" | "bars") => {
-            let number = |flag| -> Result<f64, Box<dyn Error>> {
-                Ok(value(args, flag)
+            let number = |args: &mut Args, flag: &str| -> Result<f64, Box<dyn Error>> {
+                Ok(args
+                    .value(flag)
                     .ok_or_else(|| format!("{mode} execution requires explicit {flag}"))?
                     .parse()?)
             };
-            let spread_bps = number("--spread-bps")?;
-            let slippage_bps = number("--slippage-bps")?;
-            let participation = number("--participation")?;
+            let spread_bps = number(&mut args, "--spread-bps")?;
+            let slippage_bps = number(&mut args, "--slippage-bps")?;
+            let participation = number(&mut args, "--participation")?;
             if mode == "trades" {
                 engine_tools::backtest::execution::ExecutionModel::Trades {
                     spread_bps,
@@ -468,42 +589,43 @@ pub(super) fn parse_backtest_options(args: &[String]) -> Result<BacktestOptions,
         other => return Err(format!("unsupported execution mode {other}").into()),
     };
     options.execution.validate()?;
-    options.signals_path = value(args, "--signals").map(PathBuf::from);
-    options.trades_path = value(args, "--trades").map(PathBuf::from);
-    options.equity_path = value(args, "--equity").map(PathBuf::from);
-    options.report_path = value(args, "--report").map(PathBuf::from);
-    if let Some(v) = value(args, "--capital") {
+    options.signals_path = args.value("--signals").map(PathBuf::from);
+    options.trades_path = args.value("--trades").map(PathBuf::from);
+    options.equity_path = args.value("--equity").map(PathBuf::from);
+    options.report_path = args.value("--report").map(PathBuf::from);
+    if let Some(v) = args.value("--capital") {
         options.initial_capital_usdt = v.parse()?;
     }
-    if let Some(v) = value(args, "--taker-fee") {
+    if let Some(v) = args.value("--taker-fee") {
         options.taker_fee_rate = Some(v.parse()?);
     }
-    if let Some(v) = value(args, "--maker-fee") {
+    if let Some(v) = args.value("--maker-fee") {
         options.maker_fee_rate = Some(v.parse()?);
     }
-    if let Some(v) = value(args, "--rtt-ms") {
+    if let Some(v) = args.value("--rtt-ms") {
         options.order_rtt_ms = v.parse()?;
     }
-    if let Some(v) = value(args, "--private-latency-ms") {
+    if let Some(v) = args.value("--private-latency-ms") {
         options.private_latency_ms = v.parse()?;
     }
-    if let Some(v) = value(args, "--mmr") {
+    if let Some(v) = args.value("--mmr") {
         options.maintenance_margin_rate = v.parse()?;
     }
-    options.durable_log = args.iter().any(|a| a == "--durable-log");
+    options.durable_log = args.flag("--durable-log");
+    args.finish()?;
     Ok(options)
 }
 
 pub(super) fn parse_sim_options(
     args: &[String],
 ) -> Result<(engine_tools::sim::SweepOptions, Option<PathBuf>), Box<dyn Error>> {
-    let dir = value(args, "--out")
+    let mut args = Args::new(args);
+    let dir = args
+        .value("--out")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join(format!("engine-sim-{}", std::process::id())));
-    let seed: u64 = value(args, "--seed")
-        .unwrap_or_else(|| "1".into())
-        .parse()?;
-    let mut base = match value(args, "--strategies") {
+    let seed: u64 = args.value("--seed").unwrap_or_else(|| "1".into()).parse()?;
+    let mut base = match args.value("--strategies") {
         None => engine_tools::sim::SimOptions::new(seed, dir),
         Some(name) => match engine_tools::sim::SimStrategies::parse(&name) {
             Some(engine_tools::sim::SimStrategies::Quoter) => {
@@ -520,89 +642,94 @@ pub(super) fn parse_sim_options(
             }
         },
     };
-    if let Some(v) = value(args, "--hours") {
+    if let Some(v) = args.value("--hours") {
         base.hours(v.parse()?);
     }
-    if let Some(v) = value(args, "--seconds") {
+    if let Some(v) = args.value("--seconds") {
         base.seconds = v.parse()?;
     }
-    if let Some(v) = value(args, "--symbols") {
+    if let Some(v) = args.value("--symbols") {
         base.symbols = v.parse()?;
     }
-    if let Some(v) = value(args, "--tape-step-s") {
+    if let Some(v) = args.value("--tape-step-s") {
         base.tape_step_s = v.parse()?;
     }
-    if let Some(v) = value(args, "--capital") {
+    if let Some(v) = args.value("--capital") {
         base.capital = v.parse()?;
     }
-    if let Some(v) = value(args, "--shock") {
+    if let Some(v) = args.value("--shock") {
         base.shock = match v.as_str() {
             "on" => true,
             "off" => false,
             other => return Err(format!("--shock takes on or off, not {other:?}").into()),
         };
     }
-    if let Some(v) = value(args, "--pump") {
+    if let Some(v) = args.value("--pump") {
         base.pump_probability = v.parse()?;
     }
-    base.gate = args.iter().any(|a| a == "--gate");
-    if let Some(v) = value(args, "--crashes") {
+    base.gate = args.flag("--gate");
+    if let Some(v) = args.value("--crashes") {
         base.crashes = v.parse()?;
     }
-    if let Some(v) = value(args, "--faults") {
+    if let Some(v) = args.value("--faults") {
         base.faults = engine_tools::sim::FaultRates::named(&v)
             .ok_or_else(|| format!("--faults takes none, light or heavy, not {v:?}"))?;
     }
-    base.keep = args.iter().any(|a| a == "--keep");
-    let seeds: u64 = value(args, "--seeds")
+    base.keep = args.flag("--keep");
+    let seeds: u64 = args
+        .value("--seeds")
         .unwrap_or_else(|| "1".into())
         .parse()?;
-    let twice = args.iter().any(|a| a == "--twice");
-    let report = value(args, "--report").map(PathBuf::from);
+    let twice = args.flag("--twice");
+    let report = args.value("--report").map(PathBuf::from);
+    args.finish()?;
     Ok((
         engine_tools::sim::SweepOptions { base, seeds, twice },
         report,
     ))
 }
 
-pub(super) fn parse_bench_options(args: &[String]) -> Result<BenchOptions, Box<dyn Error>> {
+pub(super) fn parse_bench_options(args: &[String]) -> Result<(BenchOptions, bool), Box<dyn Error>> {
+    let mut args = Args::new(args);
     // The contention workload's rate, symbols and venue delay are chosen
     // together to keep openings queued, so it starts from its own defaults and
     // the flags below narrow them.
-    let mut options = if args.iter().any(|a| a == "--contention") {
+    let mut options = if args.flag("--contention") {
         BenchOptions::contention()
     } else {
         BenchOptions::default()
     };
-    if let Some(v) = value(args, "--cancel-after") {
+    if let Some(v) = args.value("--cancel-after") {
         options.cancel_after = v.parse()?;
     }
-    if let Some(v) = value(args, "--ttl-ms") {
+    if let Some(v) = args.value("--ttl-ms") {
         options.ttl_ms = v.parse()?;
     }
-    if let Some(v) = value(args, "--events") {
+    if let Some(v) = args.value("--events") {
         options.events = v.parse()?;
     }
-    if let Some(v) = value(args, "--rate") {
+    if let Some(v) = args.value("--rate") {
         options.rate = v.parse()?;
     }
-    if let Some(v) = value(args, "--every") {
+    if let Some(v) = args.value("--every") {
         options.every_nth = v.parse()?;
     }
-    if let Some(v) = value(args, "--symbols") {
+    if let Some(v) = args.value("--symbols") {
         options.symbols = v.split(',').map(|s| s.trim().to_string()).collect();
     }
-    if let Some(v) = value(args, "--wal") {
+    if let Some(v) = args.value("--wal") {
         options.wal_path = PathBuf::from(v);
     }
-    options.fills = args.iter().any(|a| a == "--fills");
-    if let Some(ms) = value(args, "--venue-delay-ms") {
+    options.fills = args.flag("--fills");
+    if let Some(ms) = args.value("--venue-delay-ms") {
         options.venue_delay = std::time::Duration::from_millis(
             ms.parse()
                 .map_err(|_| "--venue-delay-ms wants whole milliseconds")?,
         );
     }
-    Ok(options)
+    let json = args.flag("--json");
+    args.finish()?;
+    Ok((options, json))
 }
 
 #[cfg(test)]
@@ -705,8 +832,33 @@ mod tests {
     }
 
     #[test]
+    fn an_undeclared_argument_stops_the_command_it_was_meant_for() {
+        assert_eq!(
+            parse_bench_options(&args(&["bench", "--contention", "--jsn"]))
+                .unwrap_err()
+                .to_string(),
+            "bench does not take --jsn"
+        );
+        assert_eq!(
+            dispatch(&args(&["latency", "--wal", "engine.wal", "--tail", "20"]))
+                .unwrap_err()
+                .to_string(),
+            "latency does not take --tail 20"
+        );
+        assert_eq!(
+            dispatch(&args(&["cohort", "--wal", "engine.wal", "spare"]))
+                .unwrap_err()
+                .to_string(),
+            "cohort does not take spare"
+        );
+        let (options, json) = parse_bench_options(&args(&["bench", "--json"])).unwrap();
+        assert!(json);
+        assert!(!options.contention);
+    }
+
+    #[test]
     fn bench_parser_preserves_symbols_fills_and_delay() {
-        let options = parse_bench_options(&args(&[
+        let (options, json) = parse_bench_options(&args(&[
             "bench",
             "--events",
             "4",
@@ -730,13 +882,14 @@ mod tests {
         assert_eq!(options.wal_path, PathBuf::from("sample.wal"));
         assert!(options.fills);
         assert_eq!(options.venue_delay, std::time::Duration::from_millis(7));
+        assert!(!json, "the table unless asked for JSON");
         assert!(!options.contention, "off unless asked");
         assert_eq!(options.ttl_ms, 10_000, "the engine's own default");
     }
 
     #[test]
     fn the_contention_flag_brings_its_own_defaults_and_the_flags_narrow_them() {
-        let options = parse_bench_options(&args(&["bench", "--contention"])).unwrap();
+        let (options, _) = parse_bench_options(&args(&["bench", "--contention"])).unwrap();
         assert!(options.contention);
         assert_eq!(options.rate, 200);
         assert_eq!(options.every_nth, 1);
@@ -747,7 +900,7 @@ mod tests {
             4,
             "three openings queue behind the one being answered"
         );
-        let narrowed = parse_bench_options(&args(&[
+        let (narrowed, _) = parse_bench_options(&args(&[
             "bench",
             "--contention",
             "--cancel-after",
