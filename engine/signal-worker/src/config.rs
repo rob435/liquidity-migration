@@ -38,17 +38,10 @@ pub(crate) fn carry_kline_feature_history_hours(carry: &CarryFeatureConfig) -> O
     .max()
 }
 
-pub(crate) fn carry_source_history_hours(
-    carry: &CarryFeatureConfig,
-    include_replay: bool,
-) -> Option<i64> {
-    let replay_hours = if include_replay {
-        i64::try_from(carry.minimum_replay_days)
-            .ok()?
-            .checked_mul(24)?
-    } else {
-        0
-    };
+pub(crate) fn carry_source_history_hours(carry: &CarryFeatureConfig) -> Option<i64> {
+    let replay_hours = i64::try_from(carry.minimum_replay_days)
+        .ok()?
+        .checked_mul(24)?;
     replay_hours
         .checked_add(carry_kline_feature_history_hours(carry)?)?
         .checked_add(SOURCE_HISTORY_PADDING_HOURS)
@@ -920,7 +913,7 @@ fn validate_source_history_bounds(
             "LONG cold-start lookback exceeds {MAX_LONG_COLD_START_LOOKBACK_DAYS} days"
         )));
     }
-    let source_hours = carry_source_history_hours(carry, true);
+    let source_hours = carry_source_history_hours(carry);
     if source_hours.is_none_or(|hours| hours > MAX_CARRY_SOURCE_HISTORY_HOURS) {
         return Err(WorkerError::config(format!(
             "CARRY replay and feature history exceeds {MAX_CARRY_SOURCE_HISTORY_HOURS} hours"
@@ -1025,7 +1018,7 @@ pub(crate) mod tests {
         long.cold_start_lookback_days = MAX_LONG_COLD_START_LOOKBACK_DAYS;
         carry.minimum_replay_days = 149;
         assert_eq!(
-            carry_source_history_hours(&carry, true),
+            carry_source_history_hours(&carry),
             Some(MAX_CARRY_SOURCE_HISTORY_HOURS)
         );
         validate_source_history_bounds(&long, &carry).unwrap();
@@ -1065,7 +1058,7 @@ pub(crate) mod tests {
                 _ => unreachable!(),
             }
             assert_eq!(
-                carry_source_history_hours(&candidate, true),
+                carry_source_history_hours(&candidate),
                 Some(MAX_CARRY_SOURCE_HISTORY_HOURS),
                 "{arm} boundary"
             );

@@ -62,8 +62,9 @@ const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 86_400_000;
 /// Availability lags the decision clock by this many seconds, drawn per row.
 const AVAILABLE_LAG_S: (f64, f64) = (5.0, 90.0);
-/// Days of daily history the cold start's `carry_feature_batch` carries, one
-/// over the scorer's `MIN_REPLAY_DAYS` floor. Later batches carry one day.
+/// Days of daily history every `carry_feature_batch` carries, one over the
+/// scorer's `MIN_REPLAY_DAYS` floor: the worker sends its replay window on
+/// every batch.
 const CARRY_REPLAY_DAYS: i64 = 46;
 
 /// A hash-shaped value for an artifact this producer has none of. Every
@@ -477,7 +478,6 @@ pub fn publish(
                 "payload": payload,
             })
         };
-        let mut replayed = false;
         if let Some(first) = hours.first() {
             let available = first + lag(&mut rng);
             out.push(pen.write(
@@ -547,13 +547,9 @@ pub fn publish(
             }
             if hour % DAY_MS == 0 {
                 let available = hour + lag(&mut rng);
-                // `SignalWorker::publish` builds the replay window only while
-                // `last_carry_decision_ts_ms` is None, so the cold start's
-                // batch carries MIN_REPLAY_DAYS + 1 days -- priced before the
-                // tape at the opening price -- and every later batch carries
-                // the decision day alone.
-                let back_days = if replayed { 0 } else { CARRY_REPLAY_DAYS };
-                replayed = true;
+                // Every batch carries the replay window, as the worker's does;
+                // days before the tape are priced at the opening price.
+                let back_days = CARRY_REPLAY_DAYS;
                 let rows: Vec<serde_json::Value> = names
                     .iter()
                     .flat_map(|name| {
@@ -682,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_cold_start_s_carry_batch_carries_the_replay_window() {
+    fn every_carry_batch_carries_the_replay_window() {
         let loaded = realm_config(Realm::Mexc);
         let mut producer = Producer::bind(&loaded.config.strategies).unwrap();
         producer.long = None;
@@ -710,9 +706,11 @@ mod tests {
             assert_eq!(days.iter().next_back(), Some(&decision_ts_ms));
             windows.push(days.len() as i64);
         }
-        assert_eq!(windows.first(), Some(&(CARRY_REPLAY_DAYS + 1)));
         assert!(windows.len() > 1, "{windows:?}");
-        assert!(windows[1..].iter().all(|days| *days == 1), "{windows:?}");
+        assert!(
+            windows.iter().all(|days| *days == CARRY_REPLAY_DAYS + 1),
+            "{windows:?}"
+        );
     }
 
     #[test]

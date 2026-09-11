@@ -833,7 +833,7 @@ fn prune_splits_source_coverage_and_restart_cannot_overclaim_the_gap() {
     worker.state.last_carry_decision_ts_ms = Some(10 * DAY_MS);
     let broad = vec![CoverageInterval {
         checked_from_ms: DAY_MS,
-        checked_through_ms: 200 * DAY_MS,
+        checked_through_ms: 400 * DAY_MS,
     }];
     worker
         .state
@@ -843,7 +843,9 @@ fn prune_splits_source_coverage_and_restart_cannot_overclaim_the_gap() {
         .state
         .whale_coverage_intervals
         .insert("BTCUSDT".into(), broad);
-    worker.prune(200 * DAY_MS);
+    // Far enough past the decision that the replay depth every batch is built
+    // from still leaves a gap between the repair range and the current one.
+    worker.prune(400 * DAY_MS);
 
     for intervals in [
         &worker.state.funding_coverage_intervals["BTCUSDT"],
@@ -1017,7 +1019,7 @@ fn source_ingestion_stays_bounded_when_no_watermark_can_complete() {
         sequence += 1;
     }
 
-    let carry_hours = required_carry_history_hours(&config, &worker.state) as usize;
+    let carry_hours = required_carry_history_hours(&config) as usize;
     assert!(worker.state.klines["AAAUSDT"].len() <= carry_hours + 1);
     assert!(worker.state.funding["AAAUSDT"].len() <= carry_hours / 8 + 2);
     assert!(worker.state.whales["AAAUSDT"].len() <= 8);
@@ -1048,10 +1050,12 @@ fn daily_carry_repair_survives_hot_inputs_and_restart_until_the_next_decision() 
     universe.symbols.push("AAAUSDT".into());
     universe.carry_symbols = vec!["AAAUSDT".into()];
     let mut worker = SignalWorker::with_universe(config.clone(), universe).unwrap();
-    let decision = 100 * DAY_MS;
+    // Later than the replay depth every batch is built from, so the history
+    // the fixture installs starts on the clock.
+    let decision = 200 * DAY_MS;
     worker.state.last_carry_decision_ts_ms = Some(decision);
     worker.state.last_carry_scorer_ts_ms = Some(decision);
-    let history = required_carry_history_hours(&config, &worker.state) * HOUR_MS;
+    let history = required_carry_history_hours(&config) * HOUR_MS;
     let start = decision - history;
     let whale_start = decision
         - (config.carry.whale_change_lookback_hours + config.carry.whale_freshness_hours + 24)
@@ -2391,6 +2395,47 @@ fn optional_whale_absence_keeps_carry_live_with_a_null_feature() {
     assert!(!rows.is_empty());
     assert!(rows.iter().all(|row| row.d_tt_ls_3d.is_none()));
     assert_eq!(worker.state.last_carry_decision_ts_ms, Some(10 * DAY_MS));
+}
+
+/// The second and third decision days follow a published decision and carry
+/// the window all the same: a scorer that consumed a thin first day, or
+/// refused a batch, has never decided and needs it.
+#[test]
+fn every_carry_batch_carries_the_replay_window() {
+    let mut config = compact_feature_config();
+    config.carry.minimum_replay_days = 3;
+    let mut worker = SignalWorker::with_universe(config, test_universe()).unwrap();
+    let mut windows = Vec::new();
+    for day in [10, 11, 12] {
+        install_compact_history(&mut worker, day);
+        let observations = worker
+            .apply(WireEvent::CarryWatermark {
+                schema_version: SCHEMA_VERSION,
+                sequence: worker.state.last_input_sequence + 1,
+                observed_ts_ms: day * DAY_MS,
+                data_through_ms: day * DAY_MS,
+                gap_symbols: Vec::new(),
+            })
+            .unwrap();
+        let carry = observations
+            .iter()
+            .find(|observation| observation.kind == "carry_feature_batch")
+            .expect("a new decision day publishes a batch");
+        let envelope: SignalPayloadEnvelope = serde_json::from_slice(&carry.payload).unwrap();
+        let ObservationPayload::CarryFeatureBatch {
+            decision_ts_ms,
+            rows,
+            ..
+        } = envelope.payload
+        else {
+            panic!("expected CARRY feature payload");
+        };
+        assert_eq!(decision_ts_ms, day * DAY_MS);
+        let days: std::collections::BTreeSet<i64> = rows.iter().map(|row| row.bar_ts_ms).collect();
+        assert_eq!(days.iter().next_back(), Some(&decision_ts_ms));
+        windows.push(days.len());
+    }
+    assert_eq!(windows, vec![4, 4, 4]);
 }
 
 #[test]

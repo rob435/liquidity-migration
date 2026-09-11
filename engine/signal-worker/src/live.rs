@@ -597,8 +597,7 @@ impl LiveRunner {
         self.refresh_tickers().await?;
         let now = wall_ms()?;
         let end = closed_kline_end(now);
-        let carry_replay_hours =
-            required_carry_history_hours(&self.config, self.durable.worker().state());
+        let carry_replay_hours = required_carry_history_hours(&self.config);
         let long_hours = i64::try_from(self.config.long.cold_start_lookback_days)
             .unwrap_or(i64::MAX / 24)
             .saturating_mul(24)
@@ -1360,7 +1359,7 @@ impl LiveRunner {
         let lifecycle_current = state
             .last_carry_decision_ts_ms
             .is_some_and(|last| last >= self.latest_carry_decision(now_ms));
-        let history_ms = required_carry_history_hours(&self.config, state).saturating_mul(HOUR_MS);
+        let history_ms = required_carry_history_hours(&self.config).saturating_mul(HOUR_MS);
         let mut jobs = Vec::new();
         for symbol in &state.universe.carry_symbols {
             let interval_ms = intervals
@@ -2148,10 +2147,7 @@ impl LiveRunner {
     }
 
     fn required_carry_start(&self, end_ms: i64) -> i64 {
-        end_ms.saturating_sub(
-            required_carry_history_hours(&self.config, self.durable.worker().state())
-                .saturating_mul(HOUR_MS),
-        )
+        end_ms.saturating_sub(required_carry_history_hours(&self.config).saturating_mul(HOUR_MS))
     }
 
     fn carry_source_through(&self, current_end_ms: i64) -> i64 {

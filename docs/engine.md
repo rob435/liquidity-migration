@@ -591,8 +591,8 @@ the venue's real latency: the producer is a pure function of the seed, the
 spool is a queue in memory, and every clock is virtual. The producer publishes
 on the worker's own grids — LONG features close at UTC midnight and republish
 hourly, CARRY publishes readiness, hourly market snapshots, funding on the
-eight-hour grid and a daily feature batch whose replay window is the cold
-start's alone, one day per batch after it — and holds the worker's own
+eight-hour grid and a daily feature batch that carries the replay window
+every day — and holds the worker's own
 two-round producer lifecycle handshake, because an engine booted with exact
 instruments refuses to let a legacy source make a dependent sleeve ready.
 

@@ -37,12 +37,11 @@ mod lifecycle;
 pub use identities::WorkerDestinationSleeves;
 pub use lifecycle::WorkerSignalLifecycle;
 
-pub(crate) fn required_carry_history_hours(
-    config: &SignalWorkerConfig,
-    state: &WorkerState,
-) -> i64 {
-    carry_source_history_hours(&config.carry, state.last_carry_decision_ts_ms.is_none())
-        .unwrap_or(i64::MAX)
+/// Hours of kline and funding history every CARRY batch is built from: the
+/// replay window plus the feature lookbacks, whether or not a decision has
+/// been published, because every batch carries the window.
+pub(crate) fn required_carry_history_hours(config: &SignalWorkerConfig) -> i64 {
+    carry_source_history_hours(&config.carry).unwrap_or(i64::MAX)
 }
 
 fn validate_gap_symbols(
@@ -1348,20 +1347,20 @@ impl SignalWorker {
             };
             let upcoming_is_new = !upcoming_rows.is_empty();
             if (current_is_new || upcoming_is_new) && !carry.rows.is_empty() {
-                let rows = if self.state.last_carry_decision_ts_ms.is_some() {
-                    carry.rows.clone()
-                } else {
-                    build_carry_replay_features(
-                        &self.state.klines,
-                        &self.state.funding,
-                        &self.state.whales,
-                        &active_carry_symbols,
-                        decision_ts_ms,
-                        available_at_ms,
-                        &self.config.carry,
-                    )
-                    .rows
-                };
+                // Every batch carries the replay window. The scorer takes only
+                // the days after its checkpoint, and a scorer that has never
+                // decided -- a thin first day consumed, a batch rejected --
+                // needs the window on whatever day it first can.
+                let rows = build_carry_replay_features(
+                    &self.state.klines,
+                    &self.state.funding,
+                    &self.state.whales,
+                    &active_carry_symbols,
+                    decision_ts_ms,
+                    available_at_ms,
+                    &self.config.carry,
+                )
+                .rows;
                 if self.suppressed_output_kinds.contains("carry_feature_batch") {
                     if current_is_new && scorer_is_new {
                         out.push(self.carry_observation(
@@ -1861,12 +1860,11 @@ impl SignalWorker {
         let carry_symbols: BTreeSet<String> =
             self.state.universe.carry_symbols.iter().cloned().collect();
         let symbols: BTreeSet<String> = long_symbols.union(&carry_symbols).cloned().collect();
-        let cold_carry_instrument_hours = required_carry_history_hours(&self.config, &self.state)
-            .max(
-                i64::try_from(self.config.carry.whale_feed_days)
-                    .unwrap_or(i64::MAX / 24)
-                    .saturating_mul(24),
-            );
+        let carry_instrument_hours = required_carry_history_hours(&self.config).max(
+            i64::try_from(self.config.carry.whale_feed_days)
+                .unwrap_or(i64::MAX / 24)
+                .saturating_mul(24),
+        );
         let mut instrument_retained_from_ms = BTreeMap::new();
         self.state
             .klines
@@ -1886,14 +1884,12 @@ impl SignalWorker {
             });
             let carry_cutoff = carry_symbols.contains(&symbol).then(|| {
                 carry_history_end_ms.saturating_sub(
-                    required_carry_history_hours(&self.config, &self.state).saturating_mul(HOUR_MS),
+                    required_carry_history_hours(&self.config).saturating_mul(HOUR_MS),
                 )
             });
             let carry_instrument_cutoff = carry_symbols.contains(&symbol).then(|| {
-                carry_cursor_ms.unwrap_or_else(|| {
-                    carry_retained_through_ms
-                        .saturating_sub(cold_carry_instrument_hours.saturating_mul(HOUR_MS))
-                })
+                carry_retained_through_ms
+                    .saturating_sub(carry_instrument_hours.saturating_mul(HOUR_MS))
             });
             if let Some(retained_from_ms) =
                 long_cutoff.into_iter().chain(carry_instrument_cutoff).min()
@@ -1917,7 +1913,7 @@ impl SignalWorker {
                 .retain_windows(&symbol, &windows);
         }
         self.state.kline_coverage_mut().drop_empty();
-        let funding_hours = required_carry_history_hours(&self.config, &self.state);
+        let funding_hours = required_carry_history_hours(&self.config);
         let funding_cutoff =
             carry_history_end_ms.saturating_sub(funding_hours.saturating_mul(HOUR_MS));
         self.state
