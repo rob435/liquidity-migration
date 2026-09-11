@@ -385,8 +385,30 @@ touching the switch. No mode flattens exposure.
 
 ### 4. Execution host loss and replacement
 
-Bring a replacement host onto a funded account without ever having two writers
-on it.
+Bring a replacement host onto a funded account from the off-box backup, without
+ever having two writers on it.
+
+| Objective | Value | Why |
+| :--- | :--- | :--- |
+| RPO | 15 min | `backup.timer` copies engine state and WAL every 15 minutes. Up to one interval of appends is missing from the restored family, so a restored engine may not know about an order it placed in that window. That is why venue reconciliation is mandatory and not a formality |
+| RTO | 60 min, **proposed** | Manual: provision, restore, fence, read-only checks, arm. `gh workflow run vps-deploy.yml` installs the release; nothing restores state or fences a venue. Never measured — the drill below has not been run. The owner sets the real number |
+
+| Recovery set | Path | Source | Compatibility check |
+| :--- | :--- | :--- | :--- |
+| Release binaries | `/opt/liquidity-migration-engine/releases/<commit>/` and `bin/` | The deploy workflow, from the exact source commit | SHA256 against the release-image table in [STATE.md](../STATE.md); `scripts/ops.sh deploy verify` |
+| Unit environment | `/etc/liquidity-migration/engine-<realm>.env` | Written by hand, per §Realm table | `EXPECTED_ENGINE_ACCOUNT_USER_ID` is re-proved by `verify-account-identity` |
+| Rendered engine config | `/etc/liquidity-migration/engine-<realm>.toml` | Rendered by deploy from the realm template | `engine render-native-config --check` fails unless the file holds the exact rendered bytes |
+| Resolved sleeves | `/etc/liquidity-migration/sleeves.resolved.env` | Written by deploy (`deploy/lib_sleeves.sh`) | Re-rendered by the next deploy; a stale copy is replaced, never merged |
+| Account binding registry | `/etc/liquidity-migration/mexc-account-bindings.json` (MEXC only) | Written by hand | `AccountBinding::load` refuses a credential the registry does not name, before any socket |
+| WAL family | `/var/lib/liquidity-migration-engine-<realm>/engine.wal[.NNNNNN]` | `engine-state/latest/` on Drive, 60 days of `history/` | `engine-tools restore-check --wal PATH` |
+| Signal spool | `/var/lib/liquidity-migration/signals/<realm>` | `engine-state/latest/` — in `DEFAULT_SOURCES` of `scripts/runtime/backup_state.sh` | `restore-check --spool DIR` counts deliverable rows and the newest sequence |
+| Control spool | `/var/lib/liquidity-migration/controls/<realm>` | `engine-state/latest/` — also in `DEFAULT_SOURCES` | `restore-check --controls DIR` counts files |
+| Worker state | `/var/lib/liquidity-migration-signal-worker-<realm>` | `engine-state/latest/` | The worker cold-starts when its source contract differs; nothing here checks it |
+| Credentials | `/etc/liquidity-migration/*.env` | **Never backed up.** `backup_state.sh` refuses a `*.env` source by name and excludes the pattern from the copy | Re-issued at the venue as part of fencing, then written by hand |
+
+**Every `*.env` is absent from the backup by design.** A replacement host has no
+credentials until the owner writes them, which is also what makes credential
+rotation a usable fence.
 
 | Property | Implemented behavior |
 | :--- | :--- |
@@ -394,36 +416,96 @@ on it.
 | Mechanism | Kernel `flock(LOCK_EX \| LOCK_NB)` on that inode, plus an inode re-proof after the open. Every adapter uses the same directory, name format and sequence |
 | Expiry | None. No heartbeat, no timeout: the kernel drops the lock when the holder's last descriptor closes, on clean exit and crash alike |
 | Scope | Process ownership **on one host**. `/run` is that host's own tmpfs, so a second host holding the same credentials contends for nothing. The lease is not failover fencing and must not be read as any |
-| Fencing that does exist | Only what the operator does: the old host powered off, or the venue credential rotated and the old key deleted at the venue |
 | Venue-side dead-man | None in use. No funded realm arms a venue cancel-all or cancel-on-disconnect. Hyperliquid's `scheduledCancel` appears in `venues/hyperliquid/lookup.rs` and `ws.rs` only as a terminal order status the engine reads; nothing in `engine-venue/src/venues` sends the action that arms it. A venue-side cancel-all or disconnect-cancel would remove protective triggers while leaving positions open, so arming one is a decision, not a safety net |
 
+Fencing is the operator's act, and it is venue-specific. Heartbeat loss and SSH
+loss prove nothing: a host that answers neither can still hold a socket to the
+venue and still be sending orders.
+
+| Realm | Fence at the venue | What may stay | Provider alternative |
+| :--- | :--- | :--- | :--- |
+| `mainnet` (Bybit) | Delete the API key behind `BYBIT_REAL_API_KEY` in the Bybit UI | The read-only attestor key (`BYBIT_ATTEST_API_KEY`), which cannot trade | Power the instance off at the provider console |
+| `mexc` | Delete the API key behind `MEXC_REAL_API_KEY` in the MEXC UI. The account UID in `mexc-account-bindings.json` does not change; add the new key's `sha256(api key)` to that file | Nothing MEXC-side is read-only today | Power the instance off at the provider console |
+| `hyperliquid` | Revoke the API wallet (the venue calls it an agent) behind `HYPERLIQUID_REAL_API_WALLET_KEY` at the venue. The master account key is the owner's and is never on the host | The master account, untouched | Power the instance off at the provider console |
+| `demo` (Bybit demo) | Delete the demo key (`BYBIT_DEMO_API_KEY` in `/etc/liquidity-migration/bybit-demo.env`). No money is at risk, but two writers on one demo account corrupt the evidence the realm exists to produce | — | Power the instance off at the provider console |
+
+Either fence alone is sufficient. Power-off stops the host; credential deletion
+stops its orders even if the host is alive and unreachable. Proof means the key
+is gone from the venue's own key list, or the provider console shows the
+instance stopped — not that a ping failed.
+
+| Readiness gate, before arming | Command or check | Pass condition |
+| :--- | :--- | :--- |
+| Restored log | `engine-tools restore-check --wal PATH --spool DIR --controls DIR` | Exit 0, or exit 3 with every row it lists reconciled against the venue. Exit 1, 2 or 4 stops the arming |
+| Account identity | `scripts/ops.sh verify-account-identity --environment <realm>` | The venue answers as `EXPECTED_ENGINE_ACCOUNT_USER_ID` |
+| Venue inventory | `scripts/ops.sh attest-flat --environment <realm>` | Flat (or `flat-dust`). When it is not flat, compare the venue's working orders and positions against `restore-check`'s `open_orders` and `positions` instead |
+| Protection | The venue's working-order list | Every position `restore-check` expects has its protective reduce-only trigger present at the venue. A position with no such order is unprotected, whatever the log's `intended_stop_px` says |
+| Readiness posture | `engine venues`, `deploy/realms.tsv` | The realm's readiness gate and `posture` are what they were before the loss. A host replacement promotes nothing |
+| Latch | `restore-check`'s `may_open` | Read, not reset. `engine reconcile-clear --execute` is the only deliberate reset, and it takes the WAL's own lock with the engine stopped |
+
+| Stop condition | Do |
+| :--- | :--- |
+| `restore-check` exits 2 (`incompatible-reader`) | The restored log holds a record this binary refuses. Install the newer release from `releases/<commit>/` — never restore an older backup to make an old binary boot |
+| `restore-check` exits 4 (`stale-backup`) | The newest stamp in the restored family is older than `--max-age-min`. Take a fresher copy from `engine-state/latest/`, or from `history/` if `latest/` is the stale one, before arming anything |
+| `restore-check` exits 1 (`unreadable`) | The copy is not a log. Restore again from `history/`; do not start an engine on it |
+| Fencing is unproven | Stop. An engine started against a live old writer double-sends into one account, and no lease on either host can see the other |
+| The original host returns | Never reconnect it with valid credentials. Disarm it first (`REAL_MONEY=false` in its credential file and its units stopped), or leave its credentials deleted. Only then is it safe to read its disk |
+
 - **Must Never** start an engine on a replacement host until the previous
-  writer is fenced by power-off or by credential rotation at the venue.
-- **Must Never** treat an absent or stale lease file on the new host as
-  evidence that the old host stopped trading.
-- **Must** re-establish account identity and the exposure the WAL last knew
-  about before arming, on the new host, read-only.
+  writer is fenced by power-off or by credential deletion at the venue.
+- **Must Never** treat an absent or stale lease file, a missed heartbeat, or a
+  dead SSH session on the new host as evidence that the old host stopped
+  trading.
+- **Must Never** arm on a `restore-check` verdict of `stale-backup`,
+  `incompatible-reader` or `unreadable`.
+- **Must Never** reconnect a recovered original host while its credentials
+  still work.
+- **Must** re-establish account identity and compare the venue against the
+  restored log before arming, read-only, on the new host.
+- **Must** write every credential by hand on the replacement host: no backup
+  holds one.
+- **Must** treat the restored log as up to one backup interval behind the
+  venue, and the venue as the authority on what is held.
 
 ```sh
-# 1. Fence the old writer. One of these, proven, not assumed:
-#    - the old host is powered off at the provider, or
-#    - the venue credential is rotated and the old key deleted at the venue.
-#    Until one holds, do not continue.
+# 1. Fence the old writer. One of these, proven at the venue or the provider,
+#    not assumed:
+#      - the instance is powered off at the provider console, or
+#      - the realm's write key is deleted in the venue's own key list
+#        (Bybit/MEXC), or its API wallet is revoked (Hyperliquid).
+#    Until one holds, stop here.
 
-# 2. On the replacement host, read-only, with REAL_MONEY still false:
+# 2. Restore onto the replacement host from engine-state/latest/, then read the
+#    log before anything is armed. Read-only: no lock, no truncation, no write.
+/opt/liquidity-migration-engine/bin/engine-tools restore-check \
+  --wal /var/lib/liquidity-migration-engine-mainnet/engine.wal \
+  --spool /var/lib/liquidity-migration/signals/mainnet \
+  --controls /var/lib/liquidity-migration/controls/mainnet
+#    Exit 0 ready-to-reconcile, 3 reconcile-required, 4 stale-backup,
+#    2 incompatible-reader, 1 unreadable. --json for the same report as JSON.
+
+# 3. Write the credential files by hand (no backup holds them) and prove the
+#    account, with REAL_MONEY still false.
 scripts/ops.sh verify-account-identity --environment mainnet
 scripts/ops.sh attest-flat --environment mainnet
-#    attest-flat is a two-scan proof of a flat account. When the account is
-#    not flat, compare the venue's working orders and positions against what
-#    the WAL last recorded. `engine-tools replay` and `engine-tools fills` read
-#    the whole family through `replay_chain`, and the live families do not fit
-#    in the funded host's memory, so run either on a copy off the host — never
-#    on the live family — and treat the result as the comparison's WAL side.
+#    attest-flat is a two-scan proof of a flat account. When it is not flat,
+#    compare the venue's working orders and positions against restore-check's
+#    open_orders and positions, and confirm a protective trigger at the venue
+#    for every position it expects.
 
-# 3. Only then arm, through the existing runbook for that realm
+# 4. Only then arm, through the existing runbook for that realm
 #    (§Real-Money Configuration Dials, and §MEXC Realm or §Hyperliquid Realm
 #    for a funded alt realm).
 ```
+
+| Drill | Date | Outcome | Evidence |
+| :--- | :--- | :--- | :--- |
+| Restore `engine-state/latest/` to a clean host and run `restore-check` | unknown | unknown | unknown |
+| Fence by credential deletion and prove the old key refused at the venue | unknown | unknown | unknown |
+| Measured RTO from provider provision to armed | unknown | unknown | unknown |
+
+This drill has not been run. Every cell above stays `unknown` until it is, and
+the 60 min RTO is a proposal until the third row holds a measured number.
 
 ---
 

@@ -15,6 +15,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<(), Box<dyn Error>> {
         "wal-cost" => wal_cost(args),
         "wal-retention" => wal_retention(args),
         "wal-convert-v5" => wal_convert_v5(args),
+        "restore-check" => restore_check(args),
         "venue-key" => venue_key(args),
         "venues" => venues(args),
         "strategies" => strategies(args),
@@ -215,6 +216,47 @@ fn wal_convert_v5(args: &[String]) -> Result<(), Box<dyn Error>> {
         result.relocated_bases,
     );
     Ok(())
+}
+
+/// Exit status is the verdict, so a caller reads it without parsing: 0 ready,
+/// 3 reconcile-required, 4 stale-backup, 2 incompatible-reader, 1 unreadable.
+fn restore_check(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let mut args = Args::new(args);
+    let path = args.value("--wal");
+    let spool = args.value("--spool");
+    let controls = args.value("--controls");
+    let max_age_min = args.value("--max-age-min");
+    let json = args.flag("--json");
+    args.finish()?;
+    let options = engine_tools::restore_check::Options {
+        family: PathBuf::from(path.ok_or("restore-check needs --wal PATH")?),
+        spool: spool.map(PathBuf::from),
+        controls: controls.map(PathBuf::from),
+        max_age_min: match max_age_min {
+            Some(value) => value.parse()?,
+            None => engine_tools::restore_check::DEFAULT_MAX_AGE_MIN,
+        },
+        now_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis() as i64,
+    };
+    let report = engine_tools::restore_check::read(&options);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", report.table());
+        println!(
+            "\n  read-only: no lock taken, no torn tail truncated, nothing written.\n  \
+             the log is one side of the comparison; an order placed after the last backup\n  \
+             is at the venue and not in here.\n  \
+             an error naming a record kind is a reader too old for this log; one naming\n  \
+             a checksum is damaged bytes."
+        );
+    }
+    match report.verdict.exit_code() {
+        0 => Ok(()),
+        code => Err(Box::new(Exit(code))),
+    }
 }
 
 fn venue_key(args: &[String]) -> Result<(), Box<dyn Error>> {
@@ -813,6 +855,7 @@ mod tests {
             ("backtest", "engine backtest needs --config PATH"),
             ("wal-cost", "wal-cost needs --wal PATH"),
             ("wal-retention", "wal-retention needs --wal PATH"),
+            ("restore-check", "restore-check needs --wal PATH"),
             ("replay", "replay needs --wal PATH"),
             ("fills", "fills needs --wal PATH"),
             ("latency", "latency needs --wal PATH"),
@@ -866,9 +909,33 @@ mod tests {
                 .to_string(),
             "cohort does not take spare"
         );
+        assert_eq!(
+            dispatch(&args(&[
+                "restore-check",
+                "--wal",
+                "engine.wal",
+                "--spool-dir",
+                "s"
+            ]))
+            .unwrap_err()
+            .to_string(),
+            "restore-check does not take --spool-dir s"
+        );
         let (options, json) = parse_bench_options(&args(&["bench", "--json"])).unwrap();
         assert!(json);
         assert!(!options.contention);
+    }
+
+    #[test]
+    fn restore_check_carries_its_verdict_as_an_exit_status_not_a_failure_message() {
+        let directory = tempfile::tempdir().unwrap();
+        let gone = directory.path().join("engine.wal");
+        let error = dispatch(&args(&["restore-check", "--wal", gone.to_str().unwrap()]))
+            .expect_err("an unreadable family is exit 1");
+        assert_eq!(
+            error.downcast_ref::<Exit>().map(|Exit(code)| *code),
+            Some(1)
+        );
     }
 
     #[test]

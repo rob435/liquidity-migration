@@ -819,7 +819,7 @@ fn settle_row(
 /// The newest realtime millisecond the record carries, for judging a row
 /// whose validity ran out with no decision. Monotonic stamps are not wall
 /// time and are never read as it.
-fn wall_stamp(record: &WalRecord) -> Option<i64> {
+pub(crate) fn wall_stamp(record: &WalRecord) -> Option<i64> {
     match record {
         WalRecord::Boot { wall_ts_ms, .. }
         | WalRecord::IntentRefused { wall_ts_ms, .. }
@@ -855,7 +855,7 @@ fn wall_stamp(record: &WalRecord) -> Option<i64> {
 /// The wire kind of a record, so the census names every row it counts.
 /// Exhaustive on purpose: a new record kind is a compile error here, not an
 /// unnamed line in an audit.
-fn kind_of(record: &WalRecord) -> &'static str {
+pub(crate) fn kind_of(record: &WalRecord) -> &'static str {
     match record {
         WalRecord::StrategyRuntimeReconfigured { .. } => "strategy_runtime_reconfigured",
         WalRecord::OrderIdEpoch { .. } => "order_id_epoch",

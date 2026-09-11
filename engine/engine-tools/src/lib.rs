@@ -10,6 +10,7 @@ pub mod bench;
 pub mod cohort;
 pub mod equity_recorder;
 pub mod execution_study;
+pub mod restore_check;
 pub mod sim;
 pub mod timing;
 pub mod wal_conversion;

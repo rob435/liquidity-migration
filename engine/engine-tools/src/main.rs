@@ -131,6 +131,21 @@ engine — the execution loop
       names. Reads one frame per segment, never a whole segment. Everything
       below the floor is an archive.
 
+  engine restore-check --wal PATH [--spool DIR] [--controls DIR]
+                       [--max-age-min N] [--json]
+      What a restored log family says before anything is armed on top of it.
+      Every segment with its first record, whether boot trusts it and whether
+      it ends part-way through a record; then, from the newest trusted
+      segment alone, the may-open latch, the orders left out there, the
+      positions and protective triggers the log expects to find at the venue,
+      the order decisions it never resolved, and how old its newest stamp is
+      against --max-age-min (default 30 minutes, two backup intervals). Then
+      the signal spool and control directories the flags name. Takes no lock,
+      truncates no torn tail and writes nothing. Exit status is the verdict:
+      0 ready-to-reconcile, 3 reconcile-required, 4 stale-backup,
+      2 incompatible-reader, 1 unreadable. Whatever the log does not carry
+      prints as unknown, never as zero.
+
   engine venues
       List every compiled venue/realm and its live-evidence gate.
 
@@ -233,12 +248,30 @@ fn main() -> ExitCode {
 
     match dispatch(&args) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("engine: {e}");
-            ExitCode::FAILURE
-        }
+        Err(e) => match e.downcast_ref::<Exit>() {
+            // The report the subcommand already printed is the message.
+            Some(Exit(code)) => ExitCode::from(*code),
+            None => {
+                eprintln!("engine: {e}");
+                ExitCode::FAILURE
+            }
+        },
     }
 }
+
+/// A subcommand whose finding is its exit status rather than a failure.
+/// Carried as an error so `dispatch` keeps one return type and a test can read
+/// the code without ending its own process.
+#[derive(Debug)]
+pub(crate) struct Exit(pub u8);
+
+impl std::fmt::Display for Exit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "exit {}", self.0)
+    }
+}
+
+impl Error for Exit {}
 
 mod cli;
 use cli::dispatch;
