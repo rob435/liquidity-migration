@@ -1,10 +1,12 @@
 """A live level-2 book mirror, driven by tape records or a live stream.
 
-One mirror holds many symbols. A snapshot replaces a symbol's whole book; a
-delta upserts levels (size zero removes one). A record flagged
-``sequence_gap`` or ``restart_snapshot`` marks the book unhealthy until the
-next clean snapshot, and deltas are not applied while unhealthy. Trades never
-change the book; the last trade is kept for reference.
+One mirror holds many symbols. Continuity is the venue's own rule, the one the
+live feed and the tape rebuild keep: a snapshot, or any row with
+``update_id == 1``, replaces a symbol's whole book; a delta upserts levels
+(size zero removes one) only when its ``update_id`` is exactly one above the
+last row applied and the recorder saw no gap before it. Anything else marks
+the book unhealthy until the next snapshot. Trades never change the book; the
+last trade is kept for reference.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ class _SymbolBook:
     asks: dict[float, float] = field(default_factory=dict)
     has_snapshot: bool = False
     gap_pending: bool = False
+    last_update_id: int = 0
     last_receive_ts_ns: int | None = None
     last_trade_price: float | None = None
     last_trade_side: str | None = None
@@ -70,22 +73,27 @@ class BookMirror:
                 if isinstance(ts, int) and ts > 0:
                     state.last_trade_ts_ns = ts
             return
-        flagged = bool(record.get("sequence_gap")) or bool(record.get("restart_snapshot"))
-        if kind == "orderbook_snapshot":
+        flagged = bool(record.get("sequence_gap"))
+        update_id = int(record.get("update_id") or 0)
+        # The venue restarts its book numbering at 1; the recorder writes that
+        # row as a snapshot, and a producer that does not is read the same way.
+        if kind == "orderbook_snapshot" or update_id == 1:
             state.bids.clear()
             state.asks.clear()
             _apply_levels(state.bids, record.get("bids"))
             _apply_levels(state.asks, record.get("asks"))
             state.has_snapshot = True
             state.gap_pending = flagged
+            state.last_update_id = update_id
             return
-        if flagged:
+        if flagged or update_id != state.last_update_id + 1:
             state.gap_pending = True
             return
         if not state.has_snapshot or state.gap_pending:
             return
         _apply_levels(state.bids, record.get("bids"))
         _apply_levels(state.asks, record.get("asks"))
+        state.last_update_id = update_id
 
     def best_bid(self, symbol: str) -> float | None:
         state = self._books.get(symbol.upper())

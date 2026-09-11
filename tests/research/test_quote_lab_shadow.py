@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from typing import Any
 
 import pytest
@@ -15,6 +16,10 @@ from liquidity_migration.research.execution.quote_lab.shadow import (
 NS = 1_000_000_000
 BASE_S = 1_000.0  # synthetic clock start; zero would read as a missing timestamp
 SYMBOL = "TESTUSDT"
+#: Book rows chain at `update_id + 1`, so every record gets the next id in the
+#: order it is built. It starts above 1 because 1 is the venue's restart, which
+#: re-bases the book.
+_UPDATE_IDS = itertools.count(101)
 
 
 def ts_ns(ts_s: float) -> int:
@@ -35,6 +40,7 @@ def snap(
         "local_receive_ts_ns": ts_ns(ts_s),
         "bids": bids,
         "asks": asks,
+        "update_id": 1 if restart else next(_UPDATE_IDS),
         "sequence_gap": gap,
         "restart_snapshot": restart,
     }
@@ -46,6 +52,7 @@ def delta(
     asks: list[list[float]] | None = None,
     *,
     gap: bool = False,
+    update_id: int | None = None,
 ) -> dict[str, Any]:
     return {
         "kind": "orderbook_delta",
@@ -53,6 +60,7 @@ def delta(
         "local_receive_ts_ns": ts_ns(ts_s),
         "bids": bids or [],
         "asks": asks or [],
+        "update_id": next(_UPDATE_IDS) if update_id is None else update_id,
         "sequence_gap": gap,
         "restart_snapshot": False,
     }
@@ -127,14 +135,26 @@ class TestBookMirror:
         assert mirror.levels(SYMBOL, "Buy", limit=2) == [(100.0, 1.0), (99.0, 2.0)]
         assert mirror.levels(SYMBOL, "Sell", limit=2) == [(101.0, 4.0), (102.0, 5.0)]
 
-    def test_crossed_book_and_restart_snapshot_are_unhealthy(self) -> None:
+    def test_a_crossed_book_is_unhealthy_and_a_restart_re_bases_what_follows_it(self) -> None:
         mirror = BookMirror()
         mirror.apply(snap(1.0, [[101.0, 1.0]], [[100.5, 1.0]]))
         assert mirror.healthy(SYMBOL) is False
 
+        # `u == 1` is the venue restarting its numbering: a whole book, which
+        # the deltas after it chain onto.
         mirror.apply(snap(2.0, [[100.0, 1.0]], [[100.02, 1.0]], restart=True))
+        assert mirror.healthy(SYMBOL) is True
+        mirror.apply(delta(3.0, bids=[[100.0, 4.0]], update_id=2))
+        assert mirror.depth_at(SYMBOL, "Buy", 100.0) == 4.0
+
+        # A delta that skips an id is a gap, whatever the recorder flagged.
+        mirror.apply(delta(4.0, bids=[[100.0, 9.0]], update_id=4))
         assert mirror.healthy(SYMBOL) is False
-        mirror.apply(snap(3.0, [[100.0, 1.0]], [[100.02, 1.0]]))
+        assert mirror.depth_at(SYMBOL, "Buy", 100.0) == 4.0
+        mirror.apply(delta(5.0, bids=[[100.0, 8.0]], update_id=5))
+        assert mirror.healthy(SYMBOL) is False
+
+        mirror.apply(snap(6.0, [[100.0, 1.0]], [[100.02, 1.0]]))
         assert mirror.healthy(SYMBOL) is True
 
     def test_trades_do_not_change_book_but_update_last_trade(self) -> None:

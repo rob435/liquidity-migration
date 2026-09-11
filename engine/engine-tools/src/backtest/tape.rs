@@ -351,13 +351,14 @@ fn parse_ticker(value: &Value, recv_ns: u64) -> Result<TickerRow, String> {
 
 /// One symbol's book at one depth, rebuilt from its rows.
 ///
-/// The chaining rule is the recorder's own (`market_tape/book.py`, Bybit): a
-/// snapshot makes the book good; a delta is applied only when its
-/// `update_id` is above the last one applied and the recorder saw no gap
-/// before it; otherwise the book is bad until the next snapshot. Level
-/// merging is the live feed's (`engine_marketdata::bybit::state`): a zero
-/// size removes the level, sides stay sorted, and the book is cut at
-/// [`BOOK_DEPTH`].
+/// The chaining rule is one contract with the live feed
+/// (`engine_marketdata::bybit::state`) and the recorder
+/// (`market_tape/book.py`): a snapshot makes the book good; a delta is
+/// applied only when its `update_id` is exactly one above the last one
+/// applied and the recorder saw no gap before it; otherwise the book is bad
+/// until the next snapshot. `cross_sequence` is carried, never chained on.
+/// Level merging is the live feed's too: a zero size removes the level,
+/// sides stay sorted, and the book is cut at [`BOOK_DEPTH`].
 #[derive(Clone, Debug, Default)]
 pub struct BookBuilder {
     depth: Depth,
@@ -388,7 +389,7 @@ impl BookBuilder {
             if !self.valid {
                 return None;
             }
-            if row.sequence_gap || row.update_id <= self.last_update_id {
+            if row.sequence_gap || row.update_id != self.last_update_id + 1 {
                 self.valid = false;
                 return None;
             }
@@ -510,5 +511,90 @@ impl Drop for TapeReader {
             let _ = decoder.kill();
             let _ = decoder.wait();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Bybit orderbook sequence contract, from the fixture the live feed
+    /// and the recorder read too: `engine-marketdata`'s
+    /// `bybit::state::tests::the_shared_fixture_reaches_the_same_verdict_on_every_frame`
+    /// and `tests/market_tape/test_bybit_sequence.py`.
+    #[test]
+    fn the_shared_fixture_reaches_the_same_verdict_on_every_frame() {
+        const FIXTURE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/bybit_orderbook_sequence.jsonl"
+        ));
+
+        let mut books: BTreeMap<u32, (BookBuilder, bool)> = BTreeMap::new();
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (index, text) in FIXTURE.lines().filter(|l| !l.trim().is_empty()).enumerate() {
+            let line = index as u64 + 1;
+            let case: Value = serde_json::from_str(text).expect("the fixture line parses");
+            let frame = &case["frame"];
+            let expect = case["expect"]
+                .as_str()
+                .expect("the case names a verdict")
+                .to_string();
+            let data = &frame["data"];
+            let update_id = u64_field(data, "u").expect("the frame carries an update id");
+            let snapshot =
+                frame.get("type").and_then(Value::as_str) != Some("delta") || update_id == 1;
+            let depth: u32 = frame["topic"]
+                .as_str()
+                .and_then(|topic| topic.split('.').nth(1))
+                .and_then(|levels| levels.parse().ok())
+                .expect("the topic names its depth");
+            // What the recorder writes for this frame. Its `sequence_gap` is
+            // the rule as the recorder read it, and tape written before this
+            // contract carries the old one, so the reader reaches the verdict
+            // from the ids alone.
+            let row = parse_book(
+                &serde_json::json!({
+                    "symbol": data["s"],
+                    "depth": depth,
+                    "exchange_system_ts_ns": frame["ts"].as_u64().unwrap_or(0) * 1_000_000,
+                    "bids": data["b"],
+                    "asks": data["a"],
+                    "update_id": update_id,
+                    "cross_sequence": data["seq"],
+                    "sequence_gap": false,
+                }),
+                snapshot,
+                line,
+            )
+            .expect("the recorder's row parses");
+
+            let (book, based) = books.entry(depth).or_default();
+            let applied = book.apply(&row).is_some();
+            let verdict = if applied {
+                assert_eq!(book.depth().seq, row.cross_sequence, "line {line}");
+                assert_eq!(book.depth().update_id, row.update_id, "line {line}");
+                if snapshot {
+                    *based = true;
+                    "rebase"
+                } else {
+                    "apply"
+                }
+            } else {
+                assert!(!book.is_valid(), "line {line} left a side empty");
+                if *based {
+                    "gap"
+                } else {
+                    "before_snapshot"
+                }
+            };
+            assert_eq!(verdict, expect, "line {line}");
+            seen.insert(expect);
+        }
+        let vocabulary: std::collections::BTreeSet<String> =
+            ["apply", "before_snapshot", "gap", "rebase"]
+                .iter()
+                .map(|verdict| verdict.to_string())
+                .collect();
+        assert_eq!(seen, vocabulary);
     }
 }

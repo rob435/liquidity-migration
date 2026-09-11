@@ -25,7 +25,8 @@ def _typed(raw: dict[str, Any]) -> Any:
     return parse_row(raw, default_venue="bybit")
 
 
-def _book(symbol: str, received_ns: int, depth: int, bids: list[list[str]], asks: list[list[str]]) -> Any:
+def _book(symbol: str, received_ns: int, depth: int, bids: list[list[str]], asks: list[list[str]], *,
+          update_id: int | None = None) -> Any:
     return _typed(
         book_row(
             venue="bybit",
@@ -37,14 +38,14 @@ def _book(symbol: str, received_ns: int, depth: int, bids: list[list[str]], asks
             exchange_engine_ts_ns=received_ns,
             bids=bids,
             asks=asks,
-            update_id=received_ns,
+            update_id=received_ns if update_id is None else update_id,
             previous_update_id=0,
         )
     )
 
 
 def _delta(symbol: str, received_ns: int, depth: int, bids: list[list[str]], asks: list[list[str]], *,
-           previous_update_id: int, sequence_gap: bool = False) -> Any:
+           previous_update_id: int, update_id: int | None = None, sequence_gap: bool = False) -> Any:
     return _typed(
         book_row(
             venue="bybit",
@@ -56,7 +57,7 @@ def _delta(symbol: str, received_ns: int, depth: int, bids: list[list[str]], ask
             exchange_engine_ts_ns=received_ns,
             bids=bids,
             asks=asks,
-            update_id=received_ns,
+            update_id=previous_update_id + 1 if update_id is None else update_id,
             previous_update_id=previous_update_id,
             sequence_gap=sequence_gap,
         )
@@ -290,22 +291,23 @@ def test_no_rows_make_an_empty_frame_with_the_full_schema() -> None:
 
 
 def test_a_delta_moves_the_top_only_as_far_as_the_rebuilt_book_does() -> None:
-    snapshot = _book("BTCUSDT", T + 1 * MS, 50, [["100", "2"], ["99", "5"]], [["102", "3"], ["103", "1"]])
+    snapshot = _book("BTCUSDT", T + 1 * MS, 50, [["100", "2"], ["99", "5"]], [["102", "3"], ["103", "1"]],
+                     update_id=10)
     # A size change on the second-best bid is not a new best bid.
-    deeper = _delta("BTCUSDT", T + 2 * MS, 50, [["99", "7"]], [], previous_update_id=T + 1 * MS)
+    deeper = _delta("BTCUSDT", T + 2 * MS, 50, [["99", "7"]], [], previous_update_id=10)
     bar = build_bars([snapshot, deeper], interval_seconds=1.0).to_dicts()[0]
     assert bar["best_bid"] == 100.0 and bar["best_ask"] == 102.0
     assert bar["book_updates"] == 2
 
     # Deleting the best bid uncovers the level behind it.
-    deleted = _delta("BTCUSDT", T + 3 * MS, 50, [["100", "0"]], [], previous_update_id=T + 2 * MS)
+    deleted = _delta("BTCUSDT", T + 3 * MS, 50, [["100", "0"]], [], previous_update_id=11)
     bar = build_bars([snapshot, deeper, deleted], interval_seconds=1.0).to_dicts()[0]
     assert bar["best_bid"] == 99.0 and bar["best_ask"] == 102.0
     assert bar["book_updates"] == 3
 
     # A gap leaves the book invalid, so the row does not move the reported top.
     gapped = _delta("BTCUSDT", T + 4 * MS, 50, [["90", "1"]], [["91", "1"]],
-                    previous_update_id=T + 3 * MS, sequence_gap=True)
+                    previous_update_id=12, update_id=20, sequence_gap=True)
     bar = build_bars([snapshot, deeper, deleted, gapped], interval_seconds=1.0).to_dicts()[0]
     assert bar["best_bid"] == 99.0 and bar["best_ask"] == 102.0
     assert bar["book_updates"] == 4
@@ -313,8 +315,8 @@ def test_a_delta_moves_the_top_only_as_far_as_the_rebuilt_book_does() -> None:
 
 def test_the_book_carries_across_a_bar_boundary() -> None:
     rows = [
-        _book("BTCUSDT", T + 1 * MS, 1, [["100", "2"], ["99", "5"]], [["102", "3"]]),
-        _delta("BTCUSDT", T + SECOND + 1 * MS, 1, [["100", "0"]], [], previous_update_id=T + 1 * MS),
+        _book("BTCUSDT", T + 1 * MS, 1, [["100", "2"], ["99", "5"]], [["102", "3"]], update_id=10),
+        _delta("BTCUSDT", T + SECOND + 1 * MS, 1, [["100", "0"]], [], previous_update_id=10),
     ]
     first, second = build_bars(rows, interval_seconds=1.0).to_dicts()
     assert first["best_bid"] == 100.0

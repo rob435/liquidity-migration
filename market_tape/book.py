@@ -10,8 +10,9 @@ ever correct.
 
 What chaining means is the venue's own rule:
 
-- Bybit numbers every book message; a delta chains when its `update_id` is
-  above the last one applied.
+- Bybit numbers every book message per topic; a delta chains when its
+  `update_id` is exactly one above the last one applied, and `seq` orders
+  topics against each other rather than deltas within one.
 - Binance's snapshot is fetched over REST while the deltas already flow over
   the socket, so on the tape the snapshot row lands after diffs it does not
   cover and may itself be a little stale. Diffs that arrive while the book has
@@ -91,7 +92,7 @@ class Book:
             return applied
         if not self._valid:
             return False
-        if row.sequence_gap or row.update_id <= self.last_update_id:
+        if row.sequence_gap or row.update_id != self.last_update_id + 1:
             self._valid = False
             return False
         self._change(row)

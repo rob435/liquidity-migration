@@ -30,7 +30,7 @@ The host runs two continuous market data capture services:
 
 Invariants:
 * The two tapes never share a path: separate roots, separate systemd `StateDirectory`, separate Google Drive prefixes (`market-tape/bybit-linear` and `market-tape/binance-usdm`), and every row names its own `venue`.
-* Recorder book rows use Bybit sequence/reset rules. Other venues supply reconstructed, ordered snapshots through `historical_v1`; their deltas are never relabelled as Bybit updates.
+* Bybit book rows follow one sequence contract, shared with the live engine and the backtester's tape reader: `u == last_u + 1` continues a topic, a non-delta frame or `u == 1` re-bases it, anything else is a gap the recorder answers by re-subscribing that topic ([market_tape/README.md](../market_tape/README.md) §Book sequence contract). Other venues supply reconstructed, ordered snapshots through `historical_v1`; their deltas are never relabelled as Bybit updates.
 * Every book topic is re-subscribed once per UTC hour (`connection.reanchor_books_each_hour`), so each hour of tape — one directory, one uploaded tar — opens with a snapshot per symbol and can be replayed without the hours before it.
 
 ### Name coverage against what the sleeves trade
@@ -215,7 +215,7 @@ LiquidityMigration/market-tape/<tape>/YYYY/MM/DD/<day>T<HH>Z.tar
 
 | Layer | Owner | Contract |
 | --- | --- | --- |
-| Recorder decoding | `engine-tools/src/backtest/tape.rs` | `market_tape` JSONL / `.zst`; Bybit snapshots/deltas become valid depth snapshots or explicit invalidations. Missing receipt time, broken ordering and failed decompression are errors |
+| Recorder decoding | `engine-tools/src/backtest/tape.rs` | `market_tape` JSONL / `.zst`; Bybit snapshots/deltas become valid depth snapshots or explicit invalidations under the book sequence contract (`u == last_u + 1`, snapshot or `u == 1` re-bases). Missing receipt time, broken ordering and failed decompression are errors |
 | External decoding | `liquidity_migration/data/history.py` | Existing archive text reader for CSV/gzip/zip; batched Parquet; disk sort by availability then input ordinal; identical trade IDs deduplicate, conflicting IDs fail |
 | Normalized events | `engine-tools/src/backtest/source.rs` | `HistoricalSource` yields book, trade, ticker or completed bar facts; header venue and membership bind every row |
 | Instruments | `engine-tools/src/backtest/instruments.rs` | Recorder `instruments_snapshot` or `instrument_catalog_v1` with `specs: [[symbol, ExactInstrumentSpec], ...]`; decimal strings retain exact constraints, absent assets/bounds stay unknown |

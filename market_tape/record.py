@@ -20,11 +20,12 @@ projection is over the allowance, gives up the configured `tier:feed` pairs in
 order, one an hour, restoring them in reverse once under pace.
 
 Threads: one per shard (websocket), one writer, one compressor, one
-maintainer (status, snapshots, universes, budget), one pruner (retention),
-plus whatever side lanes the venue adapter starts and the short-lived threads
-that fetch REST book snapshots after a subscribe. Frames cross from the shards
-to the writer through one bounded queue; when it overruns, the shard
-reconnects for fresh snapshots and the overrun is counted in the status file.
+maintainer (status, snapshots, universes, budget), one pruner (retention), one
+resyncer (re-subscribing gapped book topics), plus whatever side lanes the
+venue adapter starts and the short-lived threads that fetch REST book
+snapshots after a subscribe. Frames cross from the shards to the writer
+through one bounded queue; when it overruns, the shard reconnects for fresh
+snapshots and the overrun is counted in the status file.
 
 Retention has its own thread because `status.json` is this unit's heartbeat:
 the maintainer writes it every `status_interval_seconds`, and a pass over a
@@ -286,6 +287,8 @@ class Shard:
     reconnects: int = 0
     #: Chunks re-anchored, counted for `status.json`.
     reanchors: int = 0
+    #: Book topics re-subscribed on a sequence gap, counted for `status.json`.
+    resyncs: int = 0
     #: The hour `reanchor_cursor` belongs to, and how many of this shard's
     #: book topics that hour's pass has re-anchored. Together they let the
     #: hourly pass spread over many maintenance ticks and resume where it was.
@@ -319,6 +322,7 @@ class Shard:
             "connected": self.connected,
             "reconnects": self.reconnects,
             "reanchors": self.reanchors,
+            "resyncs": self.resyncs,
             "last_message_ns": self.last_message_ns,
         }
 
@@ -375,9 +379,7 @@ class Shard:
                 # venue's incoming-message rate is what this spacing protects,
                 # and the gap it would add sits inside a symbol's blind moment.
                 time.sleep(LIVE_MESSAGE_SPACING_SECONDS)
-            self._send_all(self.adapter.remove_messages(chunk))
-            self._send_all(self.adapter.add_messages(chunk))
-            self._after_subscribe(chunk)
+            self._retake(chunk)
             self.reanchor_cursor += len(chunk)
             sent += len(chunk)
             self.reanchors += 1
@@ -385,6 +387,25 @@ class Shard:
 
     def reanchored(self, hour: str) -> bool:
         return self.reanchor_hour == hour and self.reanchor_cursor >= self.book_count()
+
+    def resync_book(self, topic: str) -> bool:
+        """Re-subscribe one gapped book topic, and return whether it was sent.
+
+        A book snapshot comes with a subscription — on Bybit at no other time
+        — so a topic that lost continuity stays un-based until it is taken
+        again. A shard that is not connected re-bases by connecting.
+        """
+
+        if not self.connected or self.socket is None or topic not in self.topics:
+            return False
+        self._retake([topic])
+        self.resyncs += 1
+        return True
+
+    def _retake(self, chunk: list[str]) -> None:
+        self._send_all(self.adapter.remove_messages(chunk))
+        self._send_all(self.adapter.add_messages(chunk))
+        self._after_subscribe(chunk)
 
     def _send_all(self, messages: list[str]) -> None:
         for position, text in enumerate(messages):
@@ -636,6 +657,14 @@ class Recorder:
         # Set to run a retention pass before the next routine interval, and on
         # shutdown so the pruner's wait is not what a stop waits out.
         self.prune_now = threading.Event()
+        # Book topics whose stream lost continuity, waiting to be re-subscribed;
+        # the ones whose re-subscribe has not yet brought a snapshot back; and
+        # the ones a snapshot has based at all.
+        self.resync_now = threading.Event()
+        self.resync_lock = threading.Lock()
+        self.resync_pending: list[str] = []
+        self.resync_outstanding: set[str] = set()
+        self.book_based: set[str] = set()
         self.static_symbols: dict[str, tuple[str, ...]] = {}
         for tier in config.tiers:
             if tier.universe.kind == "symbols":
@@ -674,6 +703,7 @@ class Recorder:
         self.worker = threading.Thread(target=self._write_loop, name="tape-writer", daemon=True)
         self.maintainer = threading.Thread(target=self._maintenance_loop, name="tape-maintenance", daemon=True)
         self.pruner = threading.Thread(target=self._retention_loop, name="tape-retention", daemon=True)
+        self.resyncer = threading.Thread(target=self._resync_loop, name="tape-resync", daemon=True)
 
     # ------------------------------------------------------------ lifecycle
 
@@ -686,11 +716,13 @@ class Recorder:
         self._start_lanes()
         self.maintainer.start()
         self.pruner.start()
+        self.resyncer.start()
         try:
             self.stop.wait()
         finally:
             self.stop.set()
             self.prune_now.set()
+            self.resync_now.set()
             self.lane_stop.set()
             for shard in self._all_shards():
                 shard.close()
@@ -702,6 +734,7 @@ class Recorder:
             # A pass mid-walk only unlinks whole compressed files, so shutdown
             # does not wait the length of one out.
             self.pruner.join(10.0)
+            self.resyncer.join(10.0)
             self.frames.put(None)
             self.worker.join()
             for segment in self.writer.close():
@@ -1119,6 +1152,7 @@ class Recorder:
                     self._meter(
                         tier, rows, sum(len(json.dumps(row, separators=(",", ":"))) for row in rows), received_ns
                     )
+                self._note_books(rows)
                 for row in rows:
                     for segment in self.writer.append(row):
                         self.compressor.submit(segment)
@@ -1137,6 +1171,46 @@ class Recorder:
                     logging.error("capture storage blocked; frames will be counted but not written: %s", exc)
             except Exception:  # noqa: BLE001 - one malformed frame cannot stop the tape
                 logging.exception("failed to record one public frame")
+
+    def _note_books(self, rows: list[dict[str, Any]]) -> None:
+        """Queue a re-subscribe for every book topic whose deltas lost continuity,
+        and drop the one a snapshot has just re-based."""
+
+        for row in rows:
+            kind = row.get("kind")
+            # This runs on the writer thread for every book row; a clean
+            # delta, which is most of the tape, never builds a topic name.
+            if kind == KIND_BOOK_DELTA:
+                if not row.get("sequence_gap"):
+                    continue
+            elif kind != KIND_BOOK_SNAPSHOT:
+                continue
+            topic = self._book_topic(row)
+            if topic is None:
+                continue
+            if kind == KIND_BOOK_SNAPSHOT:
+                with self.resync_lock:
+                    self.book_based.add(topic)
+                    self.resync_outstanding.discard(topic)
+                continue
+            with self.resync_lock:
+                # A topic no snapshot has based yet is either waiting for the
+                # one its subscription brings or, on a venue whose books come
+                # over REST, for a fetch already in flight: both land without
+                # a re-subscribe, and both flag the deltas until they do.
+                if topic in self.resync_outstanding or topic not in self.book_based:
+                    continue
+                self.resync_outstanding.add(topic)
+                self.resync_pending.append(topic)
+            self.resync_now.set()
+
+    def _book_topic(self, row: Mapping[str, Any]) -> str | None:
+        symbol = str(row.get("symbol") or "")
+        depth = row.get("depth")
+        if not symbol or depth is None:
+            return None
+        topics = self.adapter.topics(symbol, (Feed("book", str(int(depth))),))
+        return topics[0] if topics else None
 
     def _roll_idle(self) -> None:
         try:
@@ -1202,6 +1276,46 @@ class Recorder:
         self.disk_blocked = False
         logging.info("capture storage unblocked; writing resumed")
         return False
+
+    def _resync_loop(self) -> None:
+        while not self.stop.is_set():
+            self.resync_now.wait()
+            self.resync_now.clear()
+            if self.stop.is_set():
+                return
+            self._resync_books()
+
+    def _resync_books(self) -> None:
+        """Re-subscribe the queued book topics, one round trip each.
+
+        The hourly re-anchor is the only other thing that re-bases a book, so
+        a topic that gapped at the start of an hour would otherwise be
+        recorded as deltas against a book nothing can rebuild. One
+        re-subscribe is outstanding per topic: the snapshot it brings back is
+        what allows the next one.
+        """
+
+        while not self.stop.is_set():
+            with self.resync_lock:
+                if not self.resync_pending:
+                    return
+                topic = self.resync_pending.pop(0)
+            shard = self._shard_for(topic)
+            if shard is None or not shard.resync_book(topic):
+                with self.resync_lock:
+                    self.resync_outstanding.discard(topic)
+                continue
+            logging.info("re-subscribed %s after a sequence gap", topic)
+            with self.resync_lock:
+                more = bool(self.resync_pending)
+            if more:
+                time.sleep(LIVE_MESSAGE_SPACING_SECONDS)
+
+    def _shard_for(self, topic: str) -> Shard | None:
+        for shard in self._all_shards():
+            if topic in shard.topics:
+                return shard
+        return None
 
     def _maintenance_loop(self) -> None:
         while not self.stop.is_set():

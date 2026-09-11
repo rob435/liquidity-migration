@@ -93,6 +93,21 @@ def test_a_first_update_id_reads_as_a_restart_snapshot() -> None:
     assert not row["sequence_gap"]
 
 
+def test_a_delta_that_skips_an_update_id_is_a_gap_and_one_whose_seq_went_backwards_is_not() -> None:
+    adapter = BybitAdapter()
+    rows(adapter, book_message(), 1_800_000_000_010_000_000)
+    jumped = rows(adapter, book_message("delta", 12, 102), 1_800_000_000_020_000_000)[0]
+    # A gap holds until a snapshot re-bases the topic, however the ids run.
+    following = rows(adapter, book_message("delta", 13, 103), 1_800_000_000_030_000_000)[0]
+    rows(adapter, book_message("snapshot", 20, 200), 1_800_000_000_040_000_000)
+    lower_seq = rows(adapter, book_message("delta", 21, 5), 1_800_000_000_050_000_000)[0]
+
+    assert jumped["sequence_gap"]
+    assert following["sequence_gap"]
+    assert not lower_seq["sequence_gap"]
+    assert lower_seq["cross_sequence"] == 5 and lower_seq["previous_cross_sequence"] == 200
+
+
 def test_book_depths_keep_independent_sequence_state() -> None:
     adapter = BybitAdapter()
     deep = rows(adapter, book_message(), 1_800_000_000_010_000_000)[0]

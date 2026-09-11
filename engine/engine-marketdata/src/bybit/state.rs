@@ -333,6 +333,7 @@ mod tests {
     use super::*;
     use crate::bybit::parse::parse_frame;
     use engine_types::{Feed, Quote};
+    use std::collections::BTreeSet;
 
     fn subs() -> Vec<Subscription> {
         vec![
@@ -684,5 +685,59 @@ mod tests {
         assert_eq!(flow.last_px, 100.0);
         assert_eq!(flow.seq, 12);
         assert_eq!(flow.recv_ns, 42);
+    }
+
+    /// The Bybit orderbook sequence contract, written once and read by both
+    /// sides: `tests/market_tape/test_bybit_sequence.py` drives the recorder
+    /// and the tape rebuild through the same file.
+    #[test]
+    fn the_shared_fixture_reaches_the_same_verdict_on_every_frame() {
+        const FIXTURE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/bybit_orderbook_sequence.jsonl"
+        ));
+
+        let mut state = feed_state();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for (index, text) in FIXTURE.lines().filter(|l| !l.trim().is_empty()).enumerate() {
+            let line = index + 1;
+            let case: serde_json::Value =
+                serde_json::from_str(text).expect("the fixture line parses");
+            let raw = case["frame"].to_string();
+            let expect = case["expect"].as_str().expect("the case names a verdict");
+            let frame = parse_frame(&raw).expect("the venue's own message parses");
+            let ParsedFrame::Book(book) = frame else {
+                panic!("line {line} is not an orderbook frame");
+            };
+            let verdict = match state.apply(&frame, 42) {
+                Applied::Resync(ResyncReason::SequenceGap) => "gap",
+                Applied::Resync(ResyncReason::DeltaBeforeSnapshot) => "before_snapshot",
+                Applied::Event(event) => {
+                    match event {
+                        MarketEvent::Depth { depth, .. } => {
+                            assert_eq!(depth.update_id, book.update_id, "line {line}");
+                            assert_eq!(depth.seq, book.seq, "line {line}: seq is recorded");
+                        }
+                        MarketEvent::Quote { quote, .. } => {
+                            assert_eq!(quote.seq, book.seq, "line {line}: seq is recorded");
+                        }
+                        other => panic!("line {line} became {other:?}"),
+                    }
+                    if book.snapshot {
+                        "rebase"
+                    } else {
+                        "apply"
+                    }
+                }
+                other => panic!("line {line} became {other:?}"),
+            };
+            assert_eq!(verdict, expect, "line {line}");
+            seen.insert(expect.to_owned());
+        }
+        let vocabulary: BTreeSet<String> = ["apply", "before_snapshot", "gap", "rebase"]
+            .iter()
+            .map(|verdict| verdict.to_string())
+            .collect();
+        assert_eq!(seen, vocabulary);
     }
 }

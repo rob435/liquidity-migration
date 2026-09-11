@@ -49,7 +49,7 @@ python -m market_tape book   SOURCE --hour 2026-09-02T22 --symbol BTCUSDT
 | :--- | :--- | :--- |
 | **Recorded book** | `book:50` on every acting tier, `book:1` on the canary | **None.** Cross-venue reference only: ticker and trades |
 | **Listed universe** | `status=Trading`, `contractType=LinearPerpetual`, `symbolType` in `""`/`innovation` — stocks, ETFs, commodities out | `status=TRADING`, `contractType=PERPETUAL` — `TRADIFI_PERPETUAL` out |
-| **Book Chaining** | Monotonic `update_id`; resets on snapshot | `first_update_id` ($U$), `update_id` ($u$), `pu` |
+| **Book Chaining** | `u == last_u + 1` per topic; `type: snapshot` or `u == 1` re-bases; any other `u` is a gap until the next snapshot, and the recorder re-subscribes that topic. `seq` is recorded, never chained (§Book sequence contract) | `first_update_id` ($U$), `update_id` ($u$), `pu` |
 | **Top of Book** | `book:1` stream | `bookTicker` stream, 434 KB/s for 20 names — costlier than the deep book |
 | **Ticker Stream** | Real-time `tickers.<symbol>` | `@markPrice@1s` + 24h `ticker` |
 | **Predicted Funding**| Real-time predicted rate for upcoming settlement | Last settled rate (reacts 1 period later) |
@@ -68,7 +68,7 @@ python -m market_tape book   SOURCE --hour 2026-09-02T22 --symbol BTCUSDT
 manifest.jsonl                                         Receipts: row count, bytes, SHA-256
 status.json                                            Health status updated every 30s
 ```
-* `status.json` schema: `started_at_ns`, `last_receive_ns`, `disk_blocked`, `dropped_frames`, `disk_dropped_frames`, `shards[].connected`, `budget.projected_month_gb`, `budget.over`, `budget.shed`, `budget.shed_gb_month`.
+* `status.json` schema: `started_at_ns`, `last_receive_ns`, `disk_blocked`, `dropped_frames`, `disk_dropped_frames`, `shards[].connected`, `shards[].reanchors`, `shards[].resyncs`, `budget.projected_month_gb`, `budget.over`, `budget.shed`, `budget.shed_gb_month`.
 * `status.json` is this unit's heartbeat: the watchdog reads its mtime and its `last_receive_ns` (`deploy/fleet_manifest.tsv`, limit 120 s). `started_at_ns` is when this process began recording; the watchdog measures silence and socket loss from it, so a recorder younger than the 120 s limit reads as starting up, not as a dead venue. The maintenance tick that writes it **must never walk the tape** — `Retention.writable()` is one `statvfs`. Retention itself is the `tape-retention` thread, one pass every `RETENTION_INTERVAL_SECONDS` (300); a pass stats each file once, reads free space once, and carries free space forward by the bytes it unlinks.
 
 ### Budget (`[budget]` in the capture config)
@@ -96,6 +96,23 @@ status.json                                            Health status updated eve
 | **Counter** | `shards[].reanchors` in `status.json`. |
 
 Only order-book topics are re-subscribed. A trade, ticker, or liquidation row means the same thing standing alone.
+
+### Book sequence contract (Bybit)
+
+One rule, shared by the live engine, the recorder, the tape rebuild and the backtester's tape reader, pinned by `tests/fixtures/bybit_orderbook_sequence.jsonl` (17 raw venue frames with the verdict each side must reach; `engine-marketdata` and `engine-tools` read it with `include_str!`, `tests/market_tape/test_bybit_sequence.py` reads the same file).
+
+| Event on one topic | Live engine (`engine-marketdata/src/bybit/state.rs`) | Recorder (`market_tape/venues/bybit.py`, `record.py`) | Rebuild (`market_tape/book.py`, `engine-tools/src/backtest/tape.rs`, `quote_lab/book.py`) |
+| :--- | :--- | :--- | :--- |
+| Frame whose `type` is not `delta` (`snapshot`, or absent) | re-bases the book | `orderbook_snapshot` row, `sequence_gap=false` | replaces the book; valid |
+| Delta with `u == 1` (venue restart) | re-bases | `orderbook_snapshot` row, `restart_snapshot=true` | replaces the book; valid |
+| Delta with `u == last_u + 1` | applied | `orderbook_delta`, `sequence_gap=false` | applied |
+| Delta with any other `u` (jump or regression) | `Resync(SequenceGap)`: drops and refreshes that one topic | `sequence_gap=true`; re-subscribes that one topic within ~0.1 s, one outstanding per topic, counted in `shards[].resyncs` | invalid until the next snapshot |
+| Delta before any snapshot | `Resync(DeltaBeforeSnapshot)` | `sequence_gap=true`; the subscription's own snapshot re-bases | refused; invalid |
+| Deltas after a gap, `u + 1` or not | resync until a snapshot | `sequence_gap=true` until a snapshot | refused until a snapshot |
+| `seq` (cross-topic sequence) | recorded on `Depth.seq` / `Quote.seq`; not a continuity rule | `cross_sequence` / `previous_cross_sequence` on every row; not a rule | not read |
+| `orderbook.1` | own state per (symbol, depth); the venue pushes it as snapshots | own sequence state per topic | one `Book` per symbol and depth |
+
+Evidence boundary: the recorded hour `tests/market_tape/fixtures/host/bybit-linear/2026-08-30/00` holds 1,429 depth-50 deltas (BTCUSDT 1,179 over 53 s, PENDLEUSDT 250 over 123 s), every one `u == previous_update_id + 1`, zero jumps, zero `seq` regressions; its 225 depth-1 rows are all snapshots.
 
 ### Google Drive Layout
 Uploaded hourly at :10 past the hour:

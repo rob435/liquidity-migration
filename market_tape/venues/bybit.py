@@ -261,12 +261,15 @@ class BybitAdapter:
         update_id = int(data.get("u") or 0)
         cross_sequence = int(data.get("seq") or 0)
         message_type = str(message.get("type") or "").lower()
-        snapshot = message_type == "snapshot" or update_id == 1
+        # Only "delta" is a delta: the venue's other book types, and a frame
+        # with none, carry a whole book. `u == 1` is its service restart.
+        snapshot = message_type != "delta" or update_id == 1
         previous = self.sequences.setdefault(topic, SequenceState())
+        # One topic's deltas are continuous only at `u + 1`; `seq` is the
+        # venue's cross-topic order, never a continuity rule. The live feed
+        # resyncs on exactly this.
         gap = not snapshot and (
-            not previous.healthy
-            or (cross_sequence > 0 and previous.cross_sequence > 0 and cross_sequence <= previous.cross_sequence)
-            or (update_id > 0 and previous.update_id > 0 and update_id <= previous.update_id)
+            not previous.healthy or (previous.update_id > 0 and update_id != previous.update_id + 1)
         )
         row = book_row(
             venue=self.name,

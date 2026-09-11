@@ -607,6 +607,137 @@ def test_re_anchoring_is_off_when_the_config_says_so(tmp_path: Path) -> None:
     assert shard.reanchors == 0
 
 
+def book_frame(kind: str, update_id: int, depth: int = 50) -> str:
+    return json.dumps(
+        {
+            "topic": f"orderbook.{depth}.BTCUSDT",
+            "type": kind,
+            "ts": 1_800_000_000_000,
+            "cts": 1_799_999_999_999,
+            "data": {
+                "s": "BTCUSDT",
+                "b": [["108420.10", "2.0"]],
+                "a": [["108420.50", "1.2"]],
+                "u": update_id,
+                "seq": 9_000_000 + update_id,
+            },
+        }
+    )
+
+
+def feed(recorder: Recorder, *frames: str) -> None:
+    for frame in frames:
+        recorder.frames.put(("frame", frame, BASE_NS, "deep"))
+    recorder.frames.put(None)
+    recorder._write_loop()
+
+
+def test_a_gapped_book_topic_is_re_subscribed_once_until_its_snapshot_lands(tmp_path: Path) -> None:
+    """Bybit sends a book snapshot only to a subscription, so a topic that lost
+    continuity would record deltas against a book nothing can rebuild until the
+    hourly re-anchor. The live feed drops and refreshes that one topic; so does
+    the recorder."""
+
+    recorder = build(tmp_path, Tier("deep", DEEP_FEEDS, Universe("symbols", symbols=("BTCUSDT",))))
+    topics = ["orderbook.50.BTCUSDT", "orderbook.1.BTCUSDT", "publicTrade.BTCUSDT"]
+    shard = unstarted_shard(recorder, "deep", topics)
+    socket = FakeSocket()
+    shard.socket = socket  # type: ignore[assignment]
+    shard.connected = True
+    recorder.tier_shards["deep"] = [shard]
+
+    feed(recorder, book_frame("snapshot", 100), book_frame("delta", 102), book_frame("delta", 103))
+
+    assert recorder.resync_pending == ["orderbook.50.BTCUSDT"], "one re-subscribe per gap per topic"
+    assert recorder.resync_now.is_set(), "and the resyncer is woken for it"
+    recorder._resync_books()
+
+    assert [json.loads(text) for text in socket.sent] == [
+        {"op": "unsubscribe", "args": ["orderbook.50.BTCUSDT"]},
+        {"op": "subscribe", "args": ["orderbook.50.BTCUSDT"]},
+    ]
+    assert shard.resyncs == 1 and shard.status()["resyncs"] == 1
+    assert shard.topics == topics, "the subscription list itself is unchanged"
+    assert recorder.resync_outstanding == {"orderbook.50.BTCUSDT"}
+
+    # Nothing more goes out while that re-subscribe is outstanding.
+    feed(recorder, book_frame("delta", 104))
+    recorder._resync_books()
+    assert len(socket.sent) == 2
+
+    # The snapshot it brings back re-bases the topic, and the next gap is taken.
+    feed(recorder, book_frame("snapshot", 200))
+    assert recorder.resync_outstanding == set()
+    feed(recorder, book_frame("delta", 202))
+    recorder._resync_books()
+
+    assert [json.loads(text)["args"] for text in socket.sent] == [["orderbook.50.BTCUSDT"]] * 4
+    assert shard.resyncs == 2
+
+
+def test_two_gapped_topics_go_one_at_a_time_at_the_venues_message_spacing(tmp_path: Path, monkeypatch) -> None:
+    recorder = build(tmp_path, Tier("deep", DEEP_FEEDS, Universe("symbols", symbols=("BTCUSDT",))))
+    topics = ["orderbook.50.BTCUSDT", "orderbook.1.BTCUSDT"]
+    shard = unstarted_shard(recorder, "deep", topics)
+    socket = FakeSocket()
+    shard.socket = socket  # type: ignore[assignment]
+    shard.connected = True
+    recorder.tier_shards["deep"] = [shard]
+
+    feed(
+        recorder,
+        book_frame("snapshot", 100),
+        book_frame("snapshot", 100, depth=1),
+        book_frame("delta", 102),
+        book_frame("delta", 102, depth=1),
+    )
+    paused: list[float] = []
+    monkeypatch.setattr(record.time, "sleep", paused.append)
+    recorder._resync_books()
+
+    assert [json.loads(text)["args"] for text in socket.sent] == [
+        ["orderbook.50.BTCUSDT"],
+        ["orderbook.50.BTCUSDT"],
+        ["orderbook.1.BTCUSDT"],
+        ["orderbook.1.BTCUSDT"],
+    ]
+    assert paused == [record.LIVE_MESSAGE_SPACING_SECONDS], "between topics, not inside a topic's round trip"
+    assert shard.resyncs == 2
+
+
+def test_a_gap_before_any_snapshot_waits_for_the_snapshot_already_coming(tmp_path: Path) -> None:
+    """A topic no snapshot has based is waiting for the one its subscription
+    brings, or — on a venue whose books come over REST — for a fetch already in
+    flight. Both flag the deltas until they land, and neither needs a re-take."""
+
+    recorder = build(tmp_path, Tier("deep", DEEP_FEEDS, Universe("symbols", symbols=("BTCUSDT",))))
+    shard = unstarted_shard(recorder, "deep", ["orderbook.50.BTCUSDT"])
+    socket = FakeSocket()
+    shard.socket = socket  # type: ignore[assignment]
+    shard.connected = True
+    recorder.tier_shards["deep"] = [shard]
+
+    feed(recorder, book_frame("delta", 99), book_frame("delta", 100))
+    recorder._resync_books()
+
+    assert recorder.resync_pending == [] and recorder.resync_outstanding == set()
+    assert socket.sent == [] and shard.resyncs == 0
+
+
+def test_a_gapped_topic_on_a_shard_that_is_gone_waits_for_the_next_gap(tmp_path: Path) -> None:
+    recorder = build(tmp_path, Tier("deep", DEEP_FEEDS, Universe("symbols", symbols=("BTCUSDT",))))
+    shard = unstarted_shard(recorder, "deep", ["orderbook.50.BTCUSDT"])
+    recorder.tier_shards["deep"] = [shard]
+
+    feed(recorder, book_frame("snapshot", 100), book_frame("delta", 102))
+    recorder._resync_books()
+
+    # A disconnected shard re-bases by connecting, and nothing is left holding
+    # the topic back from the next attempt.
+    assert shard.resyncs == 0
+    assert recorder.resync_pending == [] and recorder.resync_outstanding == set()
+
+
 def test_a_shard_that_is_not_connected_only_records_the_new_list(tmp_path: Path) -> None:
     recorder = build(tmp_path, Tier("deep", (Feed("trades"),), Universe("symbols", symbols=("BTCUSDT",))))
     shard = unstarted_shard(recorder, "deep", ["publicTrade.BTCUSDT"])
@@ -1032,6 +1163,7 @@ def test_the_status_file_carries_what_the_host_watchdog_reads(tmp_path: Path) ->
             "connected": False,
             "reconnects": 0,
             "reanchors": 0,
+            "resyncs": 0,
             "last_message_ns": 0,
         }
     ]
