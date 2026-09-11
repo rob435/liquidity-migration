@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -235,3 +237,76 @@ def test_independent_units_are_shared_never_stopped_by_a_realm_and_recorder_firs
     for realm in REALMS:
         assert not set(_helper(f"lm_activation_units {realm} start")) & set(ordered)
         assert not set(_helper(f"lm_realm_units {realm}")) & set(ordered)
+
+
+def _awk_counting_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A private deploy copy whose `awk` shim counts manifest validations.
+
+    The validation pass is the only `awk` call carrying `-v realm_list=`, so the
+    shim counts it and passes every other call straight through.
+    """
+    deploy = tmp_path / "deploy"
+    deploy.mkdir()
+    for name in (
+        "lib_sleeves.sh",
+        "lib_realms.sh",
+        "realms.tsv",
+        "fleet_manifest.tsv",
+        "sleeves.env",
+    ):
+        (deploy / name).write_bytes((ROOT / "deploy" / name).read_bytes())
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    real_awk = shutil.which("awk", path=os.defpath)
+    assert real_awk, "awk is required"
+    awk = shim / "awk"
+    awk.write_text(
+        "#!/bin/sh\n"
+        'case " $* " in\n'
+        '  *" -v realm_list="*) printf x >> "$LM_AWK_COUNT_FILE" ;;\n'
+        "esac\n"
+        f'exec {real_awk} "$@"\n',
+        encoding="utf-8",
+    )
+    awk.chmod(0o755)
+    return deploy, shim, tmp_path / "validations"
+
+
+def _run_with_awk_count(script: str, tmp_path: Path) -> tuple[subprocess.CompletedProcess[str], int]:
+    deploy, shim, counter = _awk_counting_fixture(tmp_path)
+    environment = dict(os.environ)
+    environment["PATH"] = f"{shim}{os.pathsep}{environment['PATH']}"
+    environment["LM_AWK_COUNT_FILE"] = str(counter)
+    completed = subprocess.run(
+        ["bash", "-c", f". {deploy / 'lib_sleeves.sh'}\n{script}"],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    validations = len(counter.read_text(encoding="utf-8")) if counter.exists() else 0
+    return completed, validations
+
+
+def test_manifest_validation_runs_once_per_unchanged_manifest(tmp_path: Path) -> None:
+    completed, validations = _run_with_awk_count(
+        "set -euo pipefail\n"
+        "lm_realm_units mainnet >/dev/null\n"
+        "lm_owner_unit mainnet >/dev/null\n"
+        "lm_expected_systemd_units >/dev/null\n",
+        tmp_path,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert validations == 1
+
+
+def test_a_changed_manifest_is_validated_again_and_refused(tmp_path: Path) -> None:
+    completed, validations = _run_with_awk_count(
+        "lm_realm_units mainnet >/dev/null || exit 9\n"
+        f"printf 'bogus|row\\n' >> {tmp_path / 'deploy' / 'fleet_manifest.tsv'}\n"
+        "if lm_owner_unit mainnet >/dev/null 2>&1; then exit 8; fi\n",
+        tmp_path,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert validations == 2

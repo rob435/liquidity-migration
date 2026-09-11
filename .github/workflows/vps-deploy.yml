@@ -104,6 +104,9 @@ jobs:
       # The same debug build clippy just produced: the suite runs in seconds,
       # and this is the profile scripts/dev.sh check tests with locally. The
       # artifact job tests the optimized profile consumed by deploy.
+      - name: Build tests (locked)
+        run: cargo test --workspace --all-targets --locked --no-run
+        working-directory: engine
       - name: Tests (locked)
         run: cargo test --workspace --all-targets --locked
         working-directory: engine

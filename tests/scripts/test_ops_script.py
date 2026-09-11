@@ -62,6 +62,7 @@ def test_help_lists_only_current_operator_routes() -> None:
         "canary-order",
         "real-money",
         "deploy",
+        "why",
     ):
         assert route in result.stdout
     for retired in ("rollout", "staged", "install|activate"):
@@ -87,6 +88,20 @@ def test_curve_routes_the_selected_history_to_the_rust_companion(tmp_path: Path)
     # The recorder is manifest-driven: a new realm needs no recorder change.
     assert _run("curve", "mexc", "60", env=environment).returncode == 0
     assert "REMOTE_ARGS=( mexc 60 )" in capture.read_text()
+
+
+def test_why_reads_the_realms_engine_heartbeat_on_the_host(tmp_path: Path) -> None:
+    capture, environment = _ssh_capture(tmp_path)
+
+    assert _run("why", env=environment).returncode == 0
+    payload = capture.read_text()
+    assert f"REMOTE_ARGS=( {realm_row('mainnet').engine_heartbeat} )" in payload
+    assert 'exec python3 "$REPO_DIR/scripts/runtime/engine_status.py" "${REMOTE_ARGS[0]}"' in payload
+
+    assert _run("why", "demo", env=environment).returncode == 0
+    assert realm_row("demo").engine_heartbeat in capture.read_text()
+
+    assert _run("why", "not-a-realm", env=environment).returncode == 2
 
 
 def test_deploy_allowlists_one_stop_and_disarm_mode_per_funded_realm(tmp_path: Path) -> None:

@@ -320,9 +320,11 @@ def test_dev_check_prunes_under_the_target_volume_floor_before_the_rust_stages()
     ).stdout
 
 
-def test_pre_push_reuses_developer_gate_and_preserves_safe_basetemp() -> None:
+def test_pre_push_reuses_developer_gate_which_owns_the_basetemp() -> None:
     hook = PRE_PUSH.read_text(encoding="utf-8")
+    dev = DEV.read_text(encoding="utf-8")
 
-    assert '"$REPO_ROOT/scripts/dev.sh" check --basetemp "$PYTEST_BASETEMP"' in hook
-    assert 'case "$PYTEST_BASETEMP" in' in hook
-    assert '"$REPO_ROOT"|"$REPO_ROOT"/*)' in hook
+    assert 'exec "$REPO_ROOT/scripts/dev.sh" check' in hook
+    assert 'case "$PYTEST_BASETEMP" in' not in hook
+    assert 'case "$candidate" in' in dev
+    assert '"$real_root"|"$real_root"/*)' in dev

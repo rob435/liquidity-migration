@@ -1267,6 +1267,22 @@ verify_mode() {
     df -h /var/lib | tail -1
     report_disk_usage
     report_failed_units
+    report_engine_status
+}
+
+# Each realm's engine heartbeat read as health, exposure and blockers: the
+# "why is it not trading" answer, from the engine's own statement. Read-only,
+# and never fatal to a verify: a realm with no heartbeat yet is skipped.
+report_engine_status() {
+    local realm unit heartbeat
+    for realm in $(lm_realms); do
+        unit="$(lm_owner_unit "$realm" 2>/dev/null || true)"
+        [ -n "$unit" ] || continue
+        heartbeat="$(lm_output_artifact_for_unit "$unit" 2>/dev/null || true)"
+        [ -n "$heartbeat" ] && [ "$heartbeat" != "-" ] && [ -f "$heartbeat" ] || continue
+        echo "engine-status $realm"
+        python3 "$REPO_DIR/scripts/runtime/engine_status.py" "$heartbeat" || true
+    done
 }
 
 # Why each failed fleet unit failed, as `failed-unit <id>` then its result

@@ -64,6 +64,9 @@ Operator commands:
   curve [REALM] [SAMPLES]      the live account's recorded equity curve, read
                                on the host (default: mainnet, 240 minutes;
                                REALM is a row of deploy/realms.tsv)
+  why [REALM]                  why one engine is not trading, read on the host
+                               from its heartbeat: health, exposure, blockers
+                               (default: mainnet)
   flatten --environment REALM [--reason TEXT] [--execute]
                                ask each native directional reducer to close its
                                attributed exposure through durable Rust control
@@ -292,6 +295,15 @@ systemctl list-timers "${REMOTE_ARGS[@]}" --all --no-pager' "${FLEET_UNITS[@]}"
     [[ "$curve_samples" =~ ^[1-9][0-9]*$ ]] || die_usage "curve samples must be a positive integer"
     remote_exec 'exec /opt/liquidity-migration-engine/bin/engine-tools record-equity \
       --show "${REMOTE_ARGS[0]}" --samples "${REMOTE_ARGS[1]}"' "$curve_realm" "$curve_samples"
+    ;;
+  why)
+    # The engine's own heartbeat, read where it is written. Read-only: no venue
+    # call, no unit change, nothing written.
+    why_realm="${1:-mainnet}"
+    require_realm why "$why_realm"
+    why_heartbeat="$(lm_realm_field "$why_realm" engine_heartbeat)"
+    remote_exec 'exec python3 "$REPO_DIR/scripts/runtime/engine_status.py" "${REMOTE_ARGS[0]}"' \
+      "$why_heartbeat"
     ;;
   execution-study)
     [[ "$#" -le 1 ]] || die_usage "execution-study accepts only --json"

@@ -7,7 +7,6 @@ set -e
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
-REPO_ROOT="$(pwd -P)"
 
 # Git exports checkout-local variables to hooks. Test fixtures create their own
 # repositories, so let each fixture's path select its own .git directory.
@@ -15,34 +14,5 @@ while IFS= read -r name; do
     unset "$name"
 done < <(git rev-parse --local-env-vars)
 
-PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
-if [[ ! -x "$PYTHON_BIN" ]]; then
-    PYTHON_BIN="$(command -v python3 || command -v python)"
-fi
-
-PYTEST_BASETEMP="${PYTEST_BASETEMP:-}"
-if [[ -z "$PYTEST_BASETEMP" ]]; then
-    PYTEST_TMP_ROOT="${TMPDIR:-/tmp}"
-    mkdir -p "$PYTEST_TMP_ROOT"
-    PYTEST_TMP_ROOT="$(cd "$PYTEST_TMP_ROOT" && pwd -P)"
-    PYTEST_BASETEMP="$PYTEST_TMP_ROOT/liquidity-migration-pytest-pre-push-$(date +%Y%m%d%H%M%S)-$$"
-fi
-
-PYTEST_BASETEMP_PARENT="$(dirname "$PYTEST_BASETEMP")"
-mkdir -p "$PYTEST_BASETEMP_PARENT"
-PYTEST_BASETEMP_PARENT="$(cd "$PYTEST_BASETEMP_PARENT" && pwd -P)"
-PYTEST_BASETEMP="$PYTEST_BASETEMP_PARENT/$(basename "$PYTEST_BASETEMP")"
-mkdir -p "$PYTEST_BASETEMP"
-PYTEST_BASETEMP="$(cd "$PYTEST_BASETEMP" && pwd -P)"
-case "$PYTEST_BASETEMP" in
-    "$REPO_ROOT"|"$REPO_ROOT"/*)
-        echo "[pre-push] refusing pytest basetemp inside repository: $PYTEST_BASETEMP" >&2
-        exit 1
-        ;;
-esac
-
-echo "[pre-push] repository gate (basetemp=$PYTEST_BASETEMP)..."
-PYTHON="$PYTHON_BIN" \
-    "$REPO_ROOT/scripts/dev.sh" check --basetemp "$PYTEST_BASETEMP"
-
-echo "[pre-push] OK — pushing."
+echo "[pre-push] repository gate..."
+exec "$REPO_ROOT/scripts/dev.sh" check

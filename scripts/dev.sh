@@ -31,7 +31,9 @@ Non-operational developer commands:
   check [PYTEST_ARGS...] run doctor, Ruff, ShellCheck, mypy, pytest, and the
                          engine's rustfmt, clippy, and tests in sequence;
                          prunes first when the target volume has under
-                         LM_TARGET_FREE_GIB (30) GiB free
+                         LM_TARGET_FREE_GIB (30) GiB free. Supplies and prints a
+                         pytest --basetemp outside the repository unless the
+                         arguments already carry one
   help                   show this help
 
 Environment:
@@ -39,6 +41,7 @@ Environment:
   CARGO_TARGET_DIR    the Cargo target directory prune measures and cleans
                       (default engine/target)
   LM_TARGET_FREE_GIB  free-space floor, in GiB, under which check prunes (30)
+  PYTEST_BASETEMP     explicit check basetemp; one inside the repository is refused
 
 Operational and research commands intentionally live elsewhere:
   scripts/ops.sh --help
@@ -64,6 +67,7 @@ MYPY_TARGETS=(
   scripts/release_artifact.py
   scripts/data/build_candidate_tape.py
   scripts/runtime/check_fleet_liveness.py
+  scripts/runtime/engine_status.py
   scripts/runtime/reclaim_host_storage.py
   deploy/grafana/render_dashboard.py
 )
@@ -108,6 +112,43 @@ prune_engine_target() {
   rm -rf "$(engine_target_dir)/debug/incremental"
 }
 
+# ", "-joined list. ${array[*]} joins on IFS's first character only, which
+# would drop the space.
+join_comma() {
+  local out="" item
+  for item in "$@"; do
+    if [[ -z "$out" ]]; then out="$item"; else out="$out, $item"; fi
+  done
+  printf '%s' "$out"
+}
+
+# `check`'s pytest basetemp. Fixtures build Git repositories and large trees,
+# so one inside the checkout would be found by repository walks and left behind:
+# that is refused, not relocated. PYTEST_BASETEMP overrides the default.
+resolve_pytest_basetemp() {
+  local candidate real_root parent
+  real_root="$(cd "$ROOT_DIR" && pwd -P)"
+  candidate="${PYTEST_BASETEMP:-}"
+  if [[ -z "$candidate" ]]; then
+    local tmp_root="${TMPDIR:-/tmp}"
+    mkdir -p "$tmp_root"
+    tmp_root="$(cd "$tmp_root" && pwd -P)"
+    candidate="$tmp_root/liquidity-migration-pytest-$(date +%Y%m%d%H%M%S)-$$"
+  fi
+  parent="$(dirname "$candidate")"
+  mkdir -p "$parent"
+  parent="$(cd "$parent" && pwd -P)"
+  candidate="$parent/$(basename "$candidate")"
+  case "$candidate" in
+    "$real_root"|"$real_root"/*)
+      echo "[dev] refusing pytest basetemp inside repository: $candidate" >&2
+      return 1
+      ;;
+  esac
+  mkdir -p "$candidate"
+  printf '%s\n' "$candidate"
+}
+
 command="${1:-help}"
 if [[ "$#" -gt 0 ]]; then
   shift
@@ -143,25 +184,48 @@ case "$command" in
     echo "[dev] cargo prune: $(engine_target_free_gib) GiB free after"
     ;;
   check)
+    pytest_args=("$@")
+    has_basetemp=0
+    for arg in "$@"; do
+      case "$arg" in
+        --basetemp|--basetemp=*) has_basetemp=1 ;;
+      esac
+    done
+    # Before any gate runs: a refused basetemp must not cost a full doctor.
+    if [[ "$has_basetemp" -eq 0 ]]; then
+      pytest_basetemp="$(resolve_pytest_basetemp)"
+      pytest_args+=(--basetemp "$pytest_basetemp")
+      echo "[dev] pytest basetemp: $pytest_basetemp"
+    fi
+    ran=()
+    skipped=()
     echo "[dev] repository doctor"
     "$PYTHON_BIN" scripts/devtools/repo_doctor.py --repo "$ROOT_DIR"
+    ran+=(doctor)
     echo "[dev] ruff"
     "$PYTHON_BIN" -m ruff check liquidity_migration market_tape scripts tests deploy
+    ran+=(ruff)
     if command -v shellcheck >/dev/null 2>&1; then
       echo "[dev] shellcheck"
       git ls-files -z -- "${SHELL_FILES[@]}" | xargs -0 shellcheck -S warning
+      ran+=(shellcheck)
     else
       echo "[dev] shellcheck skipped (not installed; CI runs it)"
+      skipped+=("shellcheck (not installed)")
     fi
     echo "[dev] mypy"
     "$PYTHON_BIN" -m mypy "${MYPY_TARGETS[@]}"
+    ran+=(mypy)
     echo "[dev] pytest"
-    "$PYTHON_BIN" -m pytest -q "$@"
+    "$PYTHON_BIN" -m pytest -q "${pytest_args[@]}"
+    ran+=(pytest)
     # The Cargo workspace root is engine/, not the repository root.
     if [[ ! -f "$ROOT_DIR/engine/Cargo.toml" ]]; then
       echo "[dev] engine tests skipped (no engine workspace)"
+      skipped+=("engine (no workspace)")
     elif ! command -v cargo >/dev/null 2>&1; then
       echo "[dev] engine tests skipped (no cargo toolchain)"
+      skipped+=("engine (no cargo toolchain)")
     else
       use_rustup_cargo
       free_gib="$(engine_target_free_gib)"
@@ -175,7 +239,15 @@ case "$command" in
       (cd "$ROOT_DIR/engine" && cargo clippy --workspace --all-targets --quiet -- -D warnings)
       echo "[dev] cargo test"
       (cd "$ROOT_DIR/engine" && cargo test --workspace --quiet)
+      ran+=("cargo fmt" "cargo clippy" "cargo test")
     fi
+    ran_list="$(join_comma "${ran[@]}")"
+    if [[ "${#skipped[@]}" -eq 0 ]]; then
+      skipped_list="none"
+    else
+      skipped_list="$(join_comma "${skipped[@]}")"
+    fi
+    echo "[dev] check complete; ran: $ran_list; skipped: $skipped_list"
     ;;
   *)
     echo "ERROR: unknown developer command '$command'" >&2

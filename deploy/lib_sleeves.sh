@@ -17,11 +17,31 @@ if [ -f "$_LM_DEPLOY_DIRECTORY/lib_realms.sh" ]; then
     . "$_LM_DEPLOY_DIRECTORY/lib_realms.sh"
 fi
 
+# The manifest's identity: its path and content, plus the realm table it is
+# validated against. A byte that changes anywhere here changes this string, so
+# the memo below re-validates without being told to.
+_lm_fleet_manifest_identity() {
+    _lfmi_manifest="$(cksum <"$LM_FLEET_MANIFEST")" || return 1
+    if [ -n "${LM_REALM_TABLE_TEXT:-}" ]; then
+        _lfmi_realms="text:$(printf '%s\n' "$LM_REALM_TABLE_TEXT" | cksum)" || return 1
+    elif [ -f "${LM_REALM_TABLE:-}" ]; then
+        _lfmi_realms="file:${LM_REALM_TABLE}:$(cksum <"$LM_REALM_TABLE")" || return 1
+    else
+        _lfmi_realms="none"
+    fi
+    printf '%s|%s|%s\n' "$LM_FLEET_MANIFEST" "$_lfmi_manifest" "$_lfmi_realms"
+}
+
 lm_validate_fleet_manifest() {
     [ -f "$LM_FLEET_MANIFEST" ] || {
         echo "fleet manifest is missing: $LM_FLEET_MANIFEST" >&2
         return 1
     }
+    _lvfm_identity="$(_lm_fleet_manifest_identity)" || return 1
+    if [ -n "${_LM_FLEET_MANIFEST_VALIDATED:-}" ] &&
+        [ "$_lvfm_identity" = "$_LM_FLEET_MANIFEST_VALIDATED" ]; then
+        return 0
+    fi
     [ "$(sed -n '1p' "$LM_FLEET_MANIFEST")" = "# fleet-manifest-v2" ] || {
         echo "fleet manifest has an unsupported schema: $LM_FLEET_MANIFEST" >&2
         return 1
@@ -193,7 +213,8 @@ END {
     }
     exit failed ? 1 : 0
 }
-' "$LM_FLEET_MANIFEST"
+' "$LM_FLEET_MANIFEST" || return 1
+    _LM_FLEET_MANIFEST_VALIDATED="$_lvfm_identity"
 }
 
 lm_fleet_manifest_rows() {

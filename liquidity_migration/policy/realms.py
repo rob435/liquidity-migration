@@ -153,10 +153,10 @@ VENUE_FACTS: dict[str, dict[str, Any]] = {
             "# file is what decides whether this unit runs at all."
         ),
         "engine_memory_note": (
-            "# Boot replays the newest log segment and holds it decoded, about six times\n"
-            "# the segment's bytes (measured 2026-09-01: a 53 MB segment peaks at 322 MB, a\n"
-            "# 165 MB one at 522 MB). The engine config rotates segments at 256 MB, so a\n"
-            "# segment at its largest needs about 1.5 GB; this cap leaves room above that."
+            "# Boot replays the newest log segment and holds it decoded. Two measurements,\n"
+            "# 2026-09-01: a 53 MB segment peaked at 322 MB, a 165 MB one at 522 MB. The\n"
+            "# engine config rotates segments at 256 MB. MemoryMax=2G is set above an\n"
+            "# extrapolation from those two points, not a third measurement."
         ),
         "liveness_observer_note": (
             "# Detection reads the manifest and published artifacts. Delivery reads only\n"
@@ -412,9 +412,10 @@ _DEFAULT_VENUE_FACTS: dict[str, str] = {
         "# whether this unit runs at all."
     ),
     "engine_memory_note": (
-        "# Boot replays the newest log segment and holds it decoded, about six times\n"
-        "# the segment's bytes. The engine config rotates segments at 256 MB, so a\n"
-        "# segment at its largest needs about 1.5 GB; this cap leaves room above that."
+        "# Boot replays the newest log segment and holds it decoded. Two measurements,\n"
+        "# 2026-09-01: a 53 MB segment peaked at 322 MB, a 165 MB one at 522 MB. The\n"
+        "# engine config rotates segments at 256 MB. MemoryMax=2G is set above an\n"
+        "# extrapolation from those two points, not a third measurement."
     ),
     "liveness_observer_note": (
         "# Detection reads the manifest and published artifacts. Delivery reads only\n"
