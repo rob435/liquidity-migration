@@ -115,10 +115,12 @@ engine — the execution loop
       Reads the host's credentials and touches no network. Never prints a
       secret.
 
-  engine wal-cost --wal PATH [--appends N] [--barriers N]
-      What one buffered append and one durability barrier cost on the
-      filesystem holding PATH. The barrier is the fsync the order path waits
-      for before a send, so this is the storage's share of the order path.
+  engine wal-cost --wal PATH [--appends N] [--barriers N] [--rotations N]
+      What one buffered append, one durability barrier and one segment
+      rotation cost on the filesystem holding PATH. The barrier is the fsync
+      the order path waits for before a send, so this is the storage's share
+      of the order path; rotation runs on the engine loop and is reported at
+      several base-record sizes, whole call and parts. --rotations 0 skips it.
       Point --wal at the real state directory and again at a memory-backed
       one to bound what faster storage would buy.
 

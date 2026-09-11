@@ -158,13 +158,21 @@ fn wal_cost(args: &[String]) -> Result<(), Box<dyn Error>> {
     let path = args.value("--wal");
     let appends = args.value("--appends");
     let barriers = args.value("--barriers");
+    let rotations = args.value("--rotations");
     args.finish()?;
     let path = PathBuf::from(path.ok_or("wal-cost needs --wal PATH")?);
     let appends: usize = appends.unwrap_or_else(|| "20000".into()).parse()?;
     let barriers: usize = barriers.unwrap_or_else(|| "200".into()).parse()?;
+    let rotations: usize = rotations.unwrap_or_else(|| "20".into()).parse()?;
     let costs = engine_wal::measure(&path, appends, barriers)?;
     println!("wal-cost path={}", path.display());
     println!("{costs}");
+    if rotations > 0 {
+        for row in engine_wal::measure_rotation(&path, rotations)? {
+            println!("{row}");
+        }
+        println!("  rotation runs on the engine loop, at one base-record size per block.");
+    }
     println!("  the barrier measures synchronous fsync; engine bench separates callback, queued-dispatch and attempted-send barriers.");
     println!("  compare against a memory-backed path to bound what faster storage buys.");
     Ok(())

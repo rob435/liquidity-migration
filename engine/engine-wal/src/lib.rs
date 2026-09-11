@@ -426,6 +426,23 @@ impl SyncThread {
     }
 }
 
+/// Where a durability barrier actually runs.
+///
+/// [`WalWriter::barrier_begin`] is only asynchronous while the log has its
+/// own sync thread. A writer whose thread could not be started keeps the same
+/// durability promise by running every barrier on the caller — the engine
+/// loop — so the difference is in responsiveness, not in correctness, and
+/// nothing else makes it observable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DurabilityMode {
+    /// No barrier waits for the disk.
+    Unsynced,
+    /// `barrier_begin` hands the fsync to the log's own thread.
+    SyncThread,
+    /// No thread; every barrier runs on the caller.
+    CallerThread,
+}
+
 pub struct WalWriter {
     file: File,
     /// Absent for a writer whose thread could not be started, which falls
@@ -559,6 +576,22 @@ impl WalWriter {
     /// The sequence the next append will get.
     pub fn next_seq(&self) -> u64 {
         self.next_seq
+    }
+
+    /// Where this writer's barriers run. See [`DurabilityMode`].
+    pub fn durability_mode(&self) -> DurabilityMode {
+        match (self.durable, self.sync.is_some()) {
+            (false, _) => DurabilityMode::Unsynced,
+            (true, true) => DurabilityMode::SyncThread,
+            (true, false) => DurabilityMode::CallerThread,
+        }
+    }
+
+    /// Put a durable writer into the state a failed `SyncThread::spawn`
+    /// leaves it in. The spawn failure itself is not reachable from a test.
+    #[cfg(test)]
+    fn drop_sync_thread(&mut self) {
+        self.sync = None;
     }
 
     /// The file the durability thread would sync, and the file being written.
@@ -718,8 +751,17 @@ impl Wal for WalWriter {
         self.file_bytes + self.buf.len() as u64
     }
 
+    fn rotate(&mut self, base: &WalRecord) -> Result<bool, WalError> {
+        self.rotate_measured(base).map(|(rotated, _)| rotated)
+    }
+}
+
+impl WalWriter {
     /// Start the next segment, first record `base`, and archive the current
     /// one in place. Nothing is ever deleted here — retention is the owner's.
+    ///
+    /// Runs on the caller, which is the single-threaded engine loop. The
+    /// returned split is what `engine-tools wal-cost --rotations` reports.
     ///
     /// The crash-ordering argument, step by step. A crash at ANY point must
     /// leave [`open_current`] recovering the same engine:
@@ -746,7 +788,8 @@ impl Wal for WalWriter {
     /// 4. Only then does this writer switch its file handle. From the first
     ///    append after that, the new segment is the one with unique records,
     ///    and it is already the one boot picks.
-    fn rotate(&mut self, base: &WalRecord) -> Result<bool, WalError> {
+    fn rotate_measured(&mut self, base: &WalRecord) -> Result<(bool, RotationSplit), WalError> {
+        let started = Instant::now();
         let next_index = segments(&self.family)?
             .last()
             .map_or(1, |(index, _)| *index)
@@ -755,11 +798,14 @@ impl Wal for WalWriter {
 
         // 1. Finish the archive.
         self.push_to_os()?;
+        let archiving = Instant::now();
         if self.durable {
             self.file.sync_data()?;
         }
+        let archive_ns = archiving.elapsed().as_nanos() as u64;
 
         // 2. The next unused number, torn leftovers included.
+        let opening = Instant::now();
         let path = segment_path(&self.family, next_index);
         let mut file = OpenOptions::new()
             .read(true)
@@ -786,6 +832,7 @@ impl Wal for WalWriter {
                 File::open(dir)?.sync_all()?;
             }
         }
+        let open_ns = opening.elapsed().as_nanos() as u64;
 
         // 4. Switch. The old file handle closes when it drops; the file
         //    itself stays where it is, an archive. The sync thread holds a
@@ -801,7 +848,14 @@ impl Wal for WalWriter {
         self.file_bytes = HEADER_LEN + frame.len() as u64;
         self.next_seq = 2;
         self.segment_index = next_index;
-        Ok(true)
+        Ok((
+            true,
+            RotationSplit {
+                total_ns: started.elapsed().as_nanos() as u64,
+                archive_ns,
+                open_ns,
+            },
+        ))
     }
 }
 
@@ -1403,6 +1457,11 @@ fn scan_frames(
 }
 
 /// What one buffered append and one durability barrier cost, in microseconds.
+///
+/// `barrier` is the synchronous [`Wal::barrier`]. `begin` is what
+/// [`Wal::barrier_begin`] costs the caller before it returns, and `settle` is
+/// that same barrier from begin to confirmation — so `barrier - begin` is
+/// what handing the fsync to the sync thread takes off the engine loop.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Costs {
     pub appends: usize,
@@ -1413,6 +1472,12 @@ pub struct Costs {
     pub barrier_p50_us: f64,
     pub barrier_p99_us: f64,
     pub barrier_max_us: f64,
+    pub begin_p50_us: f64,
+    pub begin_p99_us: f64,
+    pub begin_max_us: f64,
+    pub settle_p50_us: f64,
+    pub settle_p99_us: f64,
+    pub settle_max_us: f64,
 }
 
 impl fmt::Display for Costs {
@@ -1420,7 +1485,9 @@ impl fmt::Display for Costs {
         write!(
             f,
             "append  n={:<7} p50={:>8.3} us  p99={:>8.3} us  max={:>8.3} us\n\
-             barrier n={:<7} p50={:>8.3} us  p99={:>8.3} us  max={:>8.3} us",
+             barrier n={:<7} p50={:>8.3} us  p99={:>8.3} us  max={:>8.3} us\n\
+             begin   n={:<7} p50={:>8.3} us  p99={:>8.3} us  max={:>8.3} us\n\
+             settle  n={:<7} p50={:>8.3} us  p99={:>8.3} us  max={:>8.3} us",
             self.appends,
             self.append_p50_us,
             self.append_p99_us,
@@ -1429,9 +1496,66 @@ impl fmt::Display for Costs {
             self.barrier_p50_us,
             self.barrier_p99_us,
             self.barrier_max_us,
+            self.barriers,
+            self.begin_p50_us,
+            self.begin_p99_us,
+            self.begin_max_us,
+            self.barriers,
+            self.settle_p50_us,
+            self.settle_p99_us,
+            self.settle_max_us,
         )
     }
 }
+
+/// The parts of one [`WalWriter::rotate_measured`] call, in nanoseconds.
+#[derive(Clone, Copy, Debug, Default)]
+struct RotationSplit {
+    total_ns: u64,
+    /// Step 1: `sync_data` of the segment being archived.
+    archive_ns: u64,
+    /// Steps 2-3: create, base frame, `sync_data`, directory `sync_all`.
+    open_ns: u64,
+}
+
+/// What one segment rotation costs at one base-record size, in microseconds.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RotationCosts {
+    /// Serialized length of the base record's frame payload.
+    pub base_bytes: usize,
+    pub rotations: usize,
+    pub rotate_p50_us: f64,
+    pub rotate_p99_us: f64,
+    pub archive_p50_us: f64,
+    pub archive_p99_us: f64,
+    pub open_p50_us: f64,
+    pub open_p99_us: f64,
+}
+
+impl fmt::Display for RotationCosts {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "rotate  base={:<9} n={:<7} p50={:>8.3} us  p99={:>8.3} us\n  \
+             archive fsync             p50={:>8.3} us  p99={:>8.3} us\n  \
+             next segment durable      p50={:>8.3} us  p99={:>8.3} us",
+            self.base_bytes,
+            self.rotations,
+            self.rotate_p50_us,
+            self.rotate_p99_us,
+            self.archive_p50_us,
+            self.archive_p99_us,
+            self.open_p50_us,
+            self.open_p99_us,
+        )
+    }
+}
+
+/// The base-record sizes [`measure_rotation`] reports, in bytes.
+pub const ROTATION_BASE_SIZES: [usize; 3] = [64 * 1024, 1024 * 1024, 8 * 1024 * 1024];
+
+/// Unsynced tail a measured segment carries into its own archival.
+pub const ROTATION_TAIL_BYTES: u64 = 64 * 1024;
 
 /// Time `appends` buffered appends and `barriers` durability barriers against
 /// a real file. Each barrier is preceded by an append, so it measures the cost
@@ -1461,8 +1585,21 @@ pub fn measure(path: &Path, appends: usize, barriers: usize) -> Result<Costs, Wa
         barrier_us.push(t.elapsed().as_nanos() as f64 / 1000.0);
     }
 
+    let mut begin_us = Vec::with_capacity(barriers);
+    let mut settle_us = Vec::with_capacity(barriers);
+    for _ in 0..barriers {
+        wal.append(&record)?;
+        let t = Instant::now();
+        let pending = wal.barrier_begin()?;
+        begin_us.push(t.elapsed().as_nanos() as f64 / 1000.0);
+        pending.wait()?;
+        settle_us.push(t.elapsed().as_nanos() as f64 / 1000.0);
+    }
+
     append_us.sort_by(f64::total_cmp);
     barrier_us.sort_by(f64::total_cmp);
+    begin_us.sort_by(f64::total_cmp);
+    settle_us.sort_by(f64::total_cmp);
     Ok(Costs {
         appends,
         append_p50_us: quantile(&append_us, 0.50),
@@ -1472,7 +1609,93 @@ pub fn measure(path: &Path, appends: usize, barriers: usize) -> Result<Costs, Wa
         barrier_p50_us: quantile(&barrier_us, 0.50),
         barrier_p99_us: quantile(&barrier_us, 0.99),
         barrier_max_us: barrier_us.last().copied().unwrap_or(0.0),
+        begin_p50_us: quantile(&begin_us, 0.50),
+        begin_p99_us: quantile(&begin_us, 0.99),
+        begin_max_us: begin_us.last().copied().unwrap_or(0.0),
+        settle_p50_us: quantile(&settle_us, 0.50),
+        settle_p99_us: quantile(&settle_us, 0.99),
+        settle_max_us: settle_us.last().copied().unwrap_or(0.0),
     })
+}
+
+/// Time `rotations` segment rotations at each of [`ROTATION_BASE_SIZES`], on
+/// the filesystem holding `path`.
+///
+/// Each size gets its own segment family beside `path`, written and then
+/// removed; `path` itself is neither read nor written. Rotation runs on the
+/// engine loop, so these are numbers that loop pays in full.
+///
+/// [`ROTATION_TAIL_BYTES`] of ordinary records go into each segment before it
+/// is archived: step 1's `sync_data` only writes back what was appended since
+/// the last barrier, so an untouched segment would time an empty fsync.
+pub fn measure_rotation(path: &Path, rotations: usize) -> Result<Vec<RotationCosts>, WalError> {
+    let tail = sample_record();
+    let mut report = Vec::with_capacity(ROTATION_BASE_SIZES.len());
+    for base_bytes in ROTATION_BASE_SIZES {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(format!(".rotation-{base_bytes}"));
+        let family = PathBuf::from(name);
+        remove_family(&family)?;
+
+        let base = sized_note(base_bytes)?;
+        let (mut wal, _) = WalWriter::open(&family)?;
+        let mut total_us = Vec::with_capacity(rotations);
+        let mut archive_us = Vec::with_capacity(rotations);
+        let mut open_us = Vec::with_capacity(rotations);
+        for _ in 0..rotations {
+            let until = wal.segment_size() + ROTATION_TAIL_BYTES;
+            while wal.segment_size() < until {
+                wal.append(&tail)?;
+            }
+            let (_, split) = wal.rotate_measured(&base)?;
+            total_us.push(split.total_ns as f64 / 1000.0);
+            archive_us.push(split.archive_ns as f64 / 1000.0);
+            open_us.push(split.open_ns as f64 / 1000.0);
+        }
+        drop(wal);
+        remove_family(&family)?;
+
+        total_us.sort_by(f64::total_cmp);
+        archive_us.sort_by(f64::total_cmp);
+        open_us.sort_by(f64::total_cmp);
+        report.push(RotationCosts {
+            base_bytes,
+            rotations,
+            rotate_p50_us: quantile(&total_us, 0.50),
+            rotate_p99_us: quantile(&total_us, 0.99),
+            archive_p50_us: quantile(&archive_us, 0.50),
+            archive_p99_us: quantile(&archive_us, 0.99),
+            open_p50_us: quantile(&open_us, 0.50),
+            open_p99_us: quantile(&open_us, 0.99),
+        });
+    }
+    Ok(report)
+}
+
+fn remove_family(family: &Path) -> Result<(), WalError> {
+    for (_, path) in segments(family)? {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+/// A record whose frame payload is exactly `bytes` long.
+fn sized_note(bytes: usize) -> Result<WalRecord, WalError> {
+    let mut note = WalRecord::Note {
+        source: "wal-cost".to_string(),
+        text: String::new(),
+    };
+    let mut empty = Vec::new();
+    write_record(&mut empty, &note)?;
+    let padding = bytes.checked_sub(empty.len()).ok_or_else(|| {
+        io::Error::other(format!(
+            "a rotation base of {bytes} bytes is smaller than the record itself"
+        ))
+    })?;
+    if let WalRecord::Note { text, .. } = &mut note {
+        *text = "x".repeat(padding);
+    }
+    Ok(note)
 }
 
 fn quantile(sorted: &[f64], q: f64) -> f64 {
@@ -1810,5 +2033,86 @@ mod tests {
         );
         drop(wal);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_log_without_its_sync_thread_says_so_and_still_passes_barriers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("engine.wal");
+
+        let (unsynced, _) = WalWriter::open_unsynced(&path).unwrap();
+        assert_eq!(unsynced.durability_mode(), DurabilityMode::Unsynced);
+        drop(unsynced);
+
+        let (mut wal, _) = WalWriter::open(&path).unwrap();
+        assert_eq!(wal.durability_mode(), DurabilityMode::SyncThread);
+        wal.drop_sync_thread();
+        assert_eq!(
+            wal.durability_mode(),
+            DurabilityMode::CallerThread,
+            "a durable log with no thread runs its barriers on the caller"
+        );
+
+        wal.append(&sample_record()).unwrap();
+        let pending = wal.barrier_begin().unwrap();
+        assert!(
+            !pending.outstanding(),
+            "the fallback barrier is finished before it is handed back"
+        );
+        pending.wait().unwrap();
+        wal.append(&sample_record()).unwrap();
+        wal.barrier().unwrap();
+        drop(wal);
+
+        let (_, records) = open_current(&path).unwrap();
+        assert_eq!(records.len(), 2);
+    }
+
+    #[test]
+    fn a_rotation_reports_its_own_parts_inside_its_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("engine.wal");
+        let (mut wal, _) = WalWriter::open(&path).unwrap();
+        wal.append(&sample_record()).unwrap();
+
+        let (rotated, split) = wal
+            .rotate_measured(&sized_note(64 * 1024).unwrap())
+            .unwrap();
+        assert!(rotated);
+        assert!(split.open_ns > 0, "{split:?}");
+        assert!(
+            split.archive_ns + split.open_ns <= split.total_ns,
+            "the parts must fit inside the whole call: {split:?}"
+        );
+    }
+
+    #[test]
+    fn a_rotation_measurement_covers_every_base_size_and_cleans_up_after_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("engine.wal");
+        let report = measure_rotation(&path, 2).unwrap();
+
+        assert_eq!(
+            report.iter().map(|row| row.base_bytes).collect::<Vec<_>>(),
+            ROTATION_BASE_SIZES.to_vec()
+        );
+        for row in &report {
+            assert_eq!(row.rotations, 2);
+            assert!(row.rotate_p50_us > 0.0, "{row}");
+        }
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "the measurement leaves no segments behind"
+        );
+    }
+
+    #[test]
+    fn a_measured_rotation_base_is_the_size_it_was_asked_for() {
+        for bytes in ROTATION_BASE_SIZES {
+            let mut frame = Vec::new();
+            write_record(&mut frame, &sized_note(bytes).unwrap()).unwrap();
+            assert_eq!(frame.len(), bytes);
+        }
     }
 }
