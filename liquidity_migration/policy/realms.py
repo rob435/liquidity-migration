@@ -20,6 +20,7 @@ from typing import Any
 __all__ = [
     "CREDENTIAL_GROUPS",
     "GENERATED_MANIFEST_REGIONS",
+    "REALM_FIELDS",
     "REALM_TABLE",
     "Realm",
     "funded_realms",
@@ -27,6 +28,7 @@ __all__ = [
     "realm",
     "realm_fields",
     "realms",
+    "render_realm_fields",
     "render_realm_files",
     "venues",
 ]
@@ -35,6 +37,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: Repository-relative path of the realm table.
 REALM_TABLE = "deploy/realms.tsv"
+
+#: Repository-relative path of the generated realm facts. The shell reads only
+#: this file; nothing outside this module parses the table.
+REALM_FIELDS = "deploy/realm_fields.tsv"
 
 _TABLE_SCHEMA = "# realm-table-v1"
 _TABLE_COLUMNS = (
@@ -930,6 +936,34 @@ def realm_fields(row: Realm) -> dict[str, str]:
     return out
 
 
+# The generated realm facts. Frozen format: line 1 the schema, line 2 the
+# columns, then one `realm|field|value` row per realm per field, realms in
+# table order and fields in `_FIELDS` order. deploy/lib_realms.sh is the only
+# reader, and it splits on "|" and takes the third field whole.
+_FIELDS_SCHEMA = "# realm-fields-v1"
+_FIELDS_COLUMN_LINE = "# realm|field|value"
+
+
+def render_realm_fields(rows: tuple[Realm, ...]) -> str:
+    """Every realm's every field, as the one file the shell looks facts up in."""
+
+    lines = [_FIELDS_SCHEMA, _FIELDS_COLUMN_LINE]
+    for row in rows:
+        if not row.kept_groups:
+            raise ValueError(
+                f"{REALM_TABLE}: venue {row.venue} declares no credential families "
+                f"for a {row.kind} realm ({row.realm})"
+            )
+        for field, value in realm_fields(row).items():
+            if "|" in value or "\n" in value:
+                raise ValueError(
+                    f"{REALM_FIELDS}: {row.realm} {field} cannot be a row: "
+                    "a value carries no pipe and no newline"
+                )
+            lines.append(f"{row.realm}|{field}|{value}")
+    return "\n".join(lines) + "\n"
+
+
 # --------------------------------------------------------------- unit files
 
 _ENGINE_UNIT_PRACTICE = """\
@@ -1584,6 +1618,7 @@ def render_realm_files(root: Path | None = None) -> dict[Path, bytes]:
     out[manifest] = render_fleet_manifest(
         manifest.read_text(encoding="utf-8"), rows
     ).encode("utf-8")
+    out[base / REALM_FIELDS] = render_realm_fields(rows).encode("utf-8")
     return out
 
 

@@ -6,10 +6,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SSH_TARGET="${SSH_TARGET:-root@208.84.103.4}"
 REPO_DIR="${REPO_DIR:-/opt/liquidity-migration}"
 LM_FLEET_MANIFEST="$ROOT_DIR/deploy/fleet_manifest.tsv"
-LM_REALM_TABLE="$ROOT_DIR/deploy/realms.tsv"
+LM_REALM_FIELDS="$ROOT_DIR/deploy/realm_fields.tsv"
 . "$ROOT_DIR/deploy/lib_sleeves.sh"
 
-# The realms and the funded modes an operator may name, from the table.
+# The realms and the funded modes an operator may name, from the generated realm fields.
 REALM_LIST="$(lm_realms | paste -sd ' ' -)"
 DEPLOY_MODES="deploy rollback verify"
 for funded_realm in $(lm_funded_realms); do

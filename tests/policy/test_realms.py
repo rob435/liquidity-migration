@@ -10,6 +10,7 @@ import pytest
 from liquidity_migration.policy import realms as realm_policy
 from liquidity_migration.policy.realms import (
     GENERATED_MANIFEST_REGIONS,
+    REALM_FIELDS,
     funded_realms,
     main,
     realm_fields,
@@ -33,14 +34,28 @@ def _bash(script: str, cwd: Path = ROOT) -> str:
     return completed.stdout
 
 
+def _fields_bash(script: str, root: Path) -> str:
+    """The same helpers, reading a cloned checkout's own generated fields."""
+
+    completed = subprocess.run(
+        ["bash", "-c", f"set -euo pipefail; . {root}/deploy/lib_sleeves.sh; {script}"],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return completed.stdout
+
+
 # ------------------------------------------------------- exact equivalence
 
 
 def test_every_generated_file_matches_the_checked_in_bytes() -> None:
     rendered = render_realm_files(ROOT)
     # 4 realms x (engine, worker, liveness service, liveness timer, engine env
-    # template, worker env template) plus the fleet manifest.
-    assert len(rendered) == len(realms()) * 6 + 1
+    # template, worker env template) plus the fleet manifest and the realm fields.
+    assert len(rendered) == len(realms()) * 6 + 2
+    assert ROOT / REALM_FIELDS in rendered
     differing = [
         str(path.relative_to(ROOT))
         for path, body in sorted(rendered.items())
@@ -60,6 +75,24 @@ def test_check_mode_passes_and_reports_drift(tmp_path: Path, capsys: pytest.Capt
     assert "liquidity-migration-engine-mexc.service" in capsys.readouterr().out
     assert main(["render", "--root", str(root)]) == 0
     assert main(["check", "--root", str(root)]) == 0
+
+
+def test_a_table_edit_without_a_render_is_drift(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The shell reads only the generated fields, so an unrendered table row is
+    a realm the shell cannot see. Check mode names the file."""
+
+    root = _clone(tmp_path)
+    _append_realm(
+        root,
+        "spare|bybit|bybit_spare|spare|funded|stopped|false|true|false|false|50|180|95|213",
+    )
+    capsys.readouterr()
+    assert main(["check", "--root", str(root)]) == 1
+    assert REALM_FIELDS in capsys.readouterr().out
+    assert _fields_bash("lm_realms", root).split() == [row.realm for row in realms()]
+    assert main(["render", "--root", str(root)]) == 0
+    assert main(["check", "--root", str(root)]) == 0
+    assert "spare" in _fields_bash("lm_realms", root).split()
 
 
 def test_generated_manifest_rows_are_exactly_the_realm_units() -> None:
@@ -105,7 +138,7 @@ def test_bash_and_python_agree_on_every_field_of_every_realm() -> None:
     assert answered == expected
 
 
-def test_bash_realm_lists_come_from_the_table() -> None:
+def test_bash_realm_lists_come_from_the_generated_fields() -> None:
     assert _bash("lm_realms").split() == [row.realm for row in realms()]
     assert _bash("lm_funded_realms").split() == [row.realm for row in funded_realms()]
     assert _bash("lm_realm_alternation").strip() == "|".join(row.realm for row in realms())
@@ -125,7 +158,7 @@ def test_bash_realm_lists_come_from_the_table() -> None:
         "lm_realm_units nope",
     ],
 )
-def test_bash_helpers_refuse_a_realm_outside_the_table(script: str) -> None:
+def test_bash_helpers_refuse_a_realm_outside_the_generated_fields(script: str) -> None:
     completed = subprocess.run(
         ["bash", "-c", f". {DEPLOY}/lib_sleeves.sh; {script}"],
         cwd=ROOT,
@@ -133,6 +166,46 @@ def test_bash_helpers_refuse_a_realm_outside_the_table(script: str) -> None:
         capture_output=True,
     )
     assert completed.returncode != 0
+
+
+@pytest.mark.parametrize(
+    ("script", "status", "message"),
+    [
+        ("lm_realm_field nope realm", 2, "unknown realm: nope"),
+        ("lm_realm_field demo not_a_field", 3, "unknown realm field: not_a_field"),
+    ],
+)
+def test_the_lookup_names_what_it_could_not_answer(script: str, status: int, message: str) -> None:
+    completed = subprocess.run(
+        ["bash", "-c", f". {DEPLOY}/lib_sleeves.sh; {script}"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode == status
+    assert message in completed.stderr
+
+
+def test_the_lookup_refuses_a_fields_file_it_does_not_know(tmp_path: Path) -> None:
+    stranger = tmp_path / "realm_fields.tsv"
+    stranger.write_text(
+        (DEPLOY / "realm_fields.tsv")
+        .read_text(encoding="utf-8")
+        .replace("# realm-fields-v1", "# realm-fields-v99", 1),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"export LM_REALM_FIELDS={stranger}; . {DEPLOY}/lib_realms.sh; lm_realm_field demo realm",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode != 0
+    assert "unsupported schema; expected # realm-fields-v1" in completed.stderr
 
 
 # --------------------------------------------------------- adding a realm
@@ -145,6 +218,7 @@ def _clone(tmp_path: Path) -> Path:
     shutil.copy2(DEPLOY / "fleet_manifest.tsv", root / "deploy" / "fleet_manifest.tsv")
     shutil.copy2(DEPLOY / "lib_sleeves.sh", root / "deploy" / "lib_sleeves.sh")
     shutil.copy2(DEPLOY / "lib_realms.sh", root / "deploy" / "lib_realms.sh")
+    shutil.copy2(DEPLOY / "realm_fields.tsv", root / "deploy" / "realm_fields.tsv")
     shutil.copytree(SYSTEMD, root / "deploy" / "systemd")
     return root
 
@@ -179,6 +253,10 @@ def test_a_fifth_realm_is_one_table_row(tmp_path: Path, monkeypatch: pytest.Monk
         realm_policy.CREDENTIAL_GROUPS
         + (("binance_real", ("BINANCE_REAL_API_KEY", "BINANCE_REAL_API_SECRET")),),
     )
+
+    # The row alone is not a realm the shell can see: it reads the generated
+    # fields, and those are still the four realms rendered before this edit.
+    assert "binance" not in _fields_bash("lm_realms", root).split()
 
     rendered = render_realm_files(root)
     for path, body in rendered.items():
@@ -218,7 +296,7 @@ def test_a_fifth_realm_is_one_table_row(tmp_path: Path, monkeypatch: pytest.Monk
     # The manifest still validates, and the bash helpers answer for the realm.
     environment = {
         "LM_FLEET_MANIFEST": str(root / "deploy" / "fleet_manifest.tsv"),
-        "LM_REALM_TABLE": str(root / "deploy" / "realms.tsv"),
+        "LM_REALM_FIELDS": str(root / "deploy" / "realm_fields.tsv"),
     }
     exports = " ".join(f"{key}={value}" for key, value in environment.items())
     out = subprocess.run(
@@ -264,7 +342,7 @@ def test_a_second_realm_on_a_known_venue_needs_no_prose(tmp_path: Path) -> None:
         [
             "bash",
             "-c",
-            f"set -euo pipefail; export LM_REALM_TABLE={root}/deploy/realms.tsv "
+            f"set -euo pipefail; export LM_REALM_FIELDS={root}/deploy/realm_fields.tsv "
             f"LM_FLEET_MANIFEST={root}/deploy/fleet_manifest.tsv; "
             f". {root}/deploy/lib_sleeves.sh; {script}",
         ],
@@ -276,6 +354,34 @@ def test_a_second_realm_on_a_known_venue_needs_no_prose(tmp_path: Path) -> None:
     answered = dict(line.split("|", 1) for line in out.stdout.splitlines())
     expected = realm_fields(realm_policy.realm("spare", root))
     assert answered == expected
+
+
+def test_a_venue_with_no_credential_family_is_a_render_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shell no longer derives credential lists, so a venue that keeps no
+    family must fail where the file is written, not where it is read."""
+
+    root = _clone(tmp_path)
+    _append_realm(
+        root,
+        "binance|binance|binance_mainnet|binance_mainnet|funded|stopped|false"
+        "|true|false|false|50|180|95|213",
+    )
+    monkeypatch.setitem(
+        realm_policy.VENUE_FACTS, "binance", {"display": "Binance", "groups": (), "keeps": {}}
+    )
+    with pytest.raises(ValueError, match="declares no credential families"):
+        render_realm_files(root)
+
+
+def test_a_value_that_cannot_be_a_row_is_a_render_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _clone(tmp_path)
+    monkeypatch.setitem(realm_policy.VENUE_FACTS["bybit"], "display", "By|bit")
+    with pytest.raises(ValueError, match="cannot be a row"):
+        render_realm_files(root)
 
 
 def test_the_table_refuses_a_stopped_practice_realm(tmp_path: Path) -> None:
@@ -373,12 +479,12 @@ def test_posture_drives_the_deploy_and_the_table_names_the_realms_that_run() -> 
     assert 'result=unchanged-left-running' in body
 
 
-def test_the_remote_body_carries_the_table_and_refuses_to_run_without_it() -> None:
+def test_the_remote_body_carries_the_realm_fields_and_refuses_to_run_without_them() -> None:
     """The pre-fetch steps read realm facts before the host has this commit, so
-    the launcher ships the table and its helpers with the script."""
+    the launcher ships the generated fields and their helpers with the script."""
 
     launcher = (ROOT / "scripts" / "deploy_vps_live.sh").read_text(encoding="utf-8")
-    assert "printf 'LM_REALM_TABLE_TEXT=%q\\n'" in launcher
+    assert "printf 'LM_REALM_FIELDS_TEXT=%q\\n'" in launcher
     assert "printf 'LM_REALMS_SH=%q\\n'" in launcher
 
     remote = (ROOT / "scripts" / "vps" / "deploy_remote.sh").read_text(encoding="utf-8")
@@ -390,10 +496,10 @@ def test_the_remote_body_carries_the_table_and_refuses_to_run_without_it() -> No
     before_fetch = deploy_body[: deploy_body.index("fetch_exact_commit")]
     assert "pin_funded_runtimes" in before_fetch
     assert "retain_native_checkpoint_configs" in before_fetch
-    assert 'if [ -f "$REPO_DIR/deploy/realms.tsv" ]; then' in deploy_body
-    assert "unset LM_REALM_TABLE_TEXT" in deploy_body
+    assert 'if [ -f "$REPO_DIR/deploy/realm_fields.tsv" ]; then' in deploy_body
+    assert "unset LM_REALM_FIELDS_TEXT" in deploy_body
 
-    both = ("LM_REALM_TABLE_TEXT", "LM_REALMS_SH")
+    both = ("LM_REALM_FIELDS_TEXT", "LM_REALMS_SH")
     for missing in both:
         script = "\n".join(
             [

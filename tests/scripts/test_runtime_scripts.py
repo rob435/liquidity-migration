@@ -30,9 +30,9 @@ def _bash_ok(script: str) -> None:
     subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True, check=True)
 
 
-#: The realm table's helpers, as the shipped remote body loads them.
+#: The realm facts' helpers, as the shipped remote body loads them.
 _REALM_PREAMBLE = "\n".join([
-    f'LM_REALM_TABLE="{ROOT}/deploy/realms.tsv"',
+    f'LM_REALM_FIELDS="{ROOT}/deploy/realm_fields.tsv"',
     f'. "{ROOT}/deploy/lib_realms.sh"',
     'PRACTICE_REALM="$(lm_practice_realm)"',
     "DIALS_REALM=mainnet",
@@ -412,6 +412,7 @@ def test_a_realm_whose_inputs_did_not_change_is_left_running() -> None:
     # The engine source tree, not the binary: the binary embeds the commit.
     assert 'rev-parse "$commit:engine"' in fingerprint
     assert '"$commit:deploy/realms.tsv"' in fingerprint
+    assert '"$commit:deploy/realm_fields.tsv"' in fingerprint
     assert 'worker_config_repo' in fingerprint
     assert 'lm_realm_field "$realm" engine_config' in fingerprint
     unchanged = _function_body(remote, "realm_unchanged")

@@ -43,11 +43,11 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-# Every name comes from deploy/realms.tsv. ENGINE_REALM is the venue realm the
-# engine stamps into its heartbeat and its identity contract, which is not
+# Every name comes from deploy/realm_fields.tsv. ENGINE_REALM is the venue realm
+# the engine stamps into its heartbeat and its identity contract, which is not
 # always the fleet realm's name.
 FLATTEN_REPO_ROOT="${FLATTEN_REPO_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}"
-LM_REALM_TABLE="${LM_REALM_TABLE:-$FLATTEN_REPO_ROOT/deploy/realms.tsv}"
+LM_REALM_FIELDS="${LM_REALM_FIELDS:-$FLATTEN_REPO_ROOT/deploy/realm_fields.tsv}"
 . "$FLATTEN_REPO_ROOT/deploy/lib_realms.sh"
 lm_is_realm "$ENVIRONMENT" || {
     echo "--environment must be one of: $(lm_realms | paste -sd ' ' -), and has no default" >&2

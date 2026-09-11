@@ -250,7 +250,7 @@ def _awk_counting_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     for name in (
         "lib_sleeves.sh",
         "lib_realms.sh",
-        "realms.tsv",
+        "realm_fields.tsv",
         "fleet_manifest.tsv",
         "sleeves.env",
     ):

@@ -23,9 +23,9 @@ def function(name: str) -> str:
     return f"{name}() {{" + body.split("\n}\n", 1)[0] + "\n}\n"
 
 
-#: The realm table's helpers, as the shipped remote body loads them.
+#: The realm facts' helpers, as the shipped remote body loads them.
 REALM_PREAMBLE = "\n".join([
-    f'LM_REALM_TABLE="{ROOT}/deploy/realms.tsv"',
+    f'LM_REALM_FIELDS="{ROOT}/deploy/realm_fields.tsv"',
     f'. "{ROOT}/deploy/lib_realms.sh"',
     'PRACTICE_REALM="$(lm_practice_realm)"',
     "DIALS_REALM=mainnet",

@@ -7,19 +7,19 @@ umask 022
 
 fail() { echo "deploy failed: $*" >&2; exit 1; }
 
-# ------------------------------------------------------------- realm table
+# ------------------------------------------------------------- realm facts
 
-# The table and its helpers are shipped with this script, so every realm fact
-# below is this commit's whatever the host's checkout still holds, and the
-# steps that run before fetch_exact_commit can read them.
-[ -n "${LM_REALM_TABLE_TEXT:-}" ] || fail "deploy_vps_live.sh shipped no realm table"
+# The generated realm facts and their helpers are shipped with this script, so
+# every realm fact below is this commit's whatever the host's checkout still
+# holds, and the steps that run before fetch_exact_commit can read them.
+[ -n "${LM_REALM_FIELDS_TEXT:-}" ] || fail "deploy_vps_live.sh shipped no realm fields"
 [ -n "${LM_REALMS_SH:-}" ] || fail "deploy_vps_live.sh shipped no realm helpers"
-export LM_REALM_TABLE_TEXT
+export LM_REALM_FIELDS_TEXT
 eval "$LM_REALMS_SH"
 
 # The realm the deploy soaks on before any funded handover.
 PRACTICE_REALM="$(lm_practice_realm)"
-[ -n "$PRACTICE_REALM" ] || fail "the realm table names no practice realm"
+[ -n "$PRACTICE_REALM" ] || fail "the realm fields name no practice realm"
 # Where the operational dials live: the funded Bybit credential file, for every
 # realm's profile.
 DIALS_REALM=mainnet
@@ -706,6 +706,7 @@ realm_fingerprint() {
         git -C "$REPO_DIR" rev-parse "$commit:engine" "$commit:deploy/systemd" \
             "$commit:deploy/fleet_manifest.tsv" "$commit:deploy/lib_sleeves.sh" \
             "$commit:deploy/lib_realms.sh" "$commit:deploy/realms.tsv" \
+            "$commit:deploy/realm_fields.tsv" \
             "$commit:$(lm_realm_field "$realm" worker_config_repo)" 2>/dev/null || true
         cat "$(lm_realm_field "$realm" engine_config)" \
             "$(lm_realm_field "$realm" engine_env)" \
@@ -1420,10 +1421,10 @@ deploy_mode() {
     . "$REPO_DIR/deploy/lib_systemd_environment.sh"
     type lm_independent_units >/dev/null 2>&1 || lm_independent_units() { :; }
     # Realm facts now come from the checkout this run installs; the shipped
-    # table only had to cover the steps that ran before it existed.
-    if [ -f "$REPO_DIR/deploy/realms.tsv" ]; then
-        unset LM_REALM_TABLE_TEXT
-        LM_REALM_TABLE="$REPO_DIR/deploy/realms.tsv"
+    # text only had to cover the steps that ran before it existed.
+    if [ -f "$REPO_DIR/deploy/realm_fields.tsv" ]; then
+        unset LM_REALM_FIELDS_TEXT
+        LM_REALM_FIELDS="$REPO_DIR/deploy/realm_fields.tsv"
     fi
     ensure_runtime_identities
     install_python_environment

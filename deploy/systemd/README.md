@@ -39,9 +39,9 @@ All family names below have the `liquidity-migration-` prefix; the group is `liq
 
 | Contract | Source / value |
 | --- | --- |
-| Realms, their venues, postures and derived names | [realms.tsv](../realms.tsv), rendered by [liquidity_migration/policy/realms.py](../../liquidity_migration/policy/realms.py) |
+| Realms, their venues, postures and derived names | [realms.tsv](../realms.tsv), rendered by [liquidity_migration/policy/realms.py](../../liquidity_migration/policy/realms.py) into the units below and [realm_fields.tsv](../realm_fields.tsv) |
 | Fleet membership, lifecycle, realm, operator policy | [fleet_manifest.tsv](../fleet_manifest.tsv); the per-realm rows are generated |
-| Unit installation and manifest helpers | [lib_sleeves.sh](../lib_sleeves.sh); realm facts in [lib_realms.sh](../lib_realms.sh) |
+| Unit installation and manifest helpers | [lib_sleeves.sh](../lib_sleeves.sh); realm facts looked up from [realm_fields.tsv](../realm_fields.tsv) by [lib_realms.sh](../lib_realms.sh) |
 | Deploy launcher / remote implementation | [deploy_vps_live.sh](../../scripts/deploy_vps_live.sh) / [deploy_remote.sh](../../scripts/vps/deploy_remote.sh) |
 | Independent families | Seven: both captures, upload, backup, storage-reclaim, equity-recorder, host-liveness |
 | Capture restart | Only when its unit, capture configuration, symbol file, Python package, or runtime dependency input changes |

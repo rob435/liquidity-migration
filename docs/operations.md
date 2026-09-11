@@ -163,7 +163,7 @@ Every realm the fleet runs is declared in [`deploy/realms.tsv`](../deploy/realms
 | `long_entries`, `carry_entries`, `exodus_entries` | What `render-native-config` permits per sleeve | `true` \| `false` \| `toggles` (defers to `LONG_SLEEVE`/`CARRY_SLEEVE`) |
 | `owner_stop`, `worker_stop`, `liveness_timer_stop`, `liveness_service_stop` | The realm's four manifest stop orders; irregular because two hand-written realm extras sit between the clusters | positive integers, unique within their lifecycle phase |
 
-Everything else is derived, in `liquidity_migration/policy/realms.py` and its bash twin `lm_realm_field` in [`deploy/lib_realms.sh`](../deploy/lib_realms.sh):
+Everything else is derived once, in `liquidity_migration/policy/realms.py`, and rendered to [`deploy/realm_fields.tsv`](../deploy/realm_fields.tsv) (`realm|field|value`, one row per realm per field). `lm_realm_field` in [`deploy/lib_realms.sh`](../deploy/lib_realms.sh) looks a value up in that file and derives nothing:
 
 | Realm | Engine unit | Worker unit | Engine user | State directory | Engine env | Engine config | Credential file |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -179,15 +179,16 @@ Also derived per realm: the liveness service and timer, the signal spool `/var/l
 | `deploy/systemd/` engine, signal-worker, liveness service and liveness timer | 4 per realm |
 | `deploy/engine[.<realm>].env.template`, `deploy/signal-worker-<realm>.env.template` | 2 per realm |
 | `deploy/fleet_manifest.tsv` rows between `# BEGIN GENERATED …`/`# END GENERATED …` markers | 4 per realm, in 4 regions |
+| `deploy/realm_fields.tsv`, the shell's only source of realm facts | 60 rows per realm, one file |
 
 **Invariants**
 
 - Must never hand-edit a generated file; edit the table or the renderer and re-render.
 - `python -m liquidity_migration.policy.realms check` must exit 0; `tests/policy/test_realms.py` fails the gate otherwise.
 - Must keep the hand-written manifest rows (shared units, the mainnet `execution-study` pair, the demo `chaos-drill` pair) outside every generated region.
-- Must keep `lm_realm_field` and `realms.py` answering the same value for every field of every realm; the parity test compares them.
+- `lm_realm_field` reads only the generated `deploy/realm_fields.tsv`, so a realm or a field reaches the shell only after `python -m liquidity_migration.policy.realms render`; the parity test compares the lookup with `realms.py` for every field of every realm.
 - The practice realm must be `posture=running`: the deploy soaks on it before any funded handover.
-- A new realm on a known venue is one table row, plus its `configs/signal-worker-<realm>.json`, its `deploy/engine.<realm>.toml.template`, and the owner's credential file on the host. A new **venue** also needs its credential families and labels in `VENUE_FACTS` (`realms.py`) and in `lm_realm_field` (`lib_realms.sh`).
+- A new realm on a known venue is one table row, plus its `configs/signal-worker-<realm>.json`, its `deploy/engine.<realm>.toml.template`, and the owner's credential file on the host. A new **venue** also needs its credential families and labels in `VENUE_FACTS` (`realms.py`), nowhere else.
 - Must never read `posture` as authorization: `REAL_MONEY=true` in the realm's own credential file is still the only arming gate. The engine's own `readiness` refuses `production-blocked` and `read-only`; a `live-canary` realm runs as the owner's forward test and its boot log names the unproven capabilities.
 
 **Recipes**

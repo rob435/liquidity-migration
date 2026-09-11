@@ -11,21 +11,21 @@ LM_RUNTIME_SYSTEMD_UNIT_DIR="${LM_RUNTIME_SYSTEMD_UNIT_DIR:-/run/systemd/system}
 _LM_DEPLOY_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LM_FLEET_MANIFEST="${LM_FLEET_MANIFEST:-$_LM_DEPLOY_DIRECTORY/fleet_manifest.tsv}"
 
-# The realm table's helpers. A checkout without the file predates the table.
+# The realm facts' helpers. A checkout without the file predates them.
 if [ -f "$_LM_DEPLOY_DIRECTORY/lib_realms.sh" ]; then
-    LM_REALM_TABLE="${LM_REALM_TABLE:-$_LM_DEPLOY_DIRECTORY/realms.tsv}"
+    LM_REALM_FIELDS="${LM_REALM_FIELDS:-$_LM_DEPLOY_DIRECTORY/realm_fields.tsv}"
     . "$_LM_DEPLOY_DIRECTORY/lib_realms.sh"
 fi
 
-# The manifest's identity: its path and content, plus the realm table it is
+# The manifest's identity: its path and content, plus the realm facts it is
 # validated against. A byte that changes anywhere here changes this string, so
 # the memo below re-validates without being told to.
 _lm_fleet_manifest_identity() {
     _lfmi_manifest="$(cksum <"$LM_FLEET_MANIFEST")" || return 1
-    if [ -n "${LM_REALM_TABLE_TEXT:-}" ]; then
-        _lfmi_realms="text:$(printf '%s\n' "$LM_REALM_TABLE_TEXT" | cksum)" || return 1
-    elif [ -f "${LM_REALM_TABLE:-}" ]; then
-        _lfmi_realms="file:${LM_REALM_TABLE}:$(cksum <"$LM_REALM_TABLE")" || return 1
+    if [ -n "${LM_REALM_FIELDS_TEXT:-}" ]; then
+        _lfmi_realms="text:$(printf '%s\n' "$LM_REALM_FIELDS_TEXT" | cksum)" || return 1
+    elif [ -f "${LM_REALM_FIELDS:-}" ]; then
+        _lfmi_realms="file:${LM_REALM_FIELDS}:$(cksum <"$LM_REALM_FIELDS")" || return 1
     else
         _lfmi_realms="none"
     fi

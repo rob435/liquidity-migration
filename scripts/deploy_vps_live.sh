@@ -18,7 +18,7 @@ set -euo pipefail
 
 SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 LOCAL_REPOSITORY="$(cd -P -- "$SCRIPT_DIRECTORY/.." && pwd)"
-LM_REALM_TABLE="${LM_REALM_TABLE:-$LOCAL_REPOSITORY/deploy/realms.tsv}"
+LM_REALM_FIELDS="${LM_REALM_FIELDS:-$LOCAL_REPOSITORY/deploy/realm_fields.tsv}"
 . "$LOCAL_REPOSITORY/deploy/lib_realms.sh"
 
 # The funded stops and disarms, one pair per funded realm in the table.
@@ -124,9 +124,9 @@ fi
     printf 'BRANCH=%q\n' "$BRANCH"
     printf 'EXPECTED_COMMIT=%q\n' "$EXPECTED_COMMIT"
     printf 'GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
-    # The realm table and its helpers, so the remote body reads realm facts
+    # The realm facts and their helpers, so the remote body reads realm facts
     # before it has a checkout of this commit.
-    printf 'LM_REALM_TABLE_TEXT=%q\n' "$(cat "$LOCAL_REPOSITORY/deploy/realms.tsv")"
+    printf 'LM_REALM_FIELDS_TEXT=%q\n' "$(cat "$LOCAL_REPOSITORY/deploy/realm_fields.tsv")"
     printf 'LM_REALMS_SH=%q\n' "$(cat "$LOCAL_REPOSITORY/deploy/lib_realms.sh")"
     if [ "$MODE" = deploy ] || [ "$MODE" = rollback ]; then
         # The verifier must survive a rollback to a checkout that predates it.

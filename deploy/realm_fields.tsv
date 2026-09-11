@@ -1,0 +1,242 @@
+# realm-fields-v1
+# realm|field|value
+demo|realm|demo
+demo|venue|bybit
+demo|engine_venue|bybit_demo
+demo|engine_realm|demo
+demo|kind|practice
+demo|posture|running
+demo|legacy_names|true
+demo|long_entries|false
+demo|carry_entries|false
+demo|exodus_entries|false
+demo|owner_stop|10
+demo|worker_stop|140
+demo|liveness_timer_stop|80
+demo|liveness_service_stop|200
+demo|funded|false
+demo|activation|always
+demo|operator|direct
+demo|engine_unit|liquidity-migration-engine.service
+demo|worker_unit|liquidity-migration-signal-worker-demo.service
+demo|liveness_service|liquidity-migration-demo-liveness.service
+demo|liveness_timer|liquidity-migration-demo-liveness.timer
+demo|engine_user|liquidity-engine-demo
+demo|engine_state_dir|/var/lib/liquidity-migration-engine
+demo|engine_heartbeat|/var/lib/liquidity-migration-engine/heartbeat.json
+demo|engine_wal|/var/lib/liquidity-migration-engine/engine.wal
+demo|engine_env|/etc/liquidity-migration/engine.env
+demo|engine_config|/etc/liquidity-migration/engine.toml
+demo|engine_env_template|deploy/engine.env.template
+demo|engine_toml_template|deploy/engine.demo.toml.template
+demo|worker_state_dir|/var/lib/liquidity-migration-signal-worker-demo
+demo|worker_heartbeat|/var/lib/liquidity-migration-signal-worker-demo/heartbeat.json
+demo|worker_env|/etc/liquidity-migration/signal-worker-demo.env
+demo|worker_source_env|/etc/liquidity-migration/signal-worker-demo-source.env
+demo|worker_source_dir|/etc/liquidity-migration/signal-worker-demo-source
+demo|worker_profile|/etc/liquidity-migration/signal-worker-demo-source/operational-profile.json
+demo|worker_env_template|deploy/signal-worker-demo.env.template
+demo|worker_config|/opt/liquidity-migration/configs/signal-worker.demo.json
+demo|worker_config_repo|configs/signal-worker.demo.json
+demo|spool_dir|/var/lib/liquidity-migration/signals/demo
+demo|control_dir|/var/lib/liquidity-migration/controls/demo
+demo|liveness_state_dir|/var/lib/liquidity-migration/liveness-demo
+demo|liveness_state_file|/var/lib/liquidity-migration/liveness-demo/state.json
+demo|credential_env|/etc/liquidity-migration/bybit-demo.env
+demo|telegram_env|/etc/liquidity-migration/telegram-demo.env
+demo|long_root|/opt/liquidity-migration/data/bybit-long-demo-event
+demo|carry_root|/opt/liquidity-migration/data/bybit-carry-demo-event
+demo|exodus_root|/opt/liquidity-migration/data/bybit-exodus-demo-event
+demo|preflight_command|preflight-demo
+demo|inventory_credential_set|demo
+demo|venue_display|Bybit
+demo|liveness_label|
+demo|telegram_label|Real-money
+demo|credential_vars|BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET
+demo|takeover_vars|BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET
+demo|engine_unset|BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID MEXC_REAL_API_KEY MEXC_REAL_API_SECRET HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+demo|worker_unset|BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID MEXC_REAL_API_KEY MEXC_REAL_API_SECRET HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+demo|liveness_unset|BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY
+demo|control_unset|BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID MEXC_REAL_API_KEY MEXC_REAL_API_SECRET HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+demo|attestor_env|
+demo|control_unset_attestor|
+mainnet|realm|mainnet
+mainnet|venue|bybit
+mainnet|engine_venue|bybit_mainnet
+mainnet|engine_realm|mainnet
+mainnet|kind|funded
+mainnet|posture|stopped
+mainnet|legacy_names|false
+mainnet|long_entries|true
+mainnet|carry_entries|true
+mainnet|exodus_entries|true
+mainnet|owner_stop|20
+mainnet|worker_stop|150
+mainnet|liveness_timer_stop|90
+mainnet|liveness_service_stop|210
+mainnet|funded|true
+mainnet|activation|mainnet
+mainnet|operator|funded
+mainnet|engine_unit|liquidity-migration-engine-mainnet.service
+mainnet|worker_unit|liquidity-migration-signal-worker-mainnet.service
+mainnet|liveness_service|liquidity-migration-mainnet-liveness.service
+mainnet|liveness_timer|liquidity-migration-mainnet-liveness.timer
+mainnet|engine_user|liquidity-engine-mainnet
+mainnet|engine_state_dir|/var/lib/liquidity-migration-engine-mainnet
+mainnet|engine_heartbeat|/var/lib/liquidity-migration-engine-mainnet/heartbeat.json
+mainnet|engine_wal|/var/lib/liquidity-migration-engine-mainnet/engine.wal
+mainnet|engine_env|/etc/liquidity-migration/engine-mainnet.env
+mainnet|engine_config|/etc/liquidity-migration/engine-mainnet.toml
+mainnet|engine_env_template|deploy/engine.mainnet.env.template
+mainnet|engine_toml_template|deploy/engine.mainnet.toml.template
+mainnet|worker_state_dir|/var/lib/liquidity-migration-signal-worker-mainnet
+mainnet|worker_heartbeat|/var/lib/liquidity-migration-signal-worker-mainnet/heartbeat.json
+mainnet|worker_env|/etc/liquidity-migration/signal-worker-mainnet.env
+mainnet|worker_source_env|/etc/liquidity-migration/signal-worker-mainnet-source.env
+mainnet|worker_source_dir|/etc/liquidity-migration/signal-worker-mainnet-source
+mainnet|worker_profile|/etc/liquidity-migration/signal-worker-mainnet-source/operational-profile.json
+mainnet|worker_env_template|deploy/signal-worker-mainnet.env.template
+mainnet|worker_config|/opt/liquidity-migration/configs/signal-worker.mainnet.json
+mainnet|worker_config_repo|configs/signal-worker.mainnet.json
+mainnet|spool_dir|/var/lib/liquidity-migration/signals/mainnet
+mainnet|control_dir|/var/lib/liquidity-migration/controls/mainnet
+mainnet|liveness_state_dir|/var/lib/liquidity-migration/liveness-mainnet
+mainnet|liveness_state_file|/var/lib/liquidity-migration/liveness-mainnet/state.json
+mainnet|credential_env|/etc/liquidity-migration/bybit-mainnet.env
+mainnet|telegram_env|/etc/liquidity-migration/telegram-mainnet.env
+mainnet|long_root|/opt/liquidity-migration/data/bybit-long-mainnet-event
+mainnet|carry_root|/opt/liquidity-migration/data/bybit-carry-mainnet-event
+mainnet|exodus_root|/opt/liquidity-migration/data/bybit-exodus-mainnet-event
+mainnet|preflight_command|preflight
+mainnet|inventory_credential_set|execution
+mainnet|venue_display|Bybit
+mainnet|liveness_label|MAINNET
+mainnet|telegram_label|Real-money
+mainnet|credential_vars|BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID
+mainnet|takeover_vars|BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY BYBIT_INVENTORY_CREDENTIAL_SET
+mainnet|engine_unset|BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP MEXC_REAL_API_KEY MEXC_REAL_API_SECRET HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+mainnet|worker_unset|BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID MEXC_REAL_API_KEY MEXC_REAL_API_SECRET HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+mainnet|liveness_unset|BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID REAL_MONEY
+mainnet|control_unset|BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP MEXC_REAL_API_KEY MEXC_REAL_API_SECRET HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+mainnet|attestor_env|/etc/liquidity-migration/bybit-mainnet-attestor.env
+mainnet|control_unset_attestor|BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP MEXC_REAL_API_KEY MEXC_REAL_API_SECRET HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+mexc|realm|mexc
+mexc|venue|mexc
+mexc|engine_venue|mexc_mainnet
+mexc|engine_realm|mexc_mainnet
+mexc|kind|funded
+mexc|posture|running
+mexc|legacy_names|false
+mexc|long_entries|true
+mexc|carry_entries|false
+mexc|exodus_entries|false
+mexc|owner_stop|30
+mexc|worker_stop|160
+mexc|liveness_timer_stop|91
+mexc|liveness_service_stop|211
+mexc|funded|true
+mexc|activation|mexc
+mexc|operator|funded
+mexc|engine_unit|liquidity-migration-engine-mexc.service
+mexc|worker_unit|liquidity-migration-signal-worker-mexc.service
+mexc|liveness_service|liquidity-migration-mexc-liveness.service
+mexc|liveness_timer|liquidity-migration-mexc-liveness.timer
+mexc|engine_user|liquidity-engine-mexc
+mexc|engine_state_dir|/var/lib/liquidity-migration-engine-mexc
+mexc|engine_heartbeat|/var/lib/liquidity-migration-engine-mexc/heartbeat.json
+mexc|engine_wal|/var/lib/liquidity-migration-engine-mexc/engine.wal
+mexc|engine_env|/etc/liquidity-migration/engine-mexc.env
+mexc|engine_config|/etc/liquidity-migration/engine-mexc.toml
+mexc|engine_env_template|deploy/engine.mexc.env.template
+mexc|engine_toml_template|deploy/engine.mexc.toml.template
+mexc|worker_state_dir|/var/lib/liquidity-migration-signal-worker-mexc
+mexc|worker_heartbeat|/var/lib/liquidity-migration-signal-worker-mexc/heartbeat.json
+mexc|worker_env|/etc/liquidity-migration/signal-worker-mexc.env
+mexc|worker_source_env|/etc/liquidity-migration/signal-worker-mexc-source.env
+mexc|worker_source_dir|/etc/liquidity-migration/signal-worker-mexc-source
+mexc|worker_profile|/etc/liquidity-migration/signal-worker-mexc-source/operational-profile.json
+mexc|worker_env_template|deploy/signal-worker-mexc.env.template
+mexc|worker_config|/opt/liquidity-migration/configs/signal-worker.mexc.json
+mexc|worker_config_repo|configs/signal-worker.mexc.json
+mexc|spool_dir|/var/lib/liquidity-migration/signals/mexc
+mexc|control_dir|/var/lib/liquidity-migration/controls/mexc
+mexc|liveness_state_dir|/var/lib/liquidity-migration/liveness-mexc
+mexc|liveness_state_file|/var/lib/liquidity-migration/liveness-mexc/state.json
+mexc|credential_env|/etc/liquidity-migration/mexc-mainnet.env
+mexc|telegram_env|/etc/liquidity-migration/telegram-mexc.env
+mexc|long_root|/opt/liquidity-migration/data/bybit-long-mexc-event
+mexc|carry_root|/opt/liquidity-migration/data/bybit-carry-mexc-event
+mexc|exodus_root|/opt/liquidity-migration/data/bybit-exodus-mexc-event
+mexc|preflight_command|preflight-mexc
+mexc|inventory_credential_set|execution
+mexc|venue_display|MEXC
+mexc|liveness_label|MEXC
+mexc|telegram_label|MEXC
+mexc|credential_vars|MEXC_REAL_API_KEY MEXC_REAL_API_SECRET
+mexc|takeover_vars|MEXC_REAL_API_KEY MEXC_REAL_API_SECRET REAL_MONEY
+mexc|engine_unset|BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+mexc|worker_unset|BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID MEXC_REAL_API_KEY MEXC_REAL_API_SECRET HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+mexc|liveness_unset|BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID MEXC_REAL_API_KEY MEXC_REAL_API_SECRET HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY
+mexc|control_unset|BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+mexc|attestor_env|
+mexc|control_unset_attestor|
+hyperliquid|realm|hyperliquid
+hyperliquid|venue|hyperliquid
+hyperliquid|engine_venue|hyperliquid_mainnet
+hyperliquid|engine_realm|hyperliquid_mainnet
+hyperliquid|kind|funded
+hyperliquid|posture|running
+hyperliquid|legacy_names|false
+hyperliquid|long_entries|true
+hyperliquid|carry_entries|false
+hyperliquid|exodus_entries|false
+hyperliquid|owner_stop|40
+hyperliquid|worker_stop|170
+hyperliquid|liveness_timer_stop|93
+hyperliquid|liveness_service_stop|212
+hyperliquid|funded|true
+hyperliquid|activation|hyperliquid
+hyperliquid|operator|funded
+hyperliquid|engine_unit|liquidity-migration-engine-hyperliquid.service
+hyperliquid|worker_unit|liquidity-migration-signal-worker-hyperliquid.service
+hyperliquid|liveness_service|liquidity-migration-hyperliquid-liveness.service
+hyperliquid|liveness_timer|liquidity-migration-hyperliquid-liveness.timer
+hyperliquid|engine_user|liquidity-engine-hyperliquid
+hyperliquid|engine_state_dir|/var/lib/liquidity-migration-engine-hyperliquid
+hyperliquid|engine_heartbeat|/var/lib/liquidity-migration-engine-hyperliquid/heartbeat.json
+hyperliquid|engine_wal|/var/lib/liquidity-migration-engine-hyperliquid/engine.wal
+hyperliquid|engine_env|/etc/liquidity-migration/engine-hyperliquid.env
+hyperliquid|engine_config|/etc/liquidity-migration/engine-hyperliquid.toml
+hyperliquid|engine_env_template|deploy/engine.hyperliquid.env.template
+hyperliquid|engine_toml_template|deploy/engine.hyperliquid.toml.template
+hyperliquid|worker_state_dir|/var/lib/liquidity-migration-signal-worker-hyperliquid
+hyperliquid|worker_heartbeat|/var/lib/liquidity-migration-signal-worker-hyperliquid/heartbeat.json
+hyperliquid|worker_env|/etc/liquidity-migration/signal-worker-hyperliquid.env
+hyperliquid|worker_source_env|/etc/liquidity-migration/signal-worker-hyperliquid-source.env
+hyperliquid|worker_source_dir|/etc/liquidity-migration/signal-worker-hyperliquid-source
+hyperliquid|worker_profile|/etc/liquidity-migration/signal-worker-hyperliquid-source/operational-profile.json
+hyperliquid|worker_env_template|deploy/signal-worker-hyperliquid.env.template
+hyperliquid|worker_config|/opt/liquidity-migration/configs/signal-worker.hyperliquid.json
+hyperliquid|worker_config_repo|configs/signal-worker.hyperliquid.json
+hyperliquid|spool_dir|/var/lib/liquidity-migration/signals/hyperliquid
+hyperliquid|control_dir|/var/lib/liquidity-migration/controls/hyperliquid
+hyperliquid|liveness_state_dir|/var/lib/liquidity-migration/liveness-hyperliquid
+hyperliquid|liveness_state_file|/var/lib/liquidity-migration/liveness-hyperliquid/state.json
+hyperliquid|credential_env|/etc/liquidity-migration/hyperliquid-mainnet.env
+hyperliquid|telegram_env|/etc/liquidity-migration/telegram-hyperliquid.env
+hyperliquid|long_root|/opt/liquidity-migration/data/bybit-long-hyperliquid-event
+hyperliquid|carry_root|/opt/liquidity-migration/data/bybit-carry-hyperliquid-event
+hyperliquid|exodus_root|/opt/liquidity-migration/data/bybit-exodus-hyperliquid-event
+hyperliquid|preflight_command|preflight-hyperliquid
+hyperliquid|inventory_credential_set|execution
+hyperliquid|venue_display|Hyperliquid
+hyperliquid|liveness_label|Hyperliquid
+hyperliquid|telegram_label|Hyperliquid
+hyperliquid|credential_vars|HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY
+hyperliquid|takeover_vars|HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY REAL_MONEY
+hyperliquid|engine_unset|BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID MEXC_REAL_API_KEY MEXC_REAL_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+hyperliquid|worker_unset|BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID MEXC_REAL_API_KEY MEXC_REAL_API_SECRET HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+hyperliquid|liveness_unset|BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID MEXC_REAL_API_KEY MEXC_REAL_API_SECRET HYPERLIQUID_REAL_ACCOUNT_ADDRESS HYPERLIQUID_REAL_API_WALLET_KEY HYPERLIQUID_TESTNET_ACCOUNT_ADDRESS HYPERLIQUID_TESTNET_API_WALLET_KEY REAL_MONEY
+hyperliquid|control_unset|BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET BYBIT_REAL_API_KEY BYBIT_REAL_API_SECRET BYBIT_REAL_API_KEY_IP BYBIT_REAL_API_KEY_BACKUP_IP BYBIT_ATTEST_API_KEY BYBIT_ATTEST_API_SECRET BYBIT_ATTEST_API_KEY_IP BYBIT_ENGINE_EXCLUSIVE_ACCOUNT_USER_ID MEXC_REAL_API_KEY MEXC_REAL_API_SECRET REAL_MONEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID TELEGRAM_ALERT_CHAT_ID
+hyperliquid|attestor_env|
+hyperliquid|control_unset_attestor|
