@@ -43,6 +43,26 @@ def _book(symbol: str, received_ns: int, depth: int, bids: list[list[str]], asks
     )
 
 
+def _delta(symbol: str, received_ns: int, depth: int, bids: list[list[str]], asks: list[list[str]], *,
+           previous_update_id: int, sequence_gap: bool = False) -> Any:
+    return _typed(
+        book_row(
+            venue="bybit",
+            symbol=symbol,
+            snapshot=False,
+            depth=depth,
+            local_receive_ts_ns=received_ns,
+            exchange_system_ts_ns=received_ns,
+            exchange_engine_ts_ns=received_ns,
+            bids=bids,
+            asks=asks,
+            update_id=received_ns,
+            previous_update_id=previous_update_id,
+            sequence_gap=sequence_gap,
+        )
+    )
+
+
 def _trade(symbol: str, received_ns: int, price: float, qty: float, side: str) -> Any:
     return _typed(
         trade_row(
@@ -267,3 +287,36 @@ def test_no_rows_make_an_empty_frame_with_the_full_schema() -> None:
     frame = build_bars([], interval_seconds=1.0)
     assert frame.height == 0
     assert dict(zip(frame.columns, frame.dtypes)) == SCHEMA
+
+
+def test_a_delta_moves_the_top_only_as_far_as_the_rebuilt_book_does() -> None:
+    snapshot = _book("BTCUSDT", T + 1 * MS, 50, [["100", "2"], ["99", "5"]], [["102", "3"], ["103", "1"]])
+    # A size change on the second-best bid is not a new best bid.
+    deeper = _delta("BTCUSDT", T + 2 * MS, 50, [["99", "7"]], [], previous_update_id=T + 1 * MS)
+    bar = build_bars([snapshot, deeper], interval_seconds=1.0).to_dicts()[0]
+    assert bar["best_bid"] == 100.0 and bar["best_ask"] == 102.0
+    assert bar["book_updates"] == 2
+
+    # Deleting the best bid uncovers the level behind it.
+    deleted = _delta("BTCUSDT", T + 3 * MS, 50, [["100", "0"]], [], previous_update_id=T + 2 * MS)
+    bar = build_bars([snapshot, deeper, deleted], interval_seconds=1.0).to_dicts()[0]
+    assert bar["best_bid"] == 99.0 and bar["best_ask"] == 102.0
+    assert bar["book_updates"] == 3
+
+    # A gap leaves the book invalid, so the row does not move the reported top.
+    gapped = _delta("BTCUSDT", T + 4 * MS, 50, [["90", "1"]], [["91", "1"]],
+                    previous_update_id=T + 3 * MS, sequence_gap=True)
+    bar = build_bars([snapshot, deeper, deleted, gapped], interval_seconds=1.0).to_dicts()[0]
+    assert bar["best_bid"] == 99.0 and bar["best_ask"] == 102.0
+    assert bar["book_updates"] == 4
+
+
+def test_the_book_carries_across_a_bar_boundary() -> None:
+    rows = [
+        _book("BTCUSDT", T + 1 * MS, 1, [["100", "2"], ["99", "5"]], [["102", "3"]]),
+        _delta("BTCUSDT", T + SECOND + 1 * MS, 1, [["100", "0"]], [], previous_update_id=T + 1 * MS),
+    ]
+    first, second = build_bars(rows, interval_seconds=1.0).to_dicts()
+    assert first["best_bid"] == 100.0
+    # The delta lands in the next bar and still knows what the snapshot left behind it.
+    assert second["best_bid"] == 99.0 and second["best_ask"] == 102.0

@@ -2,14 +2,20 @@
 
 One bar per symbol per interval, cut on `local_receive_ts_ns` — the recorder's
 own clock, so a bar covers what a reader on that host could have known inside
-it. `iter_rows` already hands rows over in that order, so this makes one pass
-and holds only the open bar of each symbol.
+it. `iter_rows` already hands rows over in that order, so this makes one pass,
+holding the open bar and the rebuilt book of each symbol and collecting the
+finished bars until the frame is built.
 
 Price and volume columns come from trades and are null in a bar with no trade.
-The book columns are the last top of book seen inside the bar, preferring the
-depth-1 feed when the tape carries one. Ticker columns are the last value the
-venue pushed inside the bar and are never carried across a bar boundary, so a
-null there means the venue said nothing, not that the value was zero.
+Book rows go through `market_tape.book.Book`, one book per (symbol, depth) and
+kept across bar boundaries: the top of book is the whole book's best level, so
+a delta on a deeper level does not become the best, a delete of the best level
+uncovers the one behind it, and a row that leaves the book invalid does not
+move the bar's top at all. The depth-1 feed owns the top where the tape carries
+one, a deeper feed stands in otherwise, and `book_updates` counts every book
+row either way. Ticker columns are the last value the venue pushed inside the
+bar and are never carried across a bar boundary, so a null there means the
+venue said nothing, not that the value was zero.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ from typing import Any, Iterable
 
 import polars as pl
 
+from market_tape.book import Book
 from market_tape.schema import BookRow, LiquidationRow, TickerRow, TradeRow
 
 SCHEMA: dict[str, Any] = {
@@ -137,6 +144,7 @@ def build_bars(rows: Iterable[Any], *, interval_seconds: float) -> pl.DataFrame:
     if step <= 0:
         raise ValueError("interval_seconds must be positive")
     open_bars: dict[str, _Bar] = {}
+    books: dict[tuple[str, int], Book] = {}
     finished: list[dict[str, Any]] = []
     for row in rows:
         start_ns = (row.local_receive_ts_ns // step) * step
@@ -146,12 +154,12 @@ def build_bars(rows: Iterable[Any], *, interval_seconds: float) -> pl.DataFrame:
                 finished.append(bar.row())
             bar = _Bar(row.venue, row.symbol, start_ns)
             open_bars[row.symbol] = bar
-        _take(bar, row)
+        _take(bar, row, books)
     finished.extend(bar.row() for bar in open_bars.values())
     return pl.DataFrame(finished, schema=SCHEMA).sort(["symbol", "bucket_start_ns"])
 
 
-def _take(bar: _Bar, row: Any) -> None:
+def _take(bar: _Bar, row: Any, books: dict[tuple[str, int], Book]) -> None:
     if isinstance(row, TradeRow):
         bar.trades += 1
         bar.volume += row.qty
@@ -171,8 +179,15 @@ def _take(bar: _Bar, row: Any) -> None:
         return
     if isinstance(row, BookRow):
         bar.book_updates += 1
-        bid = max((price for price, size in row.bids if size > 0), default=None)
-        ask = min((price for price, size in row.asks if size > 0), default=None)
+        key = (row.symbol, row.depth)
+        book = books.get(key)
+        if book is None:
+            book = books[key] = Book()
+        if not book.apply(row):
+            return
+        best_bid, best_ask = book.best_bid, book.best_ask
+        bid = best_bid[0] if best_bid is not None else None
+        ask = best_ask[0] if best_ask is not None else None
         if row.depth == 1:
             if bid is not None:
                 bar.top_bid = bid

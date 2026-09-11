@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import tarfile
 from pathlib import Path
 
 import pytest
 
+from market_tape import load
 from market_tape.load import (
     ArchiveDir,
     HostRoot,
@@ -57,6 +59,35 @@ def _write_segment(root: Path, relative: str, rows: list[dict]) -> None:
     raw.write_bytes(b"".join(json.dumps(row, sort_keys=True).encode() + b"\n" for row in rows))
     zstd_compress(raw, path)
     raw.unlink()
+
+
+def _fake_rclone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Put the stand-in rclone on PATH; returns the log of calls it writes."""
+    binary = tmp_path / "bin" / "rclone"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text(FAKE_RCLONE, encoding="utf-8")
+    binary.chmod(0o755)
+    log = tmp_path / "rclone.log"
+    monkeypatch.setenv("PATH", f"{binary.parent}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_REMOTE_DIR", str(tmp_path / "remote"))
+    monkeypatch.setenv("FAKE_RCLONE_LOG", str(log))
+    monkeypatch.delenv("RCLONE_BIN", raising=False)
+    return log
+
+
+def _calls(log: Path, verb: str) -> int:
+    if not log.is_file():
+        return 0
+    return sum(1 for line in log.read_text(encoding="utf-8").splitlines() if line.startswith(verb))
+
+
+def _hour_archive(tar_path: Path, build_dir: Path, rows: list[dict]) -> None:
+    """One hour archive holding a single BTCUSDT segment."""
+    name = "BTCUSDT/segment-000000.jsonl.zst"
+    _write_segment(build_dir, name, rows)
+    tar_path.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(tar_path, "w") as handle:
+        handle.add(build_dir / name, arcname=name)
 
 
 def _bybit_book(symbol: str, received_ns: int, update_id: int) -> dict:
@@ -271,28 +302,87 @@ def test_open_source_detects_what_it_was_handed(tmp_path: Path) -> None:
 
 
 def test_rclone_remote_caches_the_hour_and_reads_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    binary = tmp_path / "bin" / "rclone"
-    binary.parent.mkdir()
-    binary.write_text(FAKE_RCLONE, encoding="utf-8")
-    binary.chmod(0o755)
+    log = _fake_rclone(tmp_path, monkeypatch)
     remote_dir = tmp_path / "remote" / "tapes" / "bybit-linear" / "2026" / "08" / "30"
     remote_dir.mkdir(parents=True)
     archive = DRIVE / "2026" / "08" / "30" / "2026-08-30T00Z.tar"
     (remote_dir / archive.name).write_bytes(archive.read_bytes())
-    log = tmp_path / "rclone.log"
-    monkeypatch.setenv("PATH", f"{binary.parent}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setenv("FAKE_REMOTE_DIR", str(tmp_path / "remote"))
-    monkeypatch.setenv("FAKE_RCLONE_LOG", str(log))
-    monkeypatch.delenv("RCLONE_BIN", raising=False)
 
     cache = tmp_path / "cache"
     source = RcloneRemote("gdrive:tapes/bybit-linear", cache)
     assert source.venue == "bybit"
     assert source.hours() == [HOUR]
     assert len(list(iter_rows(source, [HOUR], kinds=["public_trade"]))) == 35
-    assert (cache / "2026" / "08" / "30" / archive.name).is_file()
+    # The remote spec owns a directory under the cache, and the hour keeps its own path inside it.
+    assert source.root.parent == cache
+    assert (source.root / "2026" / "08" / "30" / archive.name).is_file()
 
     # A second read serves the cached tar and never downloads it again.
     assert len(list(iter_rows(source, [HOUR], kinds=["public_trade"]))) == 35
-    calls = log.read_text(encoding="utf-8").splitlines()
-    assert sum(1 for line in calls if line.startswith("copyto")) == 1
+    assert _calls(log, "copyto") == 1
+
+
+def test_two_remotes_that_hold_the_same_hour_do_not_share_a_cached_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = _fake_rclone(tmp_path, monkeypatch)
+    hour_path = Path("2026") / "08" / "30" / "2026-08-30T00Z.tar"
+    remote = tmp_path / "remote" / "tapes"
+    _hour_archive(remote / "bybit-linear" / hour_path, tmp_path / "build-bybit",
+                  [_bybit_trade("BTCUSDT", 1_000, 100.0)])
+    _hour_archive(remote / "binance-usdm" / hour_path, tmp_path / "build-binance",
+                  [_bybit_trade("BTCUSDT", 2_000, 200.0)])
+
+    cache = tmp_path / "cache"
+    bybit = RcloneRemote("gdrive:tapes/bybit-linear", cache)
+    binance = RcloneRemote("gdrive:tapes/binance-usdm", cache)
+    assert [row.price for row in iter_rows(bybit, [HOUR])] == [100.0]
+    assert [row.price for row in iter_rows(binance, [HOUR])] == [200.0]
+    assert _calls(log, "copyto") == 2
+    assert bybit.root != binance.root
+
+
+def test_the_remote_listing_is_read_once_until_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    log = _fake_rclone(tmp_path, monkeypatch)
+    _hour_archive(
+        tmp_path / "remote" / "tapes" / "bybit-linear" / "2026" / "08" / "30" / "2026-08-30T00Z.tar",
+        tmp_path / "build", [_bybit_trade("BTCUSDT", 1_000, 100.0)],
+    )
+    source = RcloneRemote("gdrive:tapes/bybit-linear", tmp_path / "cache")
+    for _ in range(25):
+        assert len(source.hour_members(HOUR)) == 1
+    assert _calls(log, "lsjson") == 1
+    source.refresh()
+    assert source.hours() == [HOUR]
+    assert _calls(log, "lsjson") == 2
+
+
+def test_a_symbols_segments_are_read_one_after_another(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "tape"
+    _write_segment(root, "2026-09-01/07/AAAUSDT/segment-000000.jsonl.zst",
+                   [_bybit_trade("AAAUSDT", 100, 1.0), _bybit_trade("AAAUSDT", 300, 3.0)])
+    _write_segment(root, "2026-09-01/07/AAAUSDT/segment-000001.jsonl.zst",
+                   [_bybit_trade("AAAUSDT", 400, 4.0)])
+    _write_segment(root, "2026-09-01/07/BBBUSDT/segment-000000.jsonl.zst",
+                   [_bybit_trade("BBBUSDT", 100, 10.0), _bybit_trade("BBBUSDT", 500, 50.0)])
+
+    live = {"open": 0, "peak": 0, "total": 0}
+    real = load._zstd_lines
+
+    def counted(argv, source=None, owns=None):  # type: ignore[no-untyped-def]
+        live["total"] += 1
+        live["open"] += 1
+        live["peak"] = max(live["peak"], live["open"])
+        try:
+            yield from real(argv, source, owns)
+        finally:
+            live["open"] -= 1
+
+    monkeypatch.setattr(load, "_zstd_lines", counted)
+    rows = list(iter_rows(HostRoot(root), ["2026-09-01T07"]))
+    assert [(row.symbol, row.local_receive_ts_ns) for row in rows] == [
+        ("AAAUSDT", 100), ("BBBUSDT", 100), ("AAAUSDT", 300), ("AAAUSDT", 400), ("BBBUSDT", 500)
+    ]
+    assert live["total"] == 3  # every segment is read
+    assert live["peak"] == 2  # one open file per symbol, not per segment
+    assert live["open"] == 0

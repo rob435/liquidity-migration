@@ -11,8 +11,8 @@ RcloneRemote  the Drive itself, through a local cache of those tars
 
 `iter_rows` merges an hour's symbols into one stream ordered by
 `local_receive_ts_ns`, which is the order the recorder saw them. Each segment
-is already in that order, so the merge is a heap over open files and never
-holds an hour in memory.
+is already in that order and a symbol's segments run in sequence, so the merge
+is a heap over one open file per symbol and never holds an hour in memory.
 
 Decompression runs through the `zstd` command line tool; there is no zstd
 Python module on the recording host.
@@ -20,6 +20,7 @@ Python module on the recording host.
 
 from __future__ import annotations
 
+import hashlib
 import heapq
 import json
 import os
@@ -28,7 +29,7 @@ import shutil
 import subprocess
 import tarfile
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Generator, IO, Iterable, Iterator, Mapping, Protocol, Sequence
@@ -170,10 +171,12 @@ class TarMember:
     path: str
     archive: Path
     name: str
+    #: The entry as the archive listed it; reading it needs no second scan of the tar.
+    info: tarfile.TarInfo | None = field(default=None, compare=False, repr=False)
 
     def open(self) -> Generator[bytes, None, None]:
         handle = tarfile.open(self.archive, "r")
-        source = handle.extractfile(self.name)
+        source = handle.extractfile(self.info if self.info is not None else self.name)
         if source is None:
             handle.close()
             raise RuntimeError(f"{self.archive}: {self.name} holds no data")
@@ -294,39 +297,60 @@ class ArchiveDir:
 def _tar_members(archive: Path) -> list[Member]:
     members: list[Member] = []
     with tarfile.open(archive, "r") as handle:
-        for name in handle.getnames():
+        for info in handle.getmembers():
+            name = info.name
             if not name.endswith(".zst"):
                 continue
-            members.append(TarMember(_symbol_of(name), name, archive, name))
+            members.append(TarMember(_symbol_of(name), name, archive, name, info))
     members.sort(key=lambda member: member.path)
     return members
 
 
+def _cache_key(remote_path: str) -> str:
+    """One cache directory per remote spec: the spec made safe for a filename, kept distinct by its digest."""
+
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", remote_path)[:64]
+    return f"{safe}-{hashlib.sha256(remote_path.encode()).hexdigest()[:8]}"
+
+
 class RcloneRemote:
-    """The Drive, read through a local cache of whole hour archives."""
+    """The Drive, read through a local cache of whole hour archives.
+
+    Each remote spec owns a directory under the cache, so two remotes that
+    hold the same hour never read each other's tar. Files sitting directly in
+    the cache root belong to no remote and are never read.
+    """
 
     def __init__(self, remote_path: str, cache_dir: Path | None = None) -> None:
         self.remote_path = remote_path.rstrip("/")
         self.cache = Path(cache_dir) if cache_dir is not None else DEFAULT_CACHE
+        self.root = self.cache / _cache_key(self.remote_path)
         self.binary = os.environ.get("RCLONE_BIN") or "rclone"
         self.skipped_rows = 0
         self.venue = _venue_from_name(self.remote_path.rsplit("/", 1)[-1])
-        self._local = ArchiveDir(self.cache, self.venue)
+        self._listing: dict[str, str] | None = None
 
     def hours(self) -> list[str]:
         return sorted(self._remote_archives())
+
+    def refresh(self) -> None:
+        """Forget the remote listing; the next call asks the remote what it holds."""
+
+        self._listing = None
 
     def hour_members(self, hour: str) -> list[Member]:
         remote = self._remote_archives().get(hour)
         if remote is None:
             return []
-        local = self.cache / remote
+        local = self.root / remote
         if not local.is_file():
             local.parent.mkdir(parents=True, exist_ok=True)
             self._run("copyto", f"{self.remote_path}/{remote}", str(local))
         return _tar_members(local)
 
     def _remote_archives(self) -> dict[str, str]:
+        if self._listing is not None:
+            return self._listing
         done = self._run("lsjson", self.remote_path, "--recursive", "--files-only")
         found: dict[str, str] = {}
         for row in json.loads(done.stdout or "[]"):
@@ -336,6 +360,7 @@ class RcloneRemote:
                 continue
             day, hour = match.group(1), match.group(2)
             found[f"{day}T{hour}" if hour else day] = relative
+        self._listing = found
         return found
 
     def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
@@ -370,7 +395,10 @@ def iter_rows(
 ) -> Iterator[Any]:
     """Every row of the named hours in `local_receive_ts_ns` order, symbols merged.
 
-    A line that does not parse is counted on `source.skipped_rows` and skipped.
+    Streams enter the merge in member path order, which is symbol order, and a
+    symbol's segments in segment order, so rows stamped the same nanosecond
+    come out in that order. A line that does not parse is counted on
+    `source.skipped_rows` and skipped.
     """
 
     wanted = {symbol.upper() for symbol in symbols} if symbols else None
@@ -381,13 +409,25 @@ def iter_rows(
             for member in source.hour_members(hour)
             if member.symbol != META and (wanted is None or member.symbol in wanted)
         ]
-        streams = [_member_rows(source, member, kept, typed) for member in members]
+        by_symbol: dict[str, list[Member]] = {}
+        for member in members:
+            by_symbol.setdefault(member.symbol, []).append(member)
+        streams = [_symbol_rows(source, group, kept, typed) for group in by_symbol.values()]
         try:
             for _, row in heapq.merge(*streams, key=lambda pair: pair[0]):
                 yield row
         finally:
             for stream in streams:
                 stream.close()
+
+
+def _symbol_rows(
+    source: Source, members: Sequence[Member], kinds: set[str] | None, typed: bool
+) -> Generator[tuple[int, Any], None, None]:
+    """One symbol's segments end to end; the next is opened only once the one before it runs out."""
+
+    for member in members:
+        yield from _member_rows(source, member, kinds, typed)
 
 
 def _member_rows(
