@@ -365,6 +365,10 @@ ensure_runtime_identities() {
         engine_user="$(lm_realm_field "$realm" engine_user)"
         install -d -o "$SIGNAL_WORKER_USER" -g "$RUNTIME_GROUP" -m 0770 \
             "$(lm_realm_field "$realm" spool_dir)"
+        # Both spool writers quarantine here under umask 0027; group-writable
+        # so whichever creates it first does not lock the other out.
+        install -d -o "$SIGNAL_WORKER_USER" -g "$RUNTIME_GROUP" -m 0770 \
+            "$(lm_realm_field "$realm" spool_dir)/quarantine"
         install -d -o "$engine_user" -g "$RUNTIME_GROUP" -m 0750 \
             "$(lm_realm_field "$realm" control_dir)"
         install -d -o "$SIGNAL_WORKER_USER" -g "$RUNTIME_GROUP" -m 0750 \
