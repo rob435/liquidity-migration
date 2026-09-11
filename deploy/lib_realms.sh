@@ -27,12 +27,19 @@ _lm_realm_field_rows() {
         printf '%s\n' "$LM_REALM_FIELDS_TEXT"
     else
         cat "$LM_REALM_FIELDS"
-    fi | LC_ALL=C awk '
+    fi | LC_ALL=C awk -F '|' '
 NR == 1 && $0 != "# realm-fields-v1" { unsupported = 1 }
-!unsupported && !/^#/ && !/^[[:space:]]*$/ { print }
+!unsupported && !/^#/ && !/^[[:space:]]*$/ {
+    if (NF != 3 && !malformed) { malformed = NR }
+    print
+}
 END {
     if (unsupported) {
         print "realm fields have an unsupported schema; expected # realm-fields-v1" > "/dev/stderr"
+        exit 1
+    }
+    if (malformed) {
+        print "invalid realm field row at line " malformed > "/dev/stderr"
         exit 1
     }
 }

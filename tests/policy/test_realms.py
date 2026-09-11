@@ -235,6 +235,40 @@ def test_a_lookup_answered_by_the_first_row_leaves_the_writer_alive(tmp_path: Pa
     assert completed.stdout.splitlines() == ["demo", funded]
 
 
+def _field_lookup(fields: Path, script: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"set -euo pipefail; export LM_REALM_FIELDS={fields}; "
+            f". {DEPLOY}/lib_realms.sh; {script}",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+
+def test_the_lookup_refuses_a_row_that_is_not_three_fields(tmp_path: Path) -> None:
+    # The row shape is decided at the end of the table, so a malformed row after
+    # the row that answers is still refused.
+    table = (DEPLOY / "realm_fields.tsv").read_text(encoding="utf-8")
+    padding = "".join(f"zzpad|field_{i}|x\n" for i in range(2_000))
+    valid = tmp_path / "valid.tsv"
+    valid.write_text(table + padding, encoding="utf-8")
+    malformed = tmp_path / "malformed.tsv"
+    malformed.write_text(table + padding + "demo|engine_env\n", encoding="utf-8")
+    malformed_line = len((table + padding).splitlines()) + 1
+
+    answered = _field_lookup(valid, "lm_realm_field demo realm")
+    assert answered.returncode == 0, answered.stderr
+    assert answered.stdout.split() == ["demo"]
+
+    refused = _field_lookup(malformed, "lm_realm_field demo realm")
+    assert refused.returncode != 0
+    assert f"invalid realm field row at line {malformed_line}" in refused.stderr
+
+
 # --------------------------------------------------------- adding a realm
 
 

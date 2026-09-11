@@ -1,34 +1,74 @@
 #!/usr/bin/env bash
 # One thin operator-facing router for the surviving demo and research operations.
-set -euo pipefail
+set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SSH_TARGET="${SSH_TARGET:-root@208.84.103.4}"
 REPO_DIR="${REPO_DIR:-/opt/liquidity-migration}"
 LM_FLEET_MANIFEST="$ROOT_DIR/deploy/fleet_manifest.tsv"
 LM_REALM_FIELDS="$ROOT_DIR/deploy/realm_fields.tsv"
+
+# Read before the first command that can fail: the report below names it.
+command="${1:-help}"
+if [[ "$#" -gt 0 ]]; then
+  shift
+fi
+
+# A failing step names the operation rather than exiting silently. No secret
+# reaches this router -- credential files travel by path -- so the failed command
+# is safe to print. Only the outermost report is printed: inside a subshell the
+# parent decides what a non-zero status means.
+ops_error() {
+  local status="$1" line="$2" failed="$3"
+  [ "$BASH_SUBSHELL" -eq 0 ] || exit "$status"
+  echo "ERROR: ops.sh $command failed (exit $status) at line $line: $failed" >&2
+  exit "$status"
+}
+trap 'ops_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
+
 . "$ROOT_DIR/deploy/lib_sleeves.sh"
 
-# The realms and the funded modes an operator may name, from the generated realm fields.
-REALM_LIST="$(lm_realms | paste -sd ' ' -)"
-DEPLOY_MODES="deploy rollback verify"
-for funded_realm in $(lm_funded_realms); do
-  DEPLOY_MODES="$DEPLOY_MODES stop-$funded_realm disarm-$funded_realm"
-done
+# The realms and the funded modes an operator may name, from the generated realm
+# fields. Each list is derived on its first use and kept, so a command that names
+# no realm never reads the table.
+realm_list() {
+  if [ -z "${REALM_LIST:-}" ]; then
+    REALM_LIST="$(lm_realms | paste -sd ' ' -)"
+  fi
+}
+
+deploy_modes() {
+  local funded_realm
+  if [ -z "${DEPLOY_MODES:-}" ]; then
+    DEPLOY_MODES="deploy rollback verify"
+    for funded_realm in $(lm_funded_realms); do
+      DEPLOY_MODES="$DEPLOY_MODES stop-$funded_realm disarm-$funded_realm"
+    done
+  fi
+}
+
 # The canary's accounts: the practice realm, and every funded realm on a venue
 # with no practice sibling, whose only route to live evidence the canary is.
 # The engine refuses a live-proven realm and a running engine holds the lease,
 # so this list is the typo guard, not the gate.
-CANARY_REALMS="$(lm_practice_realm)"
-practice_venue="$(lm_realm_field "$(lm_practice_realm)" venue)"
-for funded_realm in $(lm_funded_realms); do
-  if [ "$(lm_realm_field "$funded_realm" venue)" != "$practice_venue" ]; then
-    CANARY_REALMS="$CANARY_REALMS $funded_realm"
+canary_realms() {
+  local practice practice_venue funded_realm
+  if [ -z "${CANARY_REALMS:-}" ]; then
+    practice="$(lm_practice_realm)"
+    practice_venue="$(lm_realm_field "$practice" venue)"
+    CANARY_REALMS="$practice"
+    for funded_realm in $(lm_funded_realms); do
+      if [ "$(lm_realm_field "$funded_realm" venue)" != "$practice_venue" ]; then
+        CANARY_REALMS="$CANARY_REALMS $funded_realm"
+      fi
+    done
   fi
-done
+}
 
 require_realm() {
-  lm_is_realm "$2" || die_usage "$1 realm must be one of: $REALM_LIST"
+  lm_is_realm "$2" && return 0
+  realm_list
+  die_usage "$1 realm must be one of: $REALM_LIST"
 }
 
 if [[ -n "${PYTHON:-}" ]]; then
@@ -246,11 +286,6 @@ exec systemd-run --quiet --wait --pipe --collect --service-type=exec \
     "$@"
 }
 
-command="${1:-help}"
-if [[ "$#" -gt 0 ]]; then
-  shift
-fi
-
 case "$command" in
   help|-h|--help)
     usage
@@ -409,6 +444,7 @@ exec .venv/bin/python scripts/runtime/reclaim_host_storage.py "${REMOTE_ARGS[@]}
     # A realm the fleet already trades is never the canary's account; the
     # engine refuses a live-proven one too, but a typo should stop here, before
     # the host.
+    canary_realms
     case " $CANARY_REALMS " in
       *" $canary_environment "*) ;;
       *) die_usage "canary-order requires --environment$(printf ' %s' $CANARY_REALMS)" ;;
@@ -424,6 +460,7 @@ exec .venv/bin/python scripts/runtime/reclaim_host_storage.py "${REMOTE_ARGS[@]}
     if [[ "${1:-}" == "--execute" ]]; then
       shift
     fi
+    deploy_modes
     case " $DEPLOY_MODES " in
       *" ${1:-deploy} "*) ;;
       *) die_usage "deploy mode must be one of:$(printf ' %s' $DEPLOY_MODES)" ;;

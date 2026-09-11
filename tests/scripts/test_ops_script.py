@@ -9,6 +9,16 @@ from liquidity_migration.policy.realms import realm as realm_row, realms
 ROOT = Path(__file__).resolve().parents[2]
 OPS = ROOT / "scripts" / "ops.sh"
 
+# Realm tables the generator would never render: a schema ops.sh does not know,
+# and a valid table whose last row has two fields instead of three.
+BROKEN_SCHEMA_TABLE = "# realm-fields-v9\ndemo|venue|bybit\n"
+LATE_MALFORMED_TABLE = (
+    "# realm-fields-v1\n"
+    "demo|venue|bybit\n"
+    "demo|engine_heartbeat|/var/lib/x/heartbeat.json\n"
+    "demo|engine_env\n"
+)
+
 
 def _run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     merged = os.environ.copy()
@@ -73,6 +83,40 @@ def test_unknown_command_fails_with_usage() -> None:
     result = _run("definitely-not-a-command")
     assert result.returncode == 2
     assert "unknown command" in result.stderr
+
+
+def test_help_answers_without_reading_the_realm_table() -> None:
+    result = _run("help", env={"LM_REALM_FIELDS_TEXT": BROKEN_SCHEMA_TABLE})
+    assert result.returncode == 0
+    assert "Usage: scripts/ops.sh" in result.stdout
+    assert "schema" not in result.stderr
+
+
+def test_an_unknown_command_answers_without_reading_the_realm_table() -> None:
+    result = _run(
+        "definitely-not-a-command", env={"LM_REALM_FIELDS_TEXT": BROKEN_SCHEMA_TABLE}
+    )
+    assert result.returncode == 2
+    assert "unknown command" in result.stderr
+    assert "schema" not in result.stderr
+
+
+def test_a_realm_command_names_the_table_fault_and_the_operation() -> None:
+    result = _run("curve", "demo", env={"LM_REALM_FIELDS_TEXT": BROKEN_SCHEMA_TABLE})
+    assert result.returncode != 0
+    assert "unsupported schema; expected # realm-fields-v1" in result.stderr
+    assert "ERROR: ops.sh curve failed" in result.stderr
+
+
+def test_a_malformed_row_stops_a_lookup_an_earlier_row_would_answer(tmp_path: Path) -> None:
+    capture, environment = _ssh_capture(tmp_path)
+    environment["LM_REALM_FIELDS_TEXT"] = LATE_MALFORMED_TABLE
+    result = _run("why", "demo", env=environment)
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "invalid realm field row at line 4" in result.stderr
+    assert "ERROR: ops.sh why failed" in result.stderr
+    assert not capture.exists()
 
 
 def test_curve_routes_the_selected_history_to_the_rust_companion(tmp_path: Path) -> None:
