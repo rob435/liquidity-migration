@@ -170,8 +170,10 @@ fn rebind_records(
             provenance,
         });
     }
+    // Takeover reads a whole chain and keeps no cursor; segment 1 and the
+    // dense sequences are this projection's own.
     let (callbacks, _) = engine_core::callback_recovery::paging::CallbackPages::replay(
-        replayed,
+        &engine_core::assembly::BootReplay::dense(replayed),
         new_strategies.len(),
         1,
     )?;
@@ -359,13 +361,18 @@ mod tests {
         let host = CallbackHost::new_paged(
             engine_core::callback_recovery::host::CallbackExecution::Embedded,
             &new_strategies,
-            &restored,
+            &engine_core::assembly::BootReplay::dense(&restored),
             wal.callback_reader().unwrap().unwrap(),
         )
         .unwrap();
         assert!(host.pending_for(StrategyId(3)));
         assert_eq!(host.state.committed, state.committed);
-        let (paged, pages) = CallbackPages::replay(&records, next.len(), 70).unwrap();
+        let (paged, pages) = CallbackPages::replay(
+            &engine_core::assembly::BootReplay::dense(&records),
+            next.len(),
+            70,
+        )
+        .unwrap();
         assert_eq!(paged.committed, state.committed);
         assert_eq!(pages.slots.len(), 1);
         assert_eq!(pages.slots[&101].strategy, StrategyId(3));
@@ -396,7 +403,12 @@ mod tests {
         assert!(rebind_records(&unknown, &next, &records[..1]).is_err());
         let mut duplicate = records.clone();
         duplicate.push(records.last().unwrap().clone());
-        assert!(CallbackPages::replay(&duplicate, next.len(), 70).is_err());
+        assert!(CallbackPages::replay(
+            &engine_core::assembly::BootReplay::dense(&duplicate),
+            next.len(),
+            70
+        )
+        .is_err());
     }
 
     fn configs() -> (Vec<config::StrategyConfig>, Vec<config::StrategyConfig>) {

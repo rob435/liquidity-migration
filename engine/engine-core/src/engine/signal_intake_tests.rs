@@ -613,7 +613,7 @@ async fn signal_route_release_waits_for_consumption_and_keeps_candidates_positio
         .host
         .callbacks
         .order_news
-        .attach(reader, &[], 2)
+        .attach(reader, &crate::assembly::BootReplay::dense(&[]), 2)
         .unwrap();
     engine
         .host

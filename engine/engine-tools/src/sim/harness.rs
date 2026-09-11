@@ -451,8 +451,11 @@ impl World {
         reconnecting: bool,
     ) -> Result<SegmentEnd, EngineError> {
         let _claim = engine_wal::lock(&self.paths.wal).map_err(|e| boot(e.to_string()))?;
-        let (wal, replayed) = WalWriter::open_unsynced(&self.paths.wal)?;
-        let replayed: Vec<WalRecord> = replayed.into_iter().map(|(_, r)| r).collect();
+        // The working set `engine run` boots from, so a death and its restart
+        // are judged on what production replays.
+        let (wal, replayed) =
+            WalWriter::open_unsynced_with(&self.paths.wal, assembly::boot_filter())?;
+        let replayed = assembly::BootReplay::from_pairs(replayed);
         let strategies = assembly::strategies(&self.loaded.config.strategies)
             .map_err(|e| boot(e.to_string()))?;
         let risk = assembly::risk(&self.loaded.config.risk).map_err(|e| boot(e.to_string()))?;
@@ -500,7 +503,7 @@ impl World {
         // The pump runs before boot: after a death the clock is already
         // pumping, and boot's venue reads wait on it like every other reply.
         let pump_task = tokio::spawn(pump(self.cursor.clone(), self.scheduler.clone()));
-        let mut engine = match Engine::boot_as_exact(
+        let mut engine = match Engine::boot_replay_exact(
             &self.settings,
             &self.config_identity,
             wal,

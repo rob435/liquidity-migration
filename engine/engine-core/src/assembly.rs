@@ -35,6 +35,110 @@ pub fn wal(path: &Path) -> Result<(WalWriter, Vec<WalRecord>), WalError> {
     Ok((writer, replayed.into_iter().map(|(_, r)| r).collect()))
 }
 
+/// [`wal`], holding only what boot reads. [`boot_filter`] decides; a refused
+/// record never enters memory. The writer is the same either way.
+pub fn boot_wal(path: &Path) -> Result<(WalWriter, BootReplay<'static>), WalError> {
+    let (writer, replayed) = engine_wal::open_current_with(path, boot_filter())?;
+    Ok((writer, BootReplay::from_pairs(replayed)))
+}
+
+/// Whether any reader on the boot path matches this record's kind.
+///
+/// These are per-decision, per-call and per-fill telemetry: `engine replay`,
+/// `engine cohort`, `engine fills`, `engine latency` and `engine bench` read
+/// them, each from the whole segment chain, which boot never opens. Every
+/// other kind is kept — restatements, retained wire kinds, notes — so a kind
+/// added later reaches boot until this line says otherwise.
+pub fn boot_reads(record: &WalRecord) -> bool {
+    !matches!(
+        record,
+        WalRecord::Intent { .. }
+            | WalRecord::IntentRefused { .. }
+            | WalRecord::Verdict { .. }
+            | WalRecord::CancelSent { .. }
+            | WalRecord::QuoteFill { .. }
+            | WalRecord::VenueTiming { .. }
+            | WalRecord::LatencyLedger { .. }
+    )
+}
+
+/// [`boot_reads`], plus the first record it refuses.
+///
+/// Two boot checks read the replay as a whole rather than by kind:
+/// `identities::replay_identities` refuses a pre-`Names` log that holds any
+/// record other than `Boot` or `Note`, and `recover_missed_fills` reads an
+/// empty replay as a log with no history at all. No kind `boot_reads`
+/// refuses is `Boot` or `Note`, so one survivor leaves both checks the
+/// answer the unfiltered log gives.
+pub fn boot_filter() -> impl FnMut(&WalRecord) -> bool {
+    let mut kept_refused = false;
+    move |record| boot_reads(record) || !std::mem::replace(&mut kept_refused, true)
+}
+
+/// A replay of the log boot booted from, and the WAL sequence each record
+/// was written at.
+///
+/// A filtered replay has holes, so a record's position here is NOT its
+/// sequence. Every cursor boot hands the callback WAL reader is a sequence:
+/// build it with [`BootReplay::sequence`], never from a position.
+pub struct BootReplay<'a> {
+    records: std::borrow::Cow<'a, [WalRecord]>,
+    /// `None` when nothing was dropped: the sequence is the position plus one.
+    sequences: Option<Vec<u64>>,
+}
+
+impl<'a> BootReplay<'a> {
+    /// A replay nothing was dropped from, borrowed as it stands.
+    pub fn dense(records: &'a [WalRecord]) -> Self {
+        Self {
+            records: std::borrow::Cow::Borrowed(records),
+            sequences: None,
+        }
+    }
+
+    /// What a filtered open returned, sequences carried.
+    pub fn from_pairs(pairs: Vec<(u64, WalRecord)>) -> BootReplay<'static> {
+        let mut records = Vec::with_capacity(pairs.len());
+        let mut sequences = Vec::with_capacity(pairs.len());
+        for (sequence, record) in pairs {
+            sequences.push(sequence);
+            records.push(record);
+        }
+        BootReplay {
+            records: std::borrow::Cow::Owned(records),
+            sequences: Some(sequences),
+        }
+    }
+
+    /// The WAL sequence of the record at `index`.
+    pub fn sequence(&self, index: usize) -> u64 {
+        match &self.sequences {
+            Some(sequences) => sequences[index],
+            None => index as u64 + 1,
+        }
+    }
+
+    /// Where the record written at `sequence` sits, if this replay kept it.
+    pub fn by_sequence(&self, sequence: u64) -> Option<usize> {
+        match &self.sequences {
+            // Strictly increasing: the scan hands them out in frame order.
+            Some(sequences) => sequences.binary_search(&sequence).ok(),
+            None => sequence
+                .checked_sub(1)
+                .map(|index| index as usize)
+                .filter(|index| *index < self.records.len()),
+        }
+    }
+}
+
+impl std::ops::Deref for BootReplay<'_> {
+    type Target = [WalRecord];
+
+    fn deref(&self) -> &Self::Target {
+        &self.records
+    }
+}
+
 /// The symbols the engine trades, in the one order every table uses: the
 /// previous run's own table first (the newest `Names` record the log
 /// replayed, in its id order), then first appearance across the strategies'

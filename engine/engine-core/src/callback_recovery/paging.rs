@@ -51,7 +51,7 @@ impl CallbackPages {
     ) -> Result<BTreeMap<StrategyId, engine_types::strategy_process::StrategyProcessState>, String>
     {
         // Assembly needs private state only; synthetic inline cursors never leave this projection.
-        let (state, _) = Self::replay(records, count, 1)?;
+        let (state, _) = Self::replay(&crate::assembly::BootReplay::dense(records), count, 1)?;
         Ok(state.committed)
     }
 
@@ -225,16 +225,16 @@ impl CallbackPages {
     }
 
     pub fn replay(
-        records: &[WalRecord],
+        replayed: &crate::assembly::BootReplay<'_>,
         count: usize,
         segment: u64,
     ) -> Result<(CallbackState, Self), String> {
         let mut state = CallbackState::default();
         let mut pages = Self::default();
-        for (index, record) in records.iter().enumerate() {
+        for (index, record) in replayed.iter().enumerate() {
             let cursor = CallbackWalCursor {
                 segment,
-                sequence: index as u64 + 1,
+                sequence: replayed.sequence(index),
                 offset: 0,
             };
             match record {
@@ -625,7 +625,8 @@ mod tests {
         drop(wal);
         let (mut wal, rows) = engine_wal::WalWriter::open(&path).unwrap();
         let rows: Vec<_> = rows.into_iter().map(|(_, row)| row).collect();
-        let (mut state, mut pages) = CallbackPages::replay(&rows, 2, 1).unwrap();
+        let (mut state, mut pages) =
+            CallbackPages::replay(&crate::assembly::BootReplay::dense(&rows), 2, 1).unwrap();
         assert!(
             state.inputs.is_empty(),
             "inactive durable payloads occupy the active callback budget after replay"
@@ -682,8 +683,12 @@ mod tests {
         let (mut wal, rows) = engine_wal::open_current(&path).unwrap();
         let rows: Vec<_> = rows.into_iter().map(|(_, row)| row).collect();
         let reader = wal.callback_reader().unwrap().unwrap();
-        let (mut state, mut pages) =
-            CallbackPages::replay(&rows, 2, reader.start().segment).unwrap();
+        let (mut state, mut pages) = CallbackPages::replay(
+            &crate::assembly::BootReplay::dense(&rows),
+            2,
+            reader.start().segment,
+        )
+        .unwrap();
         assert_eq!(pages.slots.keys().copied().collect::<Vec<_>>(), [0]);
         assert!(state.inputs.is_empty());
         pages.attach(reader);
@@ -728,7 +733,8 @@ mod tests {
         for row in &rows {
             crate::testpath::append_history(&mut wal, &path, row).unwrap();
         }
-        let (state, pages) = CallbackPages::replay(&rows, 2, 1).unwrap();
+        let (state, pages) =
+            CallbackPages::replay(&crate::assembly::BootReplay::dense(&rows), 2, 1).unwrap();
         let mut base = base().await;
         restate(&mut base, &state, &pages);
         wal.rotate(&base).unwrap();
@@ -736,8 +742,12 @@ mod tests {
         let (mut wal, rows) = engine_wal::open_current(&path).unwrap();
         let rows: Vec<_> = rows.into_iter().map(|(_, row)| row).collect();
         let reader = wal.callback_reader().unwrap().unwrap();
-        let (mut state, mut pages) =
-            CallbackPages::replay(&rows, 2, reader.start().segment).unwrap();
+        let (mut state, mut pages) = CallbackPages::replay(
+            &crate::assembly::BootReplay::dense(&rows),
+            2,
+            reader.start().segment,
+        )
+        .unwrap();
         pages.attach(reader);
         pages.start_load(&state, &std::collections::BTreeSet::from([StrategyId(0)]));
         let completion = pages.completed.recv().await.unwrap();
@@ -760,7 +770,8 @@ mod tests {
         drop(wal);
         let (mut wal, rows) = engine_wal::open_current(&path).unwrap();
         let rows: Vec<_> = rows.into_iter().map(|(_, row)| row).collect();
-        let (state, pages) = CallbackPages::replay(&rows, 2, 2).unwrap();
+        let (state, pages) =
+            CallbackPages::replay(&crate::assembly::BootReplay::dense(&rows), 2, 2).unwrap();
         assert!(
             pages.slots.is_empty(),
             "completed callback was queued again after restart"
@@ -771,7 +782,8 @@ mod tests {
         drop(wal);
         let (_, rows) = engine_wal::open_current(&path).unwrap();
         let rows: Vec<_> = rows.into_iter().map(|(_, row)| row).collect();
-        let (state, pages) = CallbackPages::replay(&rows, 2, 3).unwrap();
+        let (state, pages) =
+            CallbackPages::replay(&crate::assembly::BootReplay::dense(&rows), 2, 3).unwrap();
         assert_eq!(state.next_id, 1);
         assert!(pages.slots.is_empty());
     }

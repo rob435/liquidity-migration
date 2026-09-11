@@ -1404,7 +1404,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             .recovering
             .then(|| self.order_callback_owners(&update));
         if callbacks.is_some() {
-            self.ensure_callback_reader(&[])?;
+            self.ensure_callback_reader(&crate::assembly::BootReplay::dense(&[]))?;
         }
         if matches!(update, OrderUpdate::FastFill { .. }) {
             let offset = self.wal.segment_size();

@@ -11,7 +11,7 @@ mod embedded_tests;
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     pub(super) fn ensure_callback_reader(
         &mut self,
-        replayed: &[WalRecord],
+        replayed: &crate::assembly::BootReplay<'_>,
     ) -> Result<(), EngineError> {
         if self.host.callbacks.recovering && !self.host.callbacks.order_news.has_reader() {
             let reader = self.wal.callback_reader()?.ok_or_else(|| {
@@ -39,7 +39,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             return Ok(());
         }
         if self.host.callbacks.recovering {
-            self.ensure_callback_reader(&[])?;
+            self.ensure_callback_reader(&crate::assembly::BootReplay::dense(&[]))?;
             let offset = self.wal.segment_size();
             let sequence = self.wal.append(&WalRecord::StrategyCallbackSource {
                 placement: placement.clone(),

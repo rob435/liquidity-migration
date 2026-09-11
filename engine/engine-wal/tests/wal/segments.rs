@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 use engine_types::wal::AnchorState;
 use engine_wal::{
-    open_current, replay, replay_chain, replay_chain_visit, replay_current, segments, Wal,
-    WalRecord, WalWriter,
+    open_current, open_current_with, replay, replay_chain, replay_chain_visit, replay_current,
+    segments, Wal, WalRecord, WalWriter,
 };
 use tempfile::TempDir;
 
@@ -991,4 +991,84 @@ fn the_visitor_reads_the_family_exactly_as_the_collector_does() {
     .unwrap();
     assert_eq!(visited, collected);
     assert_eq!(streamed, damaged);
+}
+
+/// A filter changes what boot holds in memory and nothing else.
+#[test]
+fn a_filtered_open_carries_the_original_sequences_and_the_same_writer() {
+    let refuse_four =
+        |record: &WalRecord| !matches!(record, WalRecord::Note { text, .. } if text == "four");
+
+    let whole_dir = TempDir::new().unwrap();
+    let whole_family = torn_and_abandoned_family(&whole_dir);
+    let (mut whole_writer, whole) = open_current(&whole_family).unwrap();
+
+    let kept_dir = TempDir::new().unwrap();
+    let kept_family = torn_and_abandoned_family(&kept_dir);
+    let (mut kept_writer, kept) = open_current_with(&kept_family, refuse_four).unwrap();
+
+    // The trusted segment is 2: its restatement, and the one record the torn
+    // tail left whole.
+    assert_eq!(texts(&whole), ["four"]);
+    assert_eq!(
+        whole.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    let expected: Vec<(u64, WalRecord)> = whole
+        .iter()
+        .filter(|(_, record)| refuse_four(record))
+        .cloned()
+        .collect();
+    assert_eq!(kept, expected);
+    assert_eq!(kept.len(), 1, "the filter dropped a frame");
+
+    assert_eq!(kept_writer.next_seq(), whole_writer.next_seq());
+    assert_eq!(kept_writer.next_seq(), 3);
+    assert_eq!(kept_writer.segment_size(), whole_writer.segment_size());
+    let segment_of = |dir: &TempDir| dir.path().join("engine.wal.000002");
+    assert_eq!(
+        fs::metadata(segment_of(&kept_dir)).unwrap().len(),
+        fs::metadata(segment_of(&whole_dir)).unwrap().len(),
+        "the torn tail is truncated at the same byte"
+    );
+
+    for writer in [&mut whole_writer, &mut kept_writer] {
+        writer.append(&note("six")).unwrap();
+        writer.barrier().unwrap();
+    }
+    drop(whole_writer);
+    drop(kept_writer);
+    assert_eq!(
+        replay(segment_of(&kept_dir)).unwrap(),
+        replay(segment_of(&whole_dir)).unwrap(),
+        "the append lands in the same segment at the same sequence"
+    );
+}
+
+/// The trust decision reads the first decoded record, so a filter cannot move
+/// boot to an older segment or renumber what it appends.
+#[test]
+fn a_filter_cannot_change_which_segment_boot_trusts() {
+    let whole_dir = TempDir::new().unwrap();
+    let whole_family = torn_and_abandoned_family(&whole_dir);
+    let (whole_writer, _) = open_current(&whole_family).unwrap();
+
+    let none_dir = TempDir::new().unwrap();
+    let none_family = torn_and_abandoned_family(&none_dir);
+    let (mut none_writer, none) = open_current_with(&none_family, |_| false).unwrap();
+
+    assert!(none.is_empty());
+    assert_eq!(none_writer.next_seq(), whole_writer.next_seq());
+    assert_eq!(none_writer.segment_size(), whole_writer.segment_size());
+
+    none_writer.append(&note("six")).unwrap();
+    none_writer.barrier().unwrap();
+    drop(none_writer);
+    let second = none_dir.path().join("engine.wal.000002");
+    assert_eq!(texts(&replay(&second).unwrap()), ["four", "six"]);
+    assert_eq!(
+        texts(&replay(&none_family).unwrap()),
+        ["one", "two", "three"],
+        "the archive never moves again"
+    );
 }

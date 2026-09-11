@@ -203,7 +203,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             venue,
             strategies,
             sleeves,
-            replayed,
+            &crate::assembly::BootReplay::dense(replayed),
             false,
         )
         .await
@@ -219,6 +219,33 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         strategies: Vec<Box<dyn Strategy>>,
         sleeves: &[String],
         replayed: &[WalRecord],
+    ) -> Result<Self, EngineError> {
+        Self::boot_replay_exact(
+            settings,
+            config_sha256,
+            wal,
+            risk,
+            venue,
+            strategies,
+            sleeves,
+            &crate::assembly::BootReplay::dense(replayed),
+        )
+        .await
+    }
+
+    /// [`boot_as_exact`](Self::boot_as_exact) over a replay that carries its
+    /// own WAL sequences. `engine run` boots from a filtered log, where a
+    /// record's position is not the sequence its callback cursors name.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn boot_replay_exact(
+        settings: &EngineSection,
+        config_sha256: &str,
+        wal: W,
+        risk: R,
+        venue: V,
+        strategies: Vec<Box<dyn Strategy>>,
+        sleeves: &[String],
+        replayed: &crate::assembly::BootReplay<'_>,
     ) -> Result<Self, EngineError> {
         Self::boot_as_with_instruments(
             settings,
@@ -243,7 +270,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         mut venue: V,
         strategies: Vec<Box<dyn Strategy>>,
         sleeves: &[String],
-        replayed: &[WalRecord],
+        replayed: &crate::assembly::BootReplay<'_>,
         require_exact_instruments: bool,
     ) -> Result<Self, EngineError> {
         if !(1..=crate::config::MAX_GROUP_FLUSH_MS).contains(&settings.group_flush_ms) {
@@ -1419,7 +1446,11 @@ mod callback_recovery_tests {
         callbacks.recovering = true;
         callbacks
             .order_news
-            .attach(wal.callback_reader().unwrap().unwrap(), &replay, 1)
+            .attach(
+                wal.callback_reader().unwrap().unwrap(),
+                &crate::assembly::BootReplay::dense(&replay),
+                1,
+            )
             .unwrap();
         for marker in ["boot", "identity", "catalog"] {
             wal.append(&WalRecord::Note {
@@ -1784,21 +1815,22 @@ mod memory_tests {
         )));
     }
 
-    fn peak_resident_bytes() -> u64 {
-        let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-        // getrusage initializes the supplied rusage on success.
-        assert_eq!(
-            unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
-            0
-        );
-        let usage = unsafe { usage.assume_init() };
-        #[cfg(target_os = "macos")]
-        let scale = 1;
-        #[cfg(not(target_os = "macos"))]
-        let scale = 1024;
-        usage.ru_maxrss as u64 * scale
+    /// The resident set right now. `/proc/self/statm`, so Linux, which is
+    /// where this runs. Every test below measures around a subject that is
+    /// still alive: a high-water mark cannot, because a spawned child starts
+    /// at its parent's and then never moves, which reads as no allocation.
+    #[cfg(target_os = "linux")]
+    fn resident_bytes() -> u64 {
+        let statm = std::fs::read_to_string("/proc/self/statm").expect("/proc/self/statm");
+        let pages: u64 = statm
+            .split_whitespace()
+            .nth(1)
+            .and_then(|field| field.parse().ok())
+            .expect("resident pages");
+        pages * unsafe { libc::sysconf(libc::_SC_PAGESIZE) as u64 }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn recent_legacy_overlap_clones_only_the_retained_tail() {
         const CHILD: &str = "TIER1_LEGACY_OVERLAP_MEMORY_CHILD";
@@ -1815,14 +1847,16 @@ mod memory_tests {
             eprint!("{}", String::from_utf8_lossy(&output.stderr));
             return;
         }
-        let records: Vec<_> = (0..10_000)
+        const ROWS: i64 = 10_000;
+        const ID_BYTES: usize = 8192;
+        let records: Vec<_> = (0..ROWS)
             .map(|index| WalRecord::OrderUpdate {
                 callbacks: None,
                 update: OrderUpdate::Fill {
                     allocation: None,
                     amounts: None,
                     exec_id: String::new(),
-                    client_order_id: format!("{index:05}{}", "x".repeat(8192)),
+                    client_order_id: format!("{index:05}{}", "x".repeat(ID_BYTES)),
                     symbol: SymbolId(0),
                     side: Side::Buy,
                     qty: 1.0,
@@ -1835,11 +1869,12 @@ mod memory_tests {
                 },
             })
             .collect();
-        let before = peak_resident_bytes();
+        let before = resident_bytes();
         let recent = recent_legacy_fills(&records);
         let mut counts = legacy_overlap_counts(&records, 0);
-        let growth = peak_resident_bytes().saturating_sub(before);
-        assert_eq!(counts.len(), 10_000);
+        // Both views are still alive here, and so is the source they read.
+        let growth = resident_bytes().saturating_sub(before);
+        assert_eq!(counts.len(), ROWS as usize);
         assert_eq!(
             counts
                 .get_mut(recent.back().unwrap().0.as_str())
@@ -1848,22 +1883,24 @@ mod memory_tests {
             Some(1)
         );
         assert_eq!(recent.len(), RECENT_FILLS_KEPT);
-        assert_eq!(recent.front().unwrap().1, 10_000 - RECENT_FILLS_KEPT as i64);
+        assert_eq!(recent.front().unwrap().1, ROWS - RECENT_FILLS_KEPT as i64);
         assert_eq!(recent.back().unwrap().1, 9999);
         assert!(recent
             .iter()
             .zip(recent.iter().skip(1))
             .all(|(a, b)| a.1 < b.1));
+        let source_bytes = ROWS as u64 * (ID_BYTES + 5) as u64;
         eprintln!(
-            "legacy-overlap rows=10000 retained={} peak_resident_growth_bytes={growth}",
+            "legacy-overlap rows={ROWS} retained={} source_bytes={source_bytes} resident_growth_bytes={growth}",
             recent.len()
         );
         assert!(
-            growth < 32 * 1024 * 1024,
-            "legacy overlap cloned the full source: peak grew {growth} bytes"
+            growth * 2 < source_bytes,
+            "legacy overlap cloned the full source: resident grew {growth} bytes against {source_bytes} bytes of ids"
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test(start_paused = true)]
     async fn boot_history_memory_does_not_grow_with_recovered_wal_payload() {
         const CHILD: &str = "TIER1_BOOT_RECOVERY_MEMORY_CHILD";
@@ -1880,13 +1917,15 @@ mod memory_tests {
             eprint!("{}", String::from_utf8_lossy(&output.stderr));
             return;
         }
+        const ROWS: usize = 2048;
+        const ID_BYTES: usize = 32 * 1024;
         let now = clock::wall_ms();
         let mut history = engine_types::ExecutionHistoryBuilder::default();
-        for index in 0..2048 {
+        for index in 0..ROWS {
             history
                 .push(engine_types::VenueExecution {
                     exec_id: format!("memory-execution-{index}"),
-                    client_order_id: "x".repeat(32 * 1024),
+                    client_order_id: "x".repeat(ID_BYTES),
                     symbol: "BTCUSDT".into(),
                     side: Side::Buy,
                     qty: 1.0,
@@ -1923,7 +1962,7 @@ mod memory_tests {
             positions: Vec::new(),
             observed_ns: clock::now_ns(),
         };
-        let before = peak_resident_bytes();
+        let before = resident_bytes();
         let recovered = Engine::<
             engine_wal::WalWriter,
             crate::tests::MockRisk,
@@ -1943,18 +1982,125 @@ mod memory_tests {
         )
         .await
         .unwrap();
-        let growth = peak_resident_bytes().saturating_sub(before);
+        // `recovered` and the execution-id set it seeded are still alive.
+        let growth = resident_bytes().saturating_sub(before);
         assert!(
             recovered.latched,
             "foreign fills must remain a durable reconciliation finding"
         );
         assert!(recovered.orders.orders.is_empty());
-        assert_eq!(ids.len(), 2048);
-        assert!(std::fs::metadata(&path).unwrap().len() > 64 * 1024 * 1024);
-        eprintln!("boot-history rows=2048 payload=64MiB peak_resident_growth_bytes={growth}");
+        assert_eq!(ids.len(), ROWS);
+        let streamed_bytes = (ROWS * ID_BYTES) as u64;
+        assert!(std::fs::metadata(&path).unwrap().len() > streamed_bytes);
+        eprintln!(
+            "boot-history rows={ROWS} streamed_bytes={streamed_bytes} resident_growth_bytes={growth}"
+        );
         assert!(
-            growth < 32 * 1024 * 1024,
-            "boot retained recovered payloads: peak grew {growth} bytes"
+            growth * 2 < streamed_bytes,
+            "boot retained recovered payloads: resident grew {growth} bytes against {streamed_bytes} streamed bytes"
+        );
+    }
+
+    /// The boot input on a segment that is mostly telemetry boot never reads.
+    /// Each read runs in its own process, and is measured with the replay
+    /// still alive: this is what boot holds, not what decoding touched.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn boot_input_memory_holds_the_working_set_not_the_segment() {
+        const CHILD: &str = "TIER1_BOOT_FILTER_MEMORY_CHILD";
+        const LOG: &str = "TIER1_BOOT_FILTER_MEMORY_LOG";
+        const NAME: &str = "engine::boot_recovery::memory_tests::boot_input_memory_holds_the_working_set_not_the_segment";
+
+        if let Ok(mode) = std::env::var(CHILD) {
+            let path = std::path::PathBuf::from(std::env::var(LOG).unwrap());
+            let before = resident_bytes();
+            let (kept, resident) = match mode.as_str() {
+                "filtered" => {
+                    let replayed = crate::assembly::boot_wal(&path).unwrap().1;
+                    (replayed.len(), resident_bytes())
+                }
+                _ => {
+                    let replayed = crate::assembly::wal(&path).unwrap().1;
+                    (replayed.len(), resident_bytes())
+                }
+            };
+            let growth = resident.saturating_sub(before);
+            eprintln!("{mode} records={kept} resident_growth_bytes={growth}");
+            return;
+        }
+
+        let path = crate::testpath::temp_path("telemetry-heavy");
+        let (mut wal, _) = engine_wal::WalWriter::open_unsynced(&path).unwrap();
+        let filler = "x".repeat(1024);
+        for index in 0..50_000u64 {
+            let record = if index % 100 == 0 {
+                WalRecord::OrderSent {
+                    dispatch: None,
+                    request: OrderRequest {
+                        client_order_id: format!("eng-{index}"),
+                        strategy: StrategyId(0),
+                        symbol: SymbolId(0),
+                        side: Side::Buy,
+                        qty: 1.0,
+                        kind: OrderKind::Market,
+                        stop: None,
+                        reduce_only: false,
+                        exact_terms: None,
+                        sleeve_effect: None,
+                        close_position: false,
+                    },
+                    wire_ns: index,
+                    arrival_mid: 100.0,
+                }
+            } else {
+                WalRecord::IntentRefused {
+                    wall_ts_ms: index as i64,
+                    strategy: StrategyId(0),
+                    symbol: SymbolId(0),
+                    tag: format!("{index}-{filler}"),
+                    client_order_id: None,
+                    code: "engine_latched".into(),
+                    detail: String::new(),
+                }
+            };
+            wal.append(&record).unwrap();
+        }
+        wal.flush().unwrap();
+        drop(wal);
+        let segment_bytes = std::fs::metadata(&path).unwrap().len();
+
+        let peak = |mode: &str| -> u64 {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture"])
+                .env(CHILD, mode)
+                .env(LOG, path.path())
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            assert!(
+                output.status.success(),
+                "{}\n{stderr}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            eprint!("{stderr}");
+            stderr
+                .lines()
+                .find_map(|line| line.rsplit_once("resident_growth_bytes="))
+                .and_then(|(_, value)| value.trim().parse().ok())
+                .unwrap()
+        };
+        let full = peak("full");
+        let filtered = peak("filtered");
+        eprintln!(
+            "segment_bytes={segment_bytes} full_resident_bytes={full} filtered_resident_bytes={filtered}"
+        );
+        assert!(
+            filtered * 4 < full,
+            "the filtered boot input is not materially smaller: {filtered} against {full}"
+        );
+        assert!(
+            filtered < segment_bytes / 4,
+            "the filtered boot input grew with the segment: {filtered} against {segment_bytes}"
         );
     }
 }
@@ -2092,5 +2238,574 @@ mod valuation_recovery_tests {
         let (mut restarted_risk, _) = crate::tests::MockRisk::with(crate::tests::allow_all());
         RecoveryOutcome::replay(&rows, &mut restarted_risk, now).unwrap();
         assert_eq!(restarted_risk.rolling_loss_rows(), vec![expected]);
+    }
+}
+
+#[cfg(test)]
+mod boot_filter_tests {
+    use super::*;
+    use crate::assembly::{boot_reads, BootReplay};
+    use crate::callback_recovery::host::{CallbackExecution, CallbackHost};
+    use crate::callback_recovery::order_news::OrderNews;
+    use crate::callback_recovery::paging::CallbackPages;
+    use engine_types::strategy_process::{
+        CallbackEvent, CallbackOrderOrigin, CallbackPreparation, StrategyCallbackInput,
+    };
+
+    /// One record of every kind [`boot_reads`] refuses.
+    fn dropped_kinds(tag: &str) -> Vec<WalRecord> {
+        vec![
+            WalRecord::Intent {
+                cause: None,
+                intent: engine_types::Intent {
+                    strategy: StrategyId(0),
+                    symbol: SymbolId(0),
+                    side: Side::Buy,
+                    qty: 1.0,
+                    exact_quantity: None,
+                    exact_prices: None,
+                    kind: OrderKind::Market,
+                    stop: None,
+                    reduce_only: false,
+                    tag: tag.to_string(),
+                    decided_ns: 1,
+                    work: None,
+                    leverage: None,
+                },
+            },
+            WalRecord::IntentRefused {
+                wall_ts_ms: 1,
+                strategy: StrategyId(0),
+                symbol: SymbolId(0),
+                tag: tag.to_string(),
+                client_order_id: Some(format!("eng-{tag}")),
+                code: "engine_latched".into(),
+                detail: String::new(),
+            },
+            WalRecord::Verdict {
+                client_order_id: Some(format!("eng-{tag}")),
+                verdict: engine_types::RiskVerdict::Allow { qty: 1.0 },
+            },
+            WalRecord::CancelSent {
+                symbol: SymbolId(0),
+                client_order_id: format!("eng-{tag}"),
+                wire_ns: 2,
+            },
+            WalRecord::QuoteFill {
+                features: engine_types::orders::QuoteFillFeatures {
+                    strategy: StrategyId(0),
+                    symbol: SymbolId(0),
+                    exec_id: format!("x-{tag}"),
+                    client_order_id: format!("eng-{tag}"),
+                    side: Side::Buy,
+                    is_maker: true,
+                    recv_ns: 3,
+                    flow_fast: None,
+                    flow_slow: None,
+                    flow_score: None,
+                    last_depth_ratio: None,
+                    same_side_depth_usdt: None,
+                    spread_bps: None,
+                    volatility_bps: None,
+                    queue_ahead_usdt: None,
+                },
+            },
+            WalRecord::VenueTiming {
+                command_id: 1,
+                operation: "place".into(),
+                client_order_id: format!("eng-{tag}"),
+                queued_ns: 1,
+                task_started_ns: 2,
+                socket_write_ns: None,
+                ack_ns: None,
+                rate_wait_ns: None,
+                task_completed_ns: 3,
+                core_handled_ns: 4,
+                core_handled_wall_ns: 5,
+            },
+            crate::ledger::LatencyLedger::new(0).record_for_wal(1_000_000_000),
+        ]
+    }
+
+    fn ack(id: &str) -> OrderUpdate {
+        OrderUpdate::Ack(engine_types::OrderAck {
+            client_order_id: id.into(),
+            venue_order_id: format!("venue-{id}"),
+            sent_ns: 1,
+            ack_ns: 2,
+        })
+    }
+
+    /// A log whose callback-bearing frames sit behind refused telemetry, with
+    /// a retained callback whose origin names one of them.
+    fn interleaved_callback_log() -> (crate::testpath::TempPath, u64, u64) {
+        let path = crate::testpath::temp_path("filtered-callback-cursors");
+        let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
+        let append = |wal: &mut engine_wal::WalWriter, record: &WalRecord| {
+            crate::testpath::append_history(wal, &path, record).unwrap()
+        };
+        append(
+            &mut wal,
+            &WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
+                strategies: vec!["owner".into(), "other".into()],
+                symbols: vec!["BTCUSDT".into()],
+            }),
+        );
+        for record in dropped_kinds("before-order") {
+            append(&mut wal, &record);
+        }
+        append(
+            &mut wal,
+            &WalRecord::OrderUpdate {
+                callbacks: Some(vec![StrategyId(0)]),
+                update: ack("owned"),
+            },
+        );
+        for record in dropped_kinds("before-source") {
+            append(&mut wal, &record);
+        }
+        let event = CallbackEvent::Order {
+            update: ack("sourced"),
+        };
+        let source = append(
+            &mut wal,
+            &WalRecord::StrategyCallbackSource {
+                placement: None,
+                strategy: StrategyId(1),
+                event: event.clone(),
+            },
+        );
+        for record in dropped_kinds("before-queue") {
+            append(&mut wal, &record);
+        }
+        let queued = append(
+            &mut wal,
+            &WalRecord::Retained(
+                engine_types::wal::RetainedWalRecord::StrategyCallbackQueued {
+                    input: StrategyCallbackInput {
+                        order_origin: Some(CallbackOrderOrigin {
+                            segment: 1,
+                            sequence: source,
+                        }),
+                        callback_id: 1,
+                        strategy: StrategyId(1),
+                        event,
+                        preparation: CallbackPreparation::Queued,
+                    },
+                },
+            ),
+        );
+        wal.barrier().unwrap();
+        drop(wal);
+        (path, source, queued)
+    }
+
+    /// Boot cursors are WAL sequences, never replay positions: the filtered
+    /// replay and the whole one build the same queue slots and the same
+    /// source frontiers, and resolve the retained origin to the same frame.
+    #[tokio::test(start_paused = true)]
+    async fn a_filtered_replay_builds_the_same_callback_cursors_as_the_whole_one() {
+        let (path, source, queued) = interleaved_callback_log();
+
+        let (mut whole_wal, whole_rows) = engine_wal::open_current(&path).unwrap();
+        let whole = BootReplay::from_pairs(whole_rows);
+        let (mut kept_wal, kept_rows) =
+            engine_wal::open_current_with(&path, crate::assembly::boot_filter()).unwrap();
+        let kept = BootReplay::from_pairs(kept_rows);
+        assert!(
+            kept.len() * 2 < whole.len(),
+            "the filter must actually drop frames: {} of {}",
+            kept.len(),
+            whole.len()
+        );
+        assert_eq!(whole.sequence(whole.len() - 1), queued);
+        assert_eq!(kept.sequence(kept.len() - 1), queued);
+
+        let (whole_state, whole_pages) = CallbackPages::replay(&whole, 2, 1).unwrap();
+        let (kept_state, kept_pages) = CallbackPages::replay(&kept, 2, 1).unwrap();
+        assert_eq!(kept_pages.slots, whole_pages.slots);
+        assert_eq!(kept_state.committed, whole_state.committed);
+        assert_eq!(whole_pages.slots[&1].queued.sequence, queued);
+
+        let mut whole_news = OrderNews::default();
+        whole_news
+            .attach(whole_wal.callback_reader().unwrap().unwrap(), &whole, 2)
+            .unwrap();
+        let mut kept_news = OrderNews::default();
+        kept_news
+            .attach(kept_wal.callback_reader().unwrap().unwrap(), &kept, 2)
+            .unwrap();
+        assert_eq!(kept_news.snapshot(), whole_news.snapshot());
+        let frontier = whole_news
+            .snapshot()
+            .into_iter()
+            .find(|row| row.strategy == StrategyId(1))
+            .unwrap();
+        assert_eq!(
+            frontier.accepted,
+            Some(CallbackOrderOrigin {
+                segment: 1,
+                sequence: source
+            })
+        );
+        assert_eq!(frontier.latest.sequence, source);
+    }
+
+    /// The two boot checks that read the replay as a whole rather than by
+    /// kind: a pre-`Names` log that holds state still refuses, and a log with
+    /// history never reads as one with none.
+    #[test]
+    fn the_filter_leaves_the_whole_slice_checks_their_answers() {
+        let with_boot = crate::testpath::temp_path("filtered-legacy-with-boot");
+        let (mut wal, _) = engine_wal::WalWriter::open_unsynced(&with_boot).unwrap();
+        wal.append(&WalRecord::Boot {
+            version: ENGINE_VERSION.to_string(),
+            config_sha256: "0".repeat(64),
+            wall_ts_ms: clock::wall_ms(),
+            commit: "unknown".into(),
+        })
+        .unwrap();
+        for record in dropped_kinds("legacy") {
+            wal.append(&record).unwrap();
+        }
+        wal.flush().unwrap();
+        drop(wal);
+
+        let (_, whole) = crate::assembly::wal(&with_boot).unwrap();
+        let (_, kept) = crate::assembly::boot_wal(&with_boot).unwrap();
+        assert!(kept.len() < whole.len());
+        assert!(crate::identities::replay_identities(&whole).is_err());
+        assert!(
+            crate::identities::replay_identities(&kept).is_err(),
+            "a pre-Names log that holds state must still refuse dense ownership"
+        );
+
+        let telemetry_only = crate::testpath::temp_path("filtered-telemetry-only");
+        let (mut wal, _) = engine_wal::WalWriter::open_unsynced(&telemetry_only).unwrap();
+        for record in dropped_kinds("only") {
+            wal.append(&record).unwrap();
+        }
+        wal.flush().unwrap();
+        drop(wal);
+
+        let (_, kept) = crate::assembly::boot_wal(&telemetry_only).unwrap();
+        assert!(
+            !kept.is_empty(),
+            "an all-telemetry log must not read as a log with no history at all"
+        );
+        assert!(execution_history_through_ms(&kept).is_none());
+    }
+
+    /// A replay with something for every reader below to find, including the
+    /// one `Note` source `LedgerOfOrders` does read.
+    fn kept_replay() -> Vec<WalRecord> {
+        let now = clock::wall_ms();
+        vec![
+            WalRecord::Retained(engine_types::wal::RetainedWalRecord::Names {
+                strategies: vec!["carry".into()],
+                symbols: vec!["BTCUSDT".into()],
+            }),
+            WalRecord::ExecutionPrecisionV1,
+            WalRecord::OrderIdEpoch {
+                epoch_ms: 1_700_000_000_000,
+            },
+            WalRecord::Boot {
+                version: ENGINE_VERSION.to_string(),
+                config_sha256: "0".repeat(64),
+                wall_ts_ms: now - 100,
+                commit: "unknown".into(),
+            },
+            WalRecord::OrderSent {
+                dispatch: None,
+                request: OrderRequest {
+                    client_order_id: "eng-open".into(),
+                    strategy: StrategyId(0),
+                    symbol: SymbolId(0),
+                    side: Side::Buy,
+                    qty: 1.0,
+                    kind: OrderKind::Market,
+                    stop: Some(StopSpec { trigger_px: 90.0 }),
+                    reduce_only: false,
+                    exact_terms: None,
+                    sleeve_effect: None,
+                    close_position: false,
+                },
+                wire_ns: 1,
+                arrival_mid: 100.0,
+            },
+            WalRecord::OrderUpdate {
+                callbacks: None,
+                update: OrderUpdate::Fill {
+                    allocation: None,
+                    amounts: None,
+                    exec_id: "open-1".into(),
+                    client_order_id: "eng-open".into(),
+                    symbol: SymbolId(0),
+                    side: Side::Buy,
+                    qty: 1.0,
+                    px: 100.0,
+                    fee: Some(0.0),
+                    is_maker: false,
+                    forced_close: None,
+                    venue_ts_ms: now - 20,
+                    recv_ns: 1,
+                },
+            },
+            WalRecord::OrderSent {
+                dispatch: None,
+                request: OrderRequest {
+                    client_order_id: "eng-never".into(),
+                    strategy: StrategyId(0),
+                    symbol: SymbolId(0),
+                    side: Side::Sell,
+                    qty: 1.0,
+                    kind: OrderKind::Market,
+                    stop: None,
+                    reduce_only: true,
+                    exact_terms: None,
+                    sleeve_effect: None,
+                    close_position: false,
+                },
+                wire_ns: 2,
+                arrival_mid: 100.0,
+            },
+            WalRecord::Note {
+                source: "shadow".into(),
+                text: format!(
+                    "{}eng-never never left the socket",
+                    crate::inflight::NEVER_SENT_PREFIX
+                ),
+            },
+            WalRecord::Note {
+                source: "engine".into(),
+                text: "a line only the offline readers render".into(),
+            },
+            WalRecord::StopSet {
+                symbol: SymbolId(0),
+                trigger_px: 91.0,
+                wall_ts_ms: now - 15,
+            },
+            WalRecord::ExecutionHistoryCheckpoint {
+                through_wall_ts_ms: now - 10,
+            },
+            WalRecord::Reconciled {
+                wall_ts_ms: now - 5,
+                findings: Vec::new(),
+                may_open: true,
+            },
+        ]
+    }
+
+    /// Every reader of the boot replay, over the same log with and without
+    /// the records `boot_reads` refuses.
+    #[test]
+    fn every_boot_reader_reads_the_filtered_replay_the_same_way() {
+        let kept = kept_replay();
+        let mut mixed = Vec::new();
+        for (index, record) in kept.iter().enumerate() {
+            mixed.extend(dropped_kinds(&format!("before-{index}")));
+            mixed.push(record.clone());
+        }
+        mixed.extend(dropped_kinds("last"));
+
+        assert_eq!(
+            mixed
+                .iter()
+                .filter(|record| boot_reads(record))
+                .cloned()
+                .collect::<Vec<_>>(),
+            kept,
+            "the filter keeps exactly the records the readers are given below"
+        );
+        assert!(
+            mixed.len() > kept.len() * 8,
+            "the mixed log must actually carry the dropped kinds"
+        );
+
+        let names = ["carry".to_string()];
+        let now = clock::wall_ms();
+        let specs = std::collections::BTreeMap::new();
+        // Each entry renders one reader's whole result; `{:?}` compares the
+        // outputs without requiring PartialEq on every one of them.
+        let read = |records: &[WalRecord]| -> Vec<String> {
+            let identities = crate::identities::replay_identities(records).unwrap();
+            let sleeves = identities
+                .as_ref()
+                .map(|state| state.sleeves.len())
+                .unwrap_or_default();
+            let adoption = crate::legacy_quantity::plan(records, &specs, 0);
+            vec![
+                format!("{identities:?}"),
+                {
+                    let plan = crate::identities::plan_identities(
+                        records,
+                        &names,
+                        None,
+                        &Default::default(),
+                        &[],
+                    )
+                    .unwrap();
+                    format!(
+                        "{:?}",
+                        (
+                            plan.changed,
+                            plan.state,
+                            plan.slot_configs,
+                            plan.configured_ids
+                        )
+                    )
+                },
+                format!("{:?}", crate::assembly::symbol_order(records, &[]).unwrap()),
+                format!(
+                    "{:?}",
+                    super::super::symbol_admission::replay_catalog(records).unwrap()
+                ),
+                format!("{:?}", crate::signals::active_subscriptions(records)),
+                format!(
+                    "{:?}",
+                    crate::signals::active_subscriptions_listed(records, None)
+                ),
+                format!("{:?}", crate::portfolio_routes::replayed(records).unwrap()),
+                {
+                    let dispatches =
+                        crate::order_dispatch::OrderDispatches::replay(records).unwrap();
+                    format!(
+                        "{:?}",
+                        (
+                            dispatches.orders.keys().collect::<Vec<_>>(),
+                            dispatches.strategy_runtime_retirements,
+                            dispatches.unresolved,
+                            dispatches.recovered,
+                            dispatches.lookup_pending,
+                            dispatches.lookup_after,
+                        )
+                    )
+                },
+                format!(
+                    "{:?}",
+                    crate::inflight::LedgerOfOrders::try_from_records(records).unwrap()
+                ),
+                format!(
+                    "{:?}",
+                    crate::attribution::Attribution::try_from_records(records).unwrap()
+                ),
+                {
+                    let mut fills = crate::execution::Fills::try_from_records(records).unwrap();
+                    let rows = fills
+                        .rows()
+                        .map(|(sleeve, symbol, _)| (sleeve.to_string(), symbol.to_string()))
+                        .collect::<Vec<_>>();
+                    format!(
+                        "{:?}",
+                        (
+                            rows,
+                            fills.dropped,
+                            fills.stream_gaps,
+                            fills.recovered,
+                            fills.lots().open()
+                        )
+                    )
+                },
+                format!(
+                    "{:?}",
+                    crate::portfolio_control::PortfolioControls::replay(records).unwrap()
+                ),
+                format!("{:?}", crate::reconcile::logged_exposure(records).unwrap()),
+                format!(
+                    "{:?}",
+                    crate::reconcile::physical_exposure(records).unwrap()
+                ),
+                format!("{:?}", crate::reconcile::intended_stops(records).unwrap()),
+                format!(
+                    "{:?}",
+                    crate::reconcile::position_state_with_adoption(records, None, false)
+                        .unwrap()
+                        .0
+                ),
+                format!("{adoption:?}"),
+                format!(
+                    "{:?}",
+                    crate::legacy_quantity::Replay::new(records, None)
+                        .and_then(|replay| replay.finish())
+                ),
+                format!(
+                    "{:?}",
+                    crate::execution_ids::ExecutionIds::from_records(records, now)
+                        .unwrap()
+                        .len()
+                ),
+                format!(
+                    "{:?}",
+                    crate::signal_state::SignalState::replay(records, sleeves).unwrap()
+                ),
+                {
+                    let effects = crate::effects::Effects::replay(records, sleeves).unwrap();
+                    format!(
+                        "{:?}",
+                        (effects.next_id, effects.transitions, effects.journaled)
+                    )
+                },
+                {
+                    let state =
+                        crate::callback_recovery::state::CallbackState::replay(records, sleeves)
+                            .unwrap();
+                    format!("{:?}", (state.committed, state.inputs, state.next_id))
+                },
+                format!(
+                    "{:?}",
+                    CallbackHost::new(CallbackExecution::Embedded, &[], records)
+                        .unwrap()
+                        .recovering
+                ),
+                format!(
+                    "{:?}",
+                    super::super::free_helpers::execution_history_through_ms(records)
+                ),
+                format!(
+                    "{:?}",
+                    super::super::free_helpers::replay_strategy_checkpoints(records)
+                ),
+                format!(
+                    "{:?}",
+                    super::super::free_helpers::replay_strategy_global_checkpoints(records)
+                ),
+                format!(
+                    "{:?}",
+                    super::super::free_helpers::replay_strategy_events(records)
+                ),
+                format!(
+                    "{:?}",
+                    super::super::free_helpers::replay_runtime_control_state(records)
+                        .map(|state| (state.requests, state.consumed, state.entries_enabled))
+                        .map_err(|error| error.to_string())
+                ),
+                format!("{:?}", recent_legacy_fills(records)),
+                format!("{:?}", legacy_overlap_counts(records, 0)),
+                format!(
+                    "{:?}",
+                    RecoveryOutcome::prepare(records, None, now)
+                        .map(|outcome| (outcome.physical, outcome.intended, outcome.through_ms))
+                        .map_err(|error| error.to_string())
+                ),
+            ]
+        };
+
+        // What boot actually holds: the kept records plus the one refused
+        // record the whole-slice checks keep.
+        let mut keep = crate::assembly::boot_filter();
+        let booted: Vec<WalRecord> = mixed
+            .iter()
+            .filter(|record| keep(record))
+            .cloned()
+            .collect();
+        assert_eq!(booted.len(), kept.len() + 1);
+
+        let full = read(&mixed);
+        for (name, other) in [("kept", read(&kept)), ("booted", read(&booted))] {
+            assert_eq!(full.len(), other.len());
+            for (index, (a, b)) in full.iter().zip(other.iter()).enumerate() {
+                assert_eq!(a, b, "reader {index} read the {name} replay differently");
+            }
+        }
     }
 }

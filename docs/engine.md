@@ -273,7 +273,7 @@ requiring `amend` here would refuse the boot of a funded engine.
 | :--- | :--- | :--- | :--- |
 | **1. Config** | Parse & Hash | Reads TOML config and hashes exact bytes. | Rejects unknown keys (`deny_unknown_fields`). |
 | **2. Plugs** | Plugs Bind | Resolves compiled venue and strategy reducers by stable sleeve key. | Existing durable slots keep their owners; absent configured sleeves use passive owners restored from committed paged callback state. Pending queue cursors remain for engine recovery. |
-| **3. WAL** | Replay & Lock | Locks `/var/lib/.../engine.wal` and replays the newest trusted segment. | Rebuilds identities and unfinished work; persists `ExecutionPrecisionV1` and a fresh `OrderIdEpoch` before new engine work. |
+| **3. WAL** | Replay & Lock | Locks `/var/lib/.../engine.wal` and replays the newest trusted segment, keeping only the record kinds boot's readers match (`assembly::boot_reads`) and carrying each kept record's WAL sequence (`assembly::BootReplay`). | Rebuilds identities and unfinished work; persists `ExecutionPrecisionV1` and a fresh `OrderIdEpoch` before new engine work. `Intent`, `IntentRefused`, `Verdict`, `CancelSent`, `QuoteFill`, `VenueTiming` and `LatencyLedger` never enter the boot replay; `engine replay`, `cohort`, `fills` and `latency` read them from the whole segment chain. |
 | **4. Lease** | Account Lock | Authenticates account and acquires writer lease. On Hyperliquid the authentication also checks that the signing key's address is listed in the account's `extraAgents`, and refuses before trading when it is not. | Lock: `/run/lock/liquidity-migration/<venue>-<realm>-user-<id>.lock`. |
 | **5. Private WS**| Stream Watermark| Connects private WebSocket and awaits ready state. | Blocks if auth fails or private queue is cold. |
 | **6. Reconcile**| State Audit | Streams missed executions into canonical orders, sleeve accounting, physical exposure and stops; compares them with the account. | Unknown engine lineage is loaded from retained WAL archives; unresolved ownership, unfinished durable dispatches or account disagreement prevent history-frontier advancement and opening. |
@@ -328,7 +328,7 @@ A run that ends without being asked returns one `EngineError`. The supervisor re
 
 | Owner | Resident bound / scaling | Overflow or recovery behavior |
 | --- | --- | --- |
-| Active WAL replay | Decoded records scale with the newest trusted segment; `wal_rotate_mb` bounds the rotation target, not total process RSS. | Boot and operator state verification use `replay_current`; archive readers stream older segments without decoding the whole family. |
+| Active WAL replay | Resident records scale with the kinds boot reads, not with the newest trusted segment: `assembly::boot_wal` refuses per-decision and per-call telemetry at decode time, about half a trading segment's frames and bytes; `wal_rotate_mb` bounds the rotation target, not total process RSS. | Boot opens the newest trusted segment through `open_current_with`; operator state verification reads the same segment through `replay_current`; archive readers stream older segments without decoding the whole family. |
 | Callback backlog | Bounded payload admission; at most `MAX_PROCESS_PROPOSAL_BYTES / 64` disk queue slots, with WAL cursors and event hashes. | One asynchronous page load owns its input; the core continues unrelated work while stalled destinations retain their queues. |
 | Execution response | Disk-sorted runs target 256 KiB plus one bounded row; individual encoded rows below 8 MiB; stable timestamp/arrival ordering. | Complete venue windows are consumed row by row at boot and runtime; no aggregate execution-response `Vec` is retained. |
 | Execution identities | `1 << 20` IDs and 64 MiB of ID bytes across a 7-day reach plus 120 s pad. | Exhaustion is explicit; an ID still inside retention is never discarded to make room. |
@@ -641,6 +641,7 @@ The `cfg(test)` build shortens the engine's confirmation windows, so the simulat
 
 ## Invariants
 
+* **Must**: every boot cursor into the callback WAL be the sequence its frame was written at, carried on the replay (`BootReplay::sequence`, `by_sequence`). **Must never**: a record's position in the boot replay be used as a WAL sequence.
 * **Must**: iteration that determines WAL records or allocation order use deterministic ordering. Hash lookup tables may serve lookups; a hash seed must never choose the order of durable effects. `engine sim --twice` exercises byte identity.
 * **Must**: a simulator fault wrapper decide before it awaits and park anything it took from the inner feed, so a lost `select!` branch loses nothing.
 * **Must Never**: the simulator soften a failing check. A real engine defect is reported with its seed; a simulator gap is fixed in the simulator.

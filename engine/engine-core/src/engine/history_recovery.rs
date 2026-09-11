@@ -193,7 +193,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .unwrap_or_else(|| owner.into_iter().collect());
             let callbacks = self.host.callbacks.recovering.then_some(owners);
             if let Some(owners) = &callbacks {
-                self.ensure_callback_reader(&[])?;
+                self.ensure_callback_reader(&crate::assembly::BootReplay::dense(&[]))?;
                 let WalRecord::RecoveredFill {
                     callbacks: recorded,
                     ..

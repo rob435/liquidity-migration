@@ -48,9 +48,12 @@ fn callback_floor(base: &WalRecord, segment: u64) -> Result<Option<u64>, Box<dyn
     else {
         return Ok(None);
     };
-    let (state, pages) =
-        CallbackPages::replay(std::slice::from_ref(base), strategies.len(), segment)
-            .map_err(|error| format!("retained callback restatement: {error}"))?;
+    let (state, pages) = CallbackPages::replay(
+        &engine_core::assembly::BootReplay::dense(std::slice::from_ref(base)),
+        strategies.len(),
+        segment,
+    )
+    .map_err(|error| format!("retained callback restatement: {error}"))?;
     let mut named: Vec<u64> = Vec::new();
     for slot in pages.slots.values() {
         named.push(slot.queued.segment);

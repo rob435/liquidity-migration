@@ -470,11 +470,31 @@ impl WalWriter {
         Self::open_segment(path.as_ref(), path.as_ref(), false)
     }
 
+    /// [`open_unsynced`](Self::open_unsynced), keeping only the records
+    /// `keep` accepts. Same filter contract as [`open_current_with`].
+    pub fn open_unsynced_with(
+        path: impl AsRef<Path>,
+        keep: impl FnMut(&WalRecord) -> bool,
+    ) -> Result<(Self, Vec<(u64, WalRecord)>), WalError> {
+        Self::open_segment_with(path.as_ref(), path.as_ref(), false, kept(keep))
+    }
+
     fn open_segment(
         path: &Path,
         family: &Path,
         durable: bool,
     ) -> Result<(Self, Vec<(u64, WalRecord)>), WalError> {
+        Self::open_segment_with(path, family, durable, |sequence, record| {
+            Some((sequence, record))
+        })
+    }
+
+    fn open_segment_with<T>(
+        path: &Path,
+        family: &Path,
+        durable: bool,
+        keep: impl FnMut(u64, WalRecord) -> Option<T>,
+    ) -> Result<(Self, Vec<T>), WalError> {
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -491,31 +511,28 @@ impl WalWriter {
                     File::open(dir)?.sync_all()?;
                 }
             }
-            Scan {
-                records: Vec::new(),
-                good_end: HEADER_LEN,
-            }
+            Scan::empty()
         } else {
-            scan_file(&mut file, len)?
+            scan_file_with(&mut file, len, keep)?
         };
 
         Self::from_scan(file, path, family, durable, scan)
     }
 
-    fn from_scan(
+    fn from_scan<T>(
         mut file: File,
         path: &Path,
         family: &Path,
         durable: bool,
-        scan: Scan,
-    ) -> Result<(Self, Vec<(u64, WalRecord)>), WalError> {
+        scan: Scan<T>,
+    ) -> Result<(Self, Vec<T>), WalError> {
         let len = file.metadata()?.len();
         if scan.good_end < len {
             file.set_len(scan.good_end)?;
         }
         file.seek(SeekFrom::Start(scan.good_end))?;
 
-        let next_seq = scan.records.len() as u64 + 1;
+        let next_seq = scan.decoded + 1;
         let sync = if durable {
             SyncThread::spawn(&file).ok()
         } else {
@@ -1071,10 +1088,17 @@ pub fn first_record(path: &Path) -> Result<Option<WalRecord>, WalError> {
 /// checksum makes a torn restatement mechanically detectable, and a torn
 /// restatement means the rotation never finished, so the segment before it
 /// is still the truth.
-fn trusted(index: u64, records: &[(u64, WalRecord)]) -> bool {
+///
+/// `starts_with_base` is the FIRST DECODED record of the segment, never the
+/// first record a reader chose to keep.
+fn trusted(index: u64, starts_with_base: bool) -> bool {
     if index <= 1 {
         return true;
     }
+    starts_with_base
+}
+
+fn starts_with_base(records: &[(u64, WalRecord)]) -> bool {
     matches!(records.first(), Some((_, WalRecord::SegmentBase { .. })))
 }
 
@@ -1103,7 +1127,36 @@ fn scan_candidate(index: u64, path: &Path) -> Result<(Vec<(u64, WalRecord)>, boo
 pub fn open_current(
     family: impl AsRef<Path>,
 ) -> Result<(WalWriter, Vec<(u64, WalRecord)>), WalError> {
-    let family = family.as_ref();
+    open_current_kept(family.as_ref(), |sequence, record| Some((sequence, record)))
+}
+
+/// [`open_current`], keeping only the records `keep` accepts. Every frame is
+/// still decoded and still validated; a refused record is dropped before it
+/// reaches the vector, so the caller holds its own working set rather than
+/// the whole segment. Kept records carry the sequence they were written at,
+/// which no longer equals their position.
+///
+/// The writer does not see the filter: the trust decision reads the first
+/// DECODED record, the next sequence counts every decoded frame, and a torn
+/// tail is truncated at the same byte either way.
+pub fn open_current_with(
+    family: impl AsRef<Path>,
+    keep: impl FnMut(&WalRecord) -> bool,
+) -> Result<(WalWriter, Vec<(u64, WalRecord)>), WalError> {
+    open_current_kept(family.as_ref(), kept(keep))
+}
+
+/// A `keep` predicate as the pair-building form `Scan` takes.
+fn kept(
+    mut keep: impl FnMut(&WalRecord) -> bool,
+) -> impl FnMut(u64, WalRecord) -> Option<(u64, WalRecord)> {
+    move |sequence, record| keep(&record).then_some((sequence, record))
+}
+
+fn open_current_kept<T>(
+    family: &Path,
+    mut keep: impl FnMut(u64, WalRecord) -> Option<T>,
+) -> Result<(WalWriter, Vec<T>), WalError> {
     let mut chain = segments(family)?;
     while let Some((index, path)) = chain.pop() {
         // Trust is decided before a candidate is opened for writing. The
@@ -1112,22 +1165,22 @@ pub fn open_current(
         let len = file.metadata()?.len();
         if len == 0 {
             if index <= 1 {
-                return WalWriter::open_segment(&path, family, true);
+                return WalWriter::open_segment_with(&path, family, true, &mut keep);
             }
             continue;
         }
-        let scan = match scan_file(&mut file, len) {
+        let scan = match scan_file_with(&mut file, len, &mut keep) {
             Ok(scan) => scan,
             Err(WalError::Corrupt { offset: 0, .. }) if index > 1 => continue,
             Err(error) => return Err(error),
         };
-        if trusted(index, &scan.records) {
+        if trusted(index, scan.starts_with_base) {
             let writable = OpenOptions::new().read(true).write(true).open(&path)?;
             return WalWriter::from_scan(writable, &path, family, true, scan);
         }
     }
     // Nothing exists yet: a fresh log at the family path.
-    WalWriter::open_segment(family, family, true)
+    WalWriter::open_segment_with(family, family, true, &mut keep)
 }
 
 /// Replay the newest segment boot can trust without opening it for writing:
@@ -1140,7 +1193,7 @@ pub fn replay_current(family: impl AsRef<Path>) -> Result<(Vec<(u64, WalRecord)>
     let mut chain = segments(family)?;
     while let Some((index, path)) = chain.pop() {
         let (records, damaged) = scan_candidate(index, &path)?;
-        if trusted(index, &records) {
+        if trusted(index, starts_with_base(&records)) {
             return Ok((records, damaged));
         }
     }
@@ -1214,19 +1267,56 @@ pub fn replay_chain(family: impl AsRef<Path>) -> Result<(Vec<(u64, WalRecord)>, 
     Ok((out, damaged))
 }
 
-struct Scan {
-    records: Vec<(u64, WalRecord)>,
+struct Scan<T> {
+    /// What the caller kept. Nothing else in this struct depends on it.
+    records: Vec<T>,
     /// Offset just past the last good frame.
     good_end: u64,
+    /// Frames decoded, kept or not: the sequence the next append gets.
+    decoded: u64,
+    /// Whether the first decoded record is a [`WalRecord::SegmentBase`].
+    starts_with_base: bool,
 }
 
-fn scan_file(file: &mut File, len: u64) -> Result<Scan, WalError> {
+impl<T> Scan<T> {
+    fn empty() -> Self {
+        Scan {
+            records: Vec::new(),
+            good_end: HEADER_LEN,
+            decoded: 0,
+            starts_with_base: false,
+        }
+    }
+}
+
+fn scan_file(file: &mut File, len: u64) -> Result<Scan<(u64, WalRecord)>, WalError> {
+    scan_file_with(file, len, |sequence, record| Some((sequence, record)))
+}
+
+fn scan_file_with<T>(
+    file: &mut File,
+    len: u64,
+    mut keep: impl FnMut(u64, WalRecord) -> Option<T>,
+) -> Result<Scan<T>, WalError> {
     let mut records = Vec::new();
+    let mut decoded = 0;
+    let mut starts_with_base = false;
     let good_end = scan_frames(file, len, read_record, |sequence, _, _, record| {
-        records.push((sequence, record));
+        if decoded == 0 {
+            starts_with_base = matches!(record, WalRecord::SegmentBase { .. });
+        }
+        decoded = sequence;
+        if let Some(kept) = keep(sequence, record) {
+            records.push(kept);
+        }
         Ok(())
     })?;
-    Ok(Scan { records, good_end })
+    Ok(Scan {
+        records,
+        good_end,
+        decoded,
+        starts_with_base,
+    })
 }
 
 fn scan_frames(

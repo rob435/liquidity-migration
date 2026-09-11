@@ -5,7 +5,7 @@
 //! | # | Step | Built by |
 //! | --- | --- | --- |
 //! | 1 | config, hashed; venue name parsed once | `config::load`, `assembly::venue_name` |
-//! | 2 | WAL claim, then the replay every later step reads | `engine_wal::lock`, `assembly::wal` |
+//! | 2 | WAL claim, then the replay every later step reads | `engine_wal::lock`, `assembly::boot_wal` |
 //! | 3 | identity plan: sleeve slots and the symbol table | `identities::plan_identities`, `assembly::symbol_order` |
 //! | 4 | strategies, and the risk kernel they are gated by | `assembly::strategies_for_registry`, `assembly::risk` |
 //! | 5 | venue gateway, on the name from 1 and the symbols from 3 | `assembly::venue` |
@@ -68,7 +68,7 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     }
 
     let _log_claim = engine_wal::lock(&settings.wal_path)?;
-    let (wal, replayed) = assembly::wal(&settings.wal_path)?;
+    let (wal, replayed) = assembly::boot_wal(&settings.wal_path)?;
     let configured_keys: Vec<_> = loaded
         .config
         .strategies
@@ -159,7 +159,7 @@ pub async fn run(config_path: &Path) -> Result<(), Box<dyn Error>> {
     // dial or repeatedly failing authentication.
     order_feed.await_ready().await?;
 
-    let mut engine = Engine::boot_as_exact(
+    let mut engine = Engine::boot_replay_exact(
         &settings,
         &loaded.sha256,
         wal,

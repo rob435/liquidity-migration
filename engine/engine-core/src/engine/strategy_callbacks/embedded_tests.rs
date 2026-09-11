@@ -444,11 +444,13 @@ async fn embedded_global_checkpoint_supersedes_legacy_runtime_at_the_durable_tra
         .unwrap()
         .committed
         .is_empty());
-    assert!(CallbackPages::replay(&written, 1, 1)
-        .unwrap()
-        .0
-        .committed
-        .is_empty());
+    assert!(
+        CallbackPages::replay(&crate::assembly::BootReplay::dense(&written), 1, 1)
+            .unwrap()
+            .0
+            .committed
+            .is_empty()
+    );
     engine.drain(clock::now_ns()).await.unwrap();
     assert_eq!(
         engine.host.global_checkpoints[&StrategyId(0)].checkpoint,

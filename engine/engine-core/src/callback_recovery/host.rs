@@ -24,7 +24,13 @@ impl CallbackHost {
         strategies: &[Box<dyn Strategy>],
         records: &[WalRecord],
     ) -> Result<(), String> {
-        let (state, pages) = CallbackPages::replay(records, strategies.len(), 1)?;
+        // Takeover reads a whole chain and keeps no cursor; segment 1 and the
+        // dense sequences are this projection's own.
+        let (state, pages) = CallbackPages::replay(
+            &crate::assembly::BootReplay::dense(records),
+            strategies.len(),
+            1,
+        )?;
         Self::build(
             CallbackExecution::Embedded,
             strategies,
@@ -47,13 +53,13 @@ impl CallbackHost {
     pub fn new_paged(
         execution: CallbackExecution,
         strategies: &[Box<dyn Strategy>],
-        records: &[WalRecord],
+        replayed: &crate::assembly::BootReplay<'_>,
         reader: Box<dyn engine_types::strategy_process::CallbackWalReader>,
     ) -> Result<Self, String> {
         let (state, mut pages) =
-            CallbackPages::replay(records, strategies.len(), reader.start().segment)?;
+            CallbackPages::replay(replayed, strategies.len(), reader.start().segment)?;
         pages.attach(reader);
-        Self::build(execution, strategies, records, state, pages)
+        Self::build(execution, strategies, replayed, state, pages)
     }
 
     fn build(

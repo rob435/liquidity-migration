@@ -48,7 +48,7 @@ impl OrderNews {
     pub fn attach(
         &mut self,
         reader: Box<dyn CallbackWalReader>,
-        records: &[WalRecord],
+        replayed: &crate::assembly::BootReplay<'_>,
         strategy_count: usize,
     ) -> Result<(), String> {
         if self.pending {
@@ -57,7 +57,7 @@ impl OrderNews {
         *self = Self::default();
         self.start = Some(reader.start());
         self.reader = Some(reader);
-        for record in records {
+        for record in replayed.iter() {
             if let WalRecord::SegmentBase {
                 strategy_callback_sources,
                 ..
@@ -83,7 +83,7 @@ impl OrderNews {
                 }
             }
         }
-        for (index, record) in records.iter().enumerate() {
+        for (index, record) in replayed.iter().enumerate() {
             let owners = match record {
                 WalRecord::OrderUpdate {
                     callbacks: Some(owners),
@@ -100,10 +100,10 @@ impl OrderNews {
                 if owners.iter().any(|owner| owner.idx() >= strategy_count) {
                     return Err("order callback source escapes configured owners".into());
                 }
-                self.record(index as u64 + 1, &owners)?;
+                self.record(replayed.sequence(index), &owners)?;
             }
         }
-        for record in records {
+        for record in replayed.iter() {
             if let WalRecord::Retained(
                 engine_types::wal::RetainedWalRecord::StrategyCallbackQueued { input },
             ) = record
@@ -118,10 +118,9 @@ impl OrderNews {
                         );
                     }
                     if Some(origin.segment) == self.start.map(|start| start.segment) {
-                        let source = origin
-                            .sequence
-                            .checked_sub(1)
-                            .and_then(|index| records.get(index as usize))
+                        let source = replayed
+                            .by_sequence(origin.sequence)
+                            .and_then(|index| replayed.get(index))
                             .ok_or("callback order origin has no parent frame")?;
                         let expected = match source {
                             WalRecord::OrderUpdate {
@@ -453,8 +452,12 @@ mod tests {
         let (mut wal, rows) = engine_wal::WalWriter::open(&path).unwrap();
         let rows: Vec<_> = rows.into_iter().map(|(_, row)| row).collect();
         let mut news = OrderNews::default();
-        news.attach(wal.callback_reader().unwrap().unwrap(), &rows, 2)
-            .unwrap();
+        news.attach(
+            wal.callback_reader().unwrap().unwrap(),
+            &crate::assembly::BootReplay::dense(&rows),
+            2,
+        )
+        .unwrap();
         assert!(news.unread_for(StrategyId(0)) && news.unread_for(StrategyId(1)));
         news.start_read();
         let completion = news.completed.recv().await.unwrap();
@@ -490,7 +493,11 @@ mod tests {
         let rows: Vec<_> = rows.into_iter().map(|(_, row)| row).collect();
         let mut restored = OrderNews::default();
         restored
-            .attach(wal.callback_reader().unwrap().unwrap(), &rows, 2)
+            .attach(
+                wal.callback_reader().unwrap().unwrap(),
+                &crate::assembly::BootReplay::dense(&rows),
+                2,
+            )
             .unwrap();
         assert!(
             !restored.unread_for(StrategyId(0)),
@@ -531,7 +538,11 @@ mod tests {
         let mut refused = OrderNews::default();
         assert!(
             refused
-                .attach(wal.callback_reader().unwrap().unwrap(), &wrong, 2)
+                .attach(
+                    wal.callback_reader().unwrap().unwrap(),
+                    &crate::assembly::BootReplay::dense(&wrong),
+                    2,
+                )
                 .is_err(),
             "whole-parent substitution silently changed a durable sleeve view"
         );
@@ -571,8 +582,12 @@ mod paging_tests {
             crate::testpath::append_history(&mut wal, &path, row).unwrap();
         }
         let mut news = OrderNews::default();
-        news.attach(wal.callback_reader().unwrap().unwrap(), &rows, 2)
-            .unwrap();
+        news.attach(
+            wal.callback_reader().unwrap().unwrap(),
+            &crate::assembly::BootReplay::dense(&rows),
+            2,
+        )
+        .unwrap();
         loop {
             news.start_read_for(|strategy| strategy == StrategyId(1));
             let completion = news.completed.recv().await.unwrap();
@@ -637,8 +652,12 @@ mod paging_tests {
         let (mut wal, rows) = engine_wal::open_current(&path).unwrap();
         let rows: Vec<_> = rows.into_iter().map(|(_, row)| row).collect();
         let mut news = OrderNews::default();
-        news.attach(wal.callback_reader().unwrap().unwrap(), &rows, 2)
-            .unwrap();
+        news.attach(
+            wal.callback_reader().unwrap().unwrap(),
+            &crate::assembly::BootReplay::dense(&rows),
+            2,
+        )
+        .unwrap();
         assert!(news.unread_for(StrategyId(0)));
         assert!(
             !news.unread_for(StrategyId(1)),
@@ -675,8 +694,12 @@ mod paging_tests {
         let (mut wal, rows) = engine_wal::open_current(&path).unwrap();
         let rows: Vec<_> = rows.into_iter().map(|(_, row)| row).collect();
         let mut news = OrderNews::default();
-        news.attach(wal.callback_reader().unwrap().unwrap(), &rows, 2)
-            .unwrap();
+        news.attach(
+            wal.callback_reader().unwrap().unwrap(),
+            &crate::assembly::BootReplay::dense(&rows),
+            2,
+        )
+        .unwrap();
         assert!(
             !news.unread(),
             "restarting after admission repeated a paused owner's old-segment source"
@@ -711,8 +734,12 @@ mod paging_tests {
         let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
         let owner = StrategyId(0);
         let mut news = OrderNews::default();
-        news.attach(wal.callback_reader().unwrap().unwrap(), &[], 1)
-            .unwrap();
+        news.attach(
+            wal.callback_reader().unwrap().unwrap(),
+            &crate::assembly::BootReplay::dense(&[]),
+            1,
+        )
+        .unwrap();
         unrelated_prefix(&mut wal);
         let first =
             crate::testpath::append_history(&mut wal, &path, &ack_source("first", vec![owner]))
@@ -743,8 +770,12 @@ mod paging_tests {
         let path = crate::testpath::temp_path("live-source-distinct-owner-frontiers");
         let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
         let mut news = OrderNews::default();
-        news.attach(wal.callback_reader().unwrap().unwrap(), &[], 2)
-            .unwrap();
+        news.attach(
+            wal.callback_reader().unwrap().unwrap(),
+            &crate::assembly::BootReplay::dense(&[]),
+            2,
+        )
+        .unwrap();
         unrelated_prefix(&mut wal);
         let owners = [StrategyId(0), StrategyId(1)];
         let first = crate::testpath::append_history(
@@ -784,8 +815,12 @@ mod paging_tests {
         let (mut wal, _) = engine_wal::WalWriter::open(&path).unwrap();
         let owner = StrategyId(0);
         let mut news = OrderNews::default();
-        news.attach(wal.callback_reader().unwrap().unwrap(), &[], 1)
-            .unwrap();
+        news.attach(
+            wal.callback_reader().unwrap().unwrap(),
+            &crate::assembly::BootReplay::dense(&[]),
+            1,
+        )
+        .unwrap();
         unrelated_prefix(&mut wal);
         let offset = wal.segment_size();
         let sequence =
@@ -854,7 +889,7 @@ mod paging_tests {
                 inner: reader,
                 expected,
             }),
-            &[],
+            &crate::assembly::BootReplay::dense(&[]),
             1,
         )
         .unwrap();
@@ -886,7 +921,7 @@ mod paging_tests {
                 inner: wal.callback_reader().unwrap().unwrap(),
                 expected,
             }),
-            &rows,
+            &crate::assembly::BootReplay::dense(&rows),
             1,
         )
         .unwrap();
