@@ -31,6 +31,8 @@ pub struct ContentionResult {
     pub cancel_after: u64,
     pub ttl_ms: u64,
     pub symbols: usize,
+    /// Whether the pretend venue also held a local request quota.
+    pub quota: bool,
     /// Openings the venue answered. `opening_queue_wait.count` is every
     /// placement, answered or refused unsent.
     pub openings_sent: u64,
@@ -54,6 +56,7 @@ pub(super) fn read(
     cancel_after: u64,
     ttl_ms: u64,
     symbols: usize,
+    quota: bool,
 ) -> ContentionResult {
     let mut opening_waits = Vec::new();
     let mut cancel_waits = Vec::new();
@@ -103,6 +106,7 @@ pub(super) fn read(
         cancel_after,
         ttl_ms,
         symbols,
+        quota,
         openings_sent,
         cancels_sent: cancel_waits.len() as u64,
         never_sent_expired,
@@ -169,7 +173,7 @@ mod tests {
                 wire_ns: 1,
             },
         ];
-        let read = read(&records, 200, 3, 500, 4);
+        let read = read(&records, 200, 3, 500, 4, false);
         assert_eq!(
             (read.venue_delay_ms, read.cancel_after, read.ttl_ms),
             (200, 3, 500)
@@ -187,7 +191,14 @@ mod tests {
 
     #[test]
     fn a_quota_hold_comes_out_of_the_cancel_call_span() {
-        let read = read(&[timing(CANCEL, 0, 100, 200, Some(40))], 0, 3, 10_000, 1);
+        let read = read(
+            &[timing(CANCEL, 0, 100, 200, Some(40))],
+            0,
+            3,
+            10_000,
+            1,
+            true,
+        );
         assert_eq!(read.cancel_venue_span.p50_ns, 60);
     }
 }

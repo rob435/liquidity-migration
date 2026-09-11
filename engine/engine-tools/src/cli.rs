@@ -720,6 +720,13 @@ pub(super) fn parse_bench_options(args: &[String]) -> Result<(BenchOptions, bool
     if let Some(v) = args.value("--wal") {
         options.wal_path = PathBuf::from(v);
     }
+    options.quota = args.flag("--quota");
+    if options.quota && !options.contention {
+        return Err("--quota is a --contention dial".into());
+    }
+    if options.quota {
+        options.venue_delay = crate::bench::QUOTA_VENUE_DELAY;
+    }
     options.fills = args.flag("--fills");
     if let Some(ms) = args.value("--venue-delay-ms") {
         options.venue_delay = std::time::Duration::from_millis(
@@ -885,6 +892,40 @@ mod tests {
         assert!(!json, "the table unless asked for JSON");
         assert!(!options.contention, "off unless asked");
         assert_eq!(options.ttl_ms, 10_000, "the engine's own default");
+    }
+
+    #[test]
+    fn the_local_quota_is_a_contention_dial_and_nothing_else() {
+        let (options, _) =
+            parse_bench_options(&args(&["bench", "--contention", "--quota"])).unwrap();
+        assert!(options.quota);
+        assert_eq!(options.venue_delay, crate::bench::QUOTA_VENUE_DELAY);
+        let (slow, _) = parse_bench_options(&args(&[
+            "bench",
+            "--contention",
+            "--quota",
+            "--venue-delay-ms",
+            "200",
+        ]))
+        .unwrap();
+        assert_eq!(
+            slow.venue_delay,
+            std::time::Duration::from_millis(200),
+            "a stated delay is not overridden by the dial's own"
+        );
+        let (plain, _) = parse_bench_options(&args(&["bench", "--contention"])).unwrap();
+        assert!(!plain.quota, "off unless asked");
+        assert_eq!(
+            plain.venue_delay,
+            std::time::Duration::from_millis(200),
+            "the contention default is what it was"
+        );
+        assert_eq!(
+            parse_bench_options(&args(&["bench", "--quota"]))
+                .unwrap_err()
+                .to_string(),
+            "--quota is a --contention dial"
+        );
     }
 
     #[test]

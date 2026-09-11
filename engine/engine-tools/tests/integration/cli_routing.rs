@@ -65,6 +65,18 @@ fn unknown_commands_keep_the_companion_error_and_failure_status() {
 }
 
 #[test]
+fn the_bench_quota_dial_is_refused_without_its_workload_through_both_entry_points() {
+    let direct = invoke(TOOLS, &["bench", "--quota"]);
+    let forwarded = invoke(ENGINE, &["bench", "--quota"]);
+    assert!(!direct.status.success(), "{direct:?}");
+    assert_eq!(direct.status.code(), forwarded.status.code());
+    assert_eq!(forwarded.stdout, direct.stdout);
+    assert_eq!(forwarded.stderr, direct.stderr);
+    let error = String::from_utf8(direct.stderr).unwrap();
+    assert!(error.contains("--quota is a --contention dial"), "{error}");
+}
+
+#[test]
 fn wal_conversion_cli_creates_a_separate_family_through_both_entry_points() {
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("engine.wal");

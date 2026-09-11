@@ -510,6 +510,23 @@ impl VenueGateway for Venue {
         }
     }
 
+    fn quota_wait(&self, command: engine_types::QueuedCommand) -> std::time::Duration {
+        match self {
+            #[cfg(feature = "bybit")]
+            Venue::Bybit(gw) => gw.quota_wait(command),
+            #[cfg(feature = "hyperliquid")]
+            Venue::Hyperliquid(gw) => gw.quota_wait(command),
+            #[cfg(feature = "lighter")]
+            Venue::Lighter(gw) => gw.quota_wait(command),
+            #[cfg(feature = "mexc")]
+            Venue::Mexc(gw) => gw.quota_wait(command),
+            #[cfg(feature = "binance")]
+            Venue::Binance(gw) => gw.quota_wait(command),
+            #[cfg(feature = "variational")]
+            Venue::Variational(gw) => gw.quota_wait(command),
+        }
+    }
+
     fn add_symbol(&mut self, symbol: &str) -> Option<SymbolId> {
         match self {
             #[cfg(feature = "bybit")]

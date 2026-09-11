@@ -651,10 +651,10 @@ impl VenueName {
     /// the qty=0 whole-position close, and the execution stream both funded
     /// Bybit realms' receipts were read off.
     const BYBIT_SEMANTICS: &'static str =
-        "dd0edc1a1b482c3941077f0d52e3466838eb2abf40534755a0acfdfafe6d60b1";
+        "cb9569ffe9bef481a21f97927f23068ca117861ca37ff10ba75f8aace69bc6ab";
     /// The USDT-M futures REST and user-stream encoding.
     const BINANCE_SEMANTICS: &'static str =
-        "bf69d5f34759320ca5cd79f808f9151ace4e5eead6314fb06e9b9ded2bb9cecd";
+        "9690eac80bd6cb249ed26c82e52a8fc910e6a599425ce06b22c553aa6199bec5";
     /// The signed exchange actions (`order`, `batchModify`, `cancel`), the
     /// EIP-712 digest, the `cloid` scheme, and the fill and open-order reads
     /// the funded address's canary receipt was taken against.
@@ -669,7 +669,7 @@ impl VenueName {
     /// `personal.filter` frames the funded account's canary receipt was taken
     /// against.
     const MEXC_SEMANTICS: &'static str =
-        "08b22a3dbf54d09b2d918e4b5467c317ece1e763230fa22ee5b0b45403e82f62";
+        "4a74c2f60dfaba4f2872fcaf8349c75bba3cb7ec612f73f8e295c8c2cc441454";
     /// The public market reads, and the refusal every write returns.
     const VARIATIONAL_SEMANTICS: &'static str =
         "a79c459e38b6768d387978c3cbb5d85af56ab5674193ca5577352a473924ac2c";

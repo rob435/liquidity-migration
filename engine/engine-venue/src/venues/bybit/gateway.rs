@@ -186,6 +186,25 @@ impl RollingRateLimiter {
         Err(release.saturating_duration_since(now))
     }
 
+    /// The wait `try_reserve` would impose right now, consuming nothing and
+    /// dropping nothing: what the venue task asks before it picks a command.
+    fn wait_at(&self, now: Instant, count: usize, limit: usize) -> Duration {
+        let expired = self
+            .admissions
+            .iter()
+            .take_while(|at| now.duration_since(**at) >= RATE_LIMIT_WINDOW + RATE_LIMIT_GUARD)
+            .count();
+        let live = self.admissions.len() - expired;
+        if live + count <= limit {
+            return Duration::ZERO;
+        }
+        let must_expire = live + count - limit;
+        match self.admissions.get(expired + must_expire - 1) {
+            Some(at) => (*at + RATE_LIMIT_WINDOW + RATE_LIMIT_GUARD).saturating_duration_since(now),
+            None => Duration::ZERO,
+        }
+    }
+
     /// Venue arrival happens after local admission. Re-anchor the requests
     /// that just completed to the conservative side of that uncertainty, so
     /// a faster following request cannot cross the server's rolling window
@@ -1469,6 +1488,44 @@ impl VenueGateway for BybitGateway {
         self.last_rate_wait_ns.take()
     }
 
+    /// Every mutation is paced against the endpoint's own per-second window
+    /// before it is signed. This is the wait the next one of this shape would
+    /// serve, spending none of that window.
+    fn quota_wait(&self, command: engine_types::QueuedCommand) -> Duration {
+        use engine_types::QueuedCommand as Queued;
+        let (limiter, count, default) = match command {
+            Queued::Opening { requests } | Queued::Reducing { requests } => {
+                (&self.create_limiter, requests, ORDER_CREATES_PER_SECOND)
+            }
+            // The venue task only ever cancels through the batch endpoint,
+            // whose window every item in the group spends a slot of.
+            Queued::Cancel { requests } => (
+                &self.cancel_batch_limiter,
+                requests,
+                ORDER_CANCEL_BATCHES_PER_SECOND,
+            ),
+            Queued::Amend { requests } => (&self.amend_limiter, requests, ORDER_AMENDS_PER_SECOND),
+            Queued::PositionStop => (
+                &self.stop_limiter,
+                1,
+                match self.realm {
+                    VenueRealm::Demo => TRADING_STOPS_DEMO_PER_SECOND,
+                    VenueRealm::Mainnet => TRADING_STOPS_MAINNET_PER_SECOND,
+                },
+            ),
+            // Leverage and the reads boot makes have their own windows, which
+            // no queued mutation waits behind.
+            Queued::Administration => return Duration::ZERO,
+        };
+        let limit = limiter.limit(default);
+        // A group larger than the window ever admits is refused before the
+        // wire, so holding it back buys nothing.
+        if count == 0 || count > limit {
+            return Duration::ZERO;
+        }
+        limiter.wait_at(Instant::now(), count, limit)
+    }
+
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError> {
         self.set_stop_terms(symbol, trigger_px, None).await
     }
@@ -2305,6 +2362,64 @@ mod tests {
             VenueGateway::take_rate_wait_ns(&mut gateway),
             None,
             "a refused batch was charged the previous command's wait"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_query_is_what_the_next_reservation_serves_and_reserves_nothing() {
+        let mut limiter = RollingRateLimiter::default();
+        let limit = limiter.limit(ORDER_CREATES_PER_SECOND);
+        assert_eq!(limiter.wait_at(Instant::now(), 1, limit), Duration::ZERO);
+        // Spread across the window: a wait has to name the right admission.
+        let first = Instant::now();
+        for _ in 0..limit {
+            reserve_rate_capacity(&mut limiter, 1, ORDER_CREATES_PER_SECOND).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let queried = limiter.wait_at(Instant::now(), 1, limit);
+        assert_eq!(
+            queried,
+            (first + RATE_LIMIT_WINDOW + RATE_LIMIT_GUARD) - Instant::now()
+        );
+        assert_eq!(
+            limiter.wait_at(Instant::now(), 1, limit),
+            queried,
+            "asking twice moved the window, so the query spent a slot"
+        );
+        assert!(
+            limiter.wait_at(Instant::now(), 2, limit) > queried,
+            "a group of two waits for one more admission to expire"
+        );
+        let started = Instant::now();
+        reserve_rate_capacity(&mut limiter, 1, ORDER_CREATES_PER_SECOND).await;
+        assert_eq!(started.elapsed(), queried);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_spent_create_window_is_reported_without_holding_a_cancel_back() {
+        let mut gateway = BybitGateway::for_test(
+            "http://127.0.0.1:1",
+            VenueRealm::Demo,
+            VenueRealm::Demo.credentials_for_test("key", "secret"),
+            vec!["BTCUSDT".to_string()],
+        );
+        for _ in 0..ORDER_CREATES_PER_SECOND {
+            reserve_rate_capacity(&mut gateway.create_limiter, 1, ORDER_CREATES_PER_SECOND).await;
+        }
+        assert_eq!(
+            VenueGateway::quota_wait(
+                &gateway,
+                engine_types::QueuedCommand::Opening { requests: 1 }
+            ),
+            RATE_LIMIT_WINDOW + RATE_LIMIT_GUARD
+        );
+        assert_eq!(
+            VenueGateway::quota_wait(
+                &gateway,
+                engine_types::QueuedCommand::Cancel { requests: 1 }
+            ),
+            Duration::ZERO,
+            "the cancel endpoint has its own window"
         );
     }
 

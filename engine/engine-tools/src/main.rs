@@ -46,7 +46,7 @@ engine — the execution loop
 
   engine bench [--events N] [--rate PER_SEC] [--every N] [--symbols A,B]
                [--wal PATH] [--fills] [--venue-delay-ms MS] [--json]
-               [--contention [--cancel-after N] [--ttl-ms MS]]
+               [--contention [--cancel-after N] [--ttl-ms MS] [--quota]]
       Measure the real loop through a local submit response on this box.
       --json prints the whole result as one JSON object instead of the table.
       --venue-delay-ms holds the pretend venue's reply for that long, which is
@@ -61,8 +61,14 @@ engine — the execution loop
       placements and answering pulls at once. It reports how long a
       risk-reducing cancel waited for the venue task while openings were
       queued ahead of it, and how many openings --ttl-ms refused unsent for
-      waiting too long. Its own rate, symbols and delay defaults come with the
-      flag; no budget is asserted.
+      waiting too long. --quota also gives that venue a local request quota of
+      16 signed requests per 2 s with 4 reserved for risk-off, so openings run
+      out of budget while cancels still have one; it pulls every resting order
+      every 50 quotes, so risk-off arrives on its own clock rather than behind
+      an answered opening, and it holds the venue's reply for 5 ms instead of
+      200 so the quota is the tighter bottleneck and not the round trip.
+      --venue-delay-ms still overrides that. Its own rate and symbol defaults
+      come with --contention; no budget is asserted.
 
   engine replay --wal PATH
       Print the log in words, and what was still in flight at each point.
@@ -214,10 +220,13 @@ fn main() -> ExitCode {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .with_target(false)
+        // Reports and `--json` go to stdout; the log goes to stderr so a
+        // caller can parse one without the other.
+        .with_writer(std::io::stderr)
         // journald stores colour escapes as literal bytes and rsyslog widens
         // each one to the four characters `#033`, so they are written only for
         // a human at a terminal.
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
 
     match dispatch(&args) {

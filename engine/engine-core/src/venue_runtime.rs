@@ -1,11 +1,13 @@
 //! The venue task. The engine owns state; this task owns blocking venue I/O.
 
+use std::time::Duration;
+
 use tokio::sync::{mpsc, oneshot};
 
 use engine_types::{
     authority_refusal, AccountIdentity, AccountInventory, AccountView, AmendSpec, AuthorityEpoch,
-    CommandAuthority, InstrumentRule, OrderAck, OrderRequest, Symbol, SymbolId, VenueCaps,
-    VenueError, VenueGateway, VenueMutationTiming, VenueOrder,
+    CommandAuthority, InstrumentRule, OrderAck, OrderRequest, QueuedCommand, Symbol, SymbolId,
+    VenueCaps, VenueError, VenueGateway, VenueMutationTiming, VenueOrder,
 };
 
 const COMMAND_CAPACITY: usize = 4096;
@@ -17,7 +19,8 @@ const MAX_AMEND_BATCH: usize = 10;
 ///
 /// Declaration order is the priority order: risk-off reaches the venue first,
 /// administration last. One mutation is in flight at a time, so this decides
-/// only which of the commands already waiting goes next.
+/// only which of the commands already waiting goes next, and only among those
+/// the venue's own request quota would take now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DispatchClass {
     /// Cancels, position stops, and sends whose every request reduces the
@@ -559,26 +562,90 @@ fn depends_on_a_queued_send(command: &Command, ready: &[(u64, Command)]) -> bool
     }
 }
 
-/// The next command to hand the venue: lowest class, then arrival order,
-/// among those not waiting on a send that is itself still queued.
+/// What one queued command will ask the venue to do, for an adapter pricing
+/// it against the venue's request quota.
+fn queued_shape(command: &Command) -> QueuedCommand {
+    match command {
+        Command::SendOrders {
+            requests, class, ..
+        }
+        | Command::SendOrdersWait {
+            requests, class, ..
+        } => {
+            let requests = requests.len();
+            match class {
+                DispatchClass::RiskReducing => QueuedCommand::Reducing { requests },
+                _ => QueuedCommand::Opening { requests },
+            }
+        }
+        Command::CancelOrders { requests, .. } | Command::CancelOrdersWait { requests, .. } => {
+            QueuedCommand::Cancel {
+                requests: requests.len(),
+            }
+        }
+        Command::Amend { .. } | Command::AmendWait { .. } => QueuedCommand::Amend { requests: 1 },
+        Command::DispatchStop { .. } | Command::SetStop { .. } => QueuedCommand::PositionStop,
+        Command::DispatchLeverage { .. }
+        | Command::SetLeverage { .. }
+        | Command::AdmitSymbols { .. }
+        | Command::AccountIdentity(_)
+        | Command::AccountView(_)
+        | Command::WorkingOrders(_)
+        | Command::AccountInventory(_)
+        | Command::Executions { .. } => QueuedCommand::Administration,
+    }
+}
+
+/// The commands that may be picked this turn: those not waiting on a send
+/// that is itself still queued, and everything when that leaves nothing.
 ///
 /// A send is never blocked, so whenever anything blocks something there is
-/// also something selectable; the second pass exists so no arrangement of the
+/// also something selectable; the fallback exists so no arrangement of the
 /// ready set can leave the worker with nothing to do.
-fn choose(ready: &[(u64, Command)]) -> usize {
-    ready
+fn selectable(ready: &[(u64, Command)]) -> Vec<usize> {
+    let unblocked: Vec<usize> = (0..ready.len())
+        .filter(|index| !depends_on_a_queued_send(&ready[*index].1, ready))
+        .collect();
+    if unblocked.is_empty() {
+        (0..ready.len()).collect()
+    } else {
+        unblocked
+    }
+}
+
+/// The next command to hand the venue: one the venue's quota will take now,
+/// then lowest class, then arrival order.
+fn choose(ready: &[(u64, Command)], waits: &[Duration], eligible: &[usize]) -> usize {
+    eligible
         .iter()
-        .enumerate()
-        .filter(|(_, (_, command))| !depends_on_a_queued_send(command, ready))
-        .min_by_key(|(_, (arrival, command))| (class_of(command), *arrival))
-        .or_else(|| {
-            ready
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, (arrival, command))| (class_of(command), *arrival))
+        .copied()
+        .min_by_key(|index| {
+            let (arrival, command) = &ready[*index];
+            (!waits[*index].is_zero(), class_of(command), *arrival)
         })
-        .map(|(index, _)| index)
         .unwrap_or_default()
+}
+
+/// The permission a queued command would be refused on, if it carries one.
+fn queued_authority(command: &Command) -> Option<CommandAuthority> {
+    match command {
+        Command::SendOrders { authority, .. } | Command::Amend { authority, .. } => *authority,
+        _ => None,
+    }
+}
+
+/// How long to hold the whole ready set back when even the command the worker
+/// would pick is over the venue's quota: the shortest wait among the commands
+/// it may pick. `None` dispatches now.
+fn held_for(waits: &[Duration], eligible: &[usize], index: usize) -> Option<Duration> {
+    if waits[index].is_zero() {
+        return None;
+    }
+    eligible
+        .iter()
+        .map(|index| waits[*index])
+        .min()
+        .filter(|hold| !hold.is_zero())
 }
 
 async fn run<V: VenueGateway>(
@@ -594,6 +661,11 @@ async fn run<V: VenueGateway>(
     };
     let mut ready: Vec<(u64, Command)> = Vec::new();
     let mut arrival = 0u64;
+    // Set when the engine has dropped the sender. Everything taken from the
+    // channel is still answered or refused, never dropped; nothing can arrive
+    // to preempt a hold any more, so the drain does not park and the
+    // adapter's own pacer serves the quota wait inside the call.
+    let mut closed = false;
     loop {
         // Everything already in the channel competes for this turn; only an
         // empty ready set waits.
@@ -602,6 +674,9 @@ async fn run<V: VenueGateway>(
             arrival = arrival.wrapping_add(1);
         }
         if ready.is_empty() {
+            if closed {
+                break;
+            }
             match commands.recv().await {
                 Some(command) => {
                     ready.push((arrival, command));
@@ -611,7 +686,37 @@ async fn run<V: VenueGateway>(
                 None => break,
             }
         }
-        let (_, command) = ready.remove(choose(&ready));
+        let waits: Vec<Duration> = ready
+            .iter()
+            .map(|(_, command)| venue.quota_wait(queued_shape(command)))
+            .collect();
+        let eligible = selectable(&ready);
+        let index = choose(&ready, &waits, &eligible);
+        // The venue would hold this call back anyway, and it would hold it
+        // inside the gateway where nothing else can be picked. Wait out here
+        // instead, where a cancel that arrives meanwhile is chosen next.
+        //
+        // A command whose authority is already spent is not held at all: the
+        // venue never sees it either way, so it is answered now rather than a
+        // quota window later, and the engine's reservation is released with it.
+        let hold = (!closed)
+            .then(|| held_for(&waits, &eligible, index))
+            .flatten()
+            .filter(|_| refusal(queued_authority(&ready[index].1)).is_none());
+        if let Some(hold) = hold {
+            tokio::select! {
+                _ = tokio::time::sleep(hold) => {}
+                received = commands.recv() => match received {
+                    Some(command) => {
+                        ready.push((arrival, command));
+                        arrival = arrival.wrapping_add(1);
+                    }
+                    None => closed = true,
+                },
+            }
+            continue;
+        }
+        let (_, command) = ready.remove(index);
         match command {
             Command::DispatchLeverage {
                 command_id,

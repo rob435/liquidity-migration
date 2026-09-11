@@ -33,6 +33,11 @@ pub struct BenchStrategy {
     /// market-order workload the latency table was measured on.
     #[serde(default)]
     cancel_after: Option<u64>,
+    /// Quotes between risk-off sweeps: every order this sleeve has resting is
+    /// pulled at once, whatever its age. `None` leaves the plain rest-and-pull
+    /// workload.
+    #[serde(default)]
+    sweep_every: Option<u64>,
     #[serde(default)]
     rests: Vec<(SymbolId, Rest)>,
 }
@@ -43,6 +48,7 @@ impl BenchStrategy {
             symbols: symbols.to_vec(),
             every_nth: every_nth.max(1),
             cancel_after: None,
+            sweep_every: None,
             rests: Vec::new(),
         }
     }
@@ -55,6 +61,17 @@ impl BenchStrategy {
             cancel_after: Some(cancel_after.max(1)),
             ..BenchStrategy::new(symbols, every_nth)
         }
+    }
+
+    /// Pull everything resting on this quote cadence, on top of the per-symbol
+    /// rest and pull.
+    ///
+    /// A sweep is not waiting on any opening being answered, so it queues
+    /// risk-off while the venue task still holds openings — the shape a
+    /// circuit breaker or a stop move arrives in.
+    pub fn sweeping(mut self, every: u64) -> Self {
+        self.sweep_every = Some(every.max(1));
+        self
     }
 
     fn rest(&mut self, symbol: SymbolId) -> &mut Rest {
@@ -136,7 +153,12 @@ impl Strategy for BenchStrategy {
         crate::runtime::snapshot(
             "bench",
             self,
-            &(&self.symbols, self.every_nth, self.cancel_after),
+            &(
+                &self.symbols,
+                self.every_nth,
+                self.cancel_after,
+                self.sweep_every,
+            ),
         )
         .map(Some)
     }
@@ -178,6 +200,27 @@ impl Strategy for BenchStrategy {
             }
             return;
         };
+        if self
+            .sweep_every
+            .is_some_and(|every| quote.seq.is_multiple_of(every))
+        {
+            let working = {
+                let mut resting = Vec::new();
+                ctx.resting(&mut resting);
+                resting
+                    .iter()
+                    .map(|order| (order.symbol, order.client_order_id.to_string()))
+                    .collect::<Vec<_>>()
+            };
+            for (symbol, id) in working {
+                if matches!(*self.rest(symbol), Rest::Pulling) {
+                    continue;
+                }
+                ctx.cancel(symbol, &id);
+                *self.rest(symbol) = Rest::Pulling;
+            }
+            return;
+        }
         // Owned, because the borrow behind a `RestingOrder` is the context the
         // cancel below needs mutably.
         let mine = {

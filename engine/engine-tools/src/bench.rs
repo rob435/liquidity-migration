@@ -55,6 +55,9 @@ pub struct BenchOptions {
     /// come back answered, `events` staying the ceiling. `None` runs every
     /// quote.
     pub pulls: Option<u64>,
+    /// Give the pretend venue a local request quota of MEXC's shape, so
+    /// openings run out of budget while risk-off still has a slot.
+    pub quota: bool,
 }
 
 impl Default for BenchOptions {
@@ -71,6 +74,7 @@ impl Default for BenchOptions {
             cancel_after: 3,
             ttl_ms: 10_000,
             pulls: None,
+            quota: false,
         }
     }
 }
@@ -212,6 +216,8 @@ impl BenchResult {
                 "cancel_after_quotes": contention.cancel_after,
                 "opening_dispatch_ttl_ms": contention.ttl_ms,
                 "symbols": contention.symbols,
+                "local_quota": contention.quota.then_some(QUOTA_SHAPE),
+                "risk_off_sweep_quotes": contention.quota.then_some(RISK_OFF_SWEEP_QUOTES),
                 "openings_sent": contention.openings_sent,
                 "cancels_sent": contention.cancels_sent,
                 "never_sent_expired": contention.never_sent_expired,
@@ -242,6 +248,13 @@ fn contention_table(contention: &ContentionResult) -> String {
          opening dispatch TTL {} ms; {} symbol(s)",
         contention.venue_delay_ms, contention.cancel_after, contention.ttl_ms, contention.symbols,
     );
+    if contention.quota {
+        let _ = writeln!(
+            out,
+            "  local request quota: {QUOTA_SHAPE}; risk-off sweep every \
+             {RISK_OFF_SWEEP_QUOTES} quotes"
+        );
+    }
     let _ = writeln!(
         out,
         "  openings the venue answered: {}; refused unsent on expired authority: {}; cancels: {}",
@@ -311,15 +324,23 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
     // The real log, so the measured barrier is the shipping fsync path.
     let (wal, _replayed) = engine_wal::WalWriter::open(&options.wal_path)?;
     let (wal, measurements) = wal_timing::TimedWal::new(wal)?;
-    let strategy = if options.contention {
-        BenchStrategy::contending(&options.symbols, options.every_nth, options.cancel_after)
-    } else {
-        BenchStrategy::new(&options.symbols, options.every_nth)
+    let strategy = match (options.contention, options.quota) {
+        (true, true) => {
+            BenchStrategy::contending(&options.symbols, options.every_nth, options.cancel_after)
+                .sweeping(RISK_OFF_SWEEP_QUOTES)
+        }
+        (true, false) => {
+            BenchStrategy::contending(&options.symbols, options.every_nth, options.cancel_after)
+        }
+        (false, _) => BenchStrategy::new(&options.symbols, options.every_nth),
     };
     let touch = LastTouch::default();
     let (accepted, filled) = tokio::sync::mpsc::unbounded_channel();
     let (taken, cancelled) = tokio::sync::mpsc::unbounded_channel();
     let mut venue = HttpVenue::new(venue_addr, options.symbols.clone());
+    if options.quota {
+        venue = venue.under_quota();
+    }
     if options.fills {
         venue = venue.filling(accepted);
     }
@@ -397,6 +418,7 @@ pub async fn run(options: &BenchOptions) -> Result<BenchResult, EngineError> {
             options.cancel_after,
             options.ttl_ms,
             options.symbols.len(),
+            options.quota,
         ));
     }
     engine.wal.append(&WalRecord::Note {
@@ -664,6 +686,88 @@ pub use engine_strategies::bench::BenchStrategy;
 
 // ------------------------------------------------------- the pretend venue
 
+/// What `--quota` gives the pretend venue, in the report's words.
+const QUOTA_SHAPE: &str =
+    "16 signed requests per 2 s, 4 of them reserved for risk-off (MEXC's shape)";
+
+/// What `--quota` holds the pretend venue's reply for, unless `--venue-delay-ms`
+/// says otherwise.
+///
+/// The venue task runs one call at a time, so a 200 ms round trip caps it at
+/// five commands a second — below the quota's own eight, which then never
+/// binds and holds nothing back. At 5 ms the quota is the tighter of the two,
+/// which is the whole point of the dial.
+pub const QUOTA_VENUE_DELAY: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Quotes between risk-off sweeps under `--quota`: every resting order pulled
+/// at once, on the quote clock rather than behind an answered opening. At the
+/// `--contention` default of 200 Hz this is one sweep every 250 ms, several
+/// inside one spent quota window, so a sweep lands while openings are queued.
+const RISK_OFF_SWEEP_QUOTES: u64 = 50;
+
+const QUOTA_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+const QUOTA_REQUESTS: usize = 16;
+const QUOTA_RESERVED: usize = 4;
+
+/// A local request quota with MEXC's shape: one rolling window over every
+/// signed request, with the last four slots spendable only by risk-off. An
+/// opening is therefore held back while a cancel still goes.
+#[derive(Default)]
+struct BenchQuota {
+    /// Never locked across an await: the venue task reads the wait from a
+    /// synchronous context.
+    admissions: std::sync::Mutex<std::collections::VecDeque<tokio::time::Instant>>,
+    held_ns: std::sync::atomic::AtomicU64,
+}
+
+impl BenchQuota {
+    /// The wait a request of this kind would serve. Spends nothing.
+    fn wait_at(&self, now: tokio::time::Instant, protective: bool) -> Duration {
+        let mut admissions = self.admissions.lock().expect("bench quota poisoned");
+        while admissions
+            .front()
+            .is_some_and(|at| now.duration_since(*at) >= QUOTA_WINDOW)
+        {
+            admissions.pop_front();
+        }
+        let limit = if protective {
+            QUOTA_REQUESTS
+        } else {
+            QUOTA_REQUESTS - QUOTA_RESERVED
+        };
+        match admissions.front() {
+            Some(oldest) if admissions.len() >= limit => {
+                (*oldest + QUOTA_WINDOW).saturating_duration_since(now)
+            }
+            _ => Duration::ZERO,
+        }
+    }
+
+    /// Wait out the quota and take a slot, the way an adapter's pacer does
+    /// inside its own call.
+    async fn admit(&self, protective: bool) {
+        let began = tokio::time::Instant::now();
+        loop {
+            let now = tokio::time::Instant::now();
+            let wait = self.wait_at(now, protective);
+            if wait.is_zero() {
+                self.admissions
+                    .lock()
+                    .expect("bench quota poisoned")
+                    .push_back(now);
+                // Added, not stored: one gateway call may admit several
+                // requests, and what it held back is all of them together.
+                self.held_ns.fetch_add(
+                    began.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                return;
+            }
+            tokio::time::sleep(wait).await;
+        }
+    }
+}
+
 /// The client side: signs, writes to a warm socket, reads the reply.
 pub struct HttpVenue {
     /// Where accepted orders go to be filled, when the bench asked for fills.
@@ -676,6 +780,7 @@ pub struct HttpVenue {
     symbols: Vec<Symbol>,
     key: Vec<u8>,
     last_sent_ns: u64,
+    quota: Option<BenchQuota>,
 }
 
 struct HttpAccountRecovery {
@@ -752,7 +857,14 @@ impl HttpVenue {
             symbols,
             key: b"bench-secret-key".to_vec(),
             last_sent_ns: 0,
+            quota: None,
         }
+    }
+
+    /// Pace this venue like an adapter that holds its own requests back.
+    pub fn under_quota(mut self) -> Self {
+        self.quota = Some(BenchQuota::default());
+        self
     }
 
     /// Send every order this venue accepts to a feed that will fill it.
@@ -841,6 +953,30 @@ impl VenueGateway for HttpVenue {
         })
     }
 
+    /// The stand-in quota answers the venue task the way a paced adapter
+    /// does: what it reports here is what the call below then waits out.
+    fn quota_wait(&self, command: engine_types::QueuedCommand) -> Duration {
+        use engine_types::QueuedCommand as Queued;
+        let protective = match command {
+            Queued::Reducing { .. } | Queued::Cancel { .. } | Queued::PositionStop => true,
+            Queued::Opening { .. } => false,
+            // Neither call below admits, so neither is held back here.
+            Queued::Amend { .. } | Queued::Administration => return Duration::ZERO,
+        };
+        self.quota
+            .as_ref()
+            .map(|quota| quota.wait_at(tokio::time::Instant::now(), protective))
+            .unwrap_or_default()
+    }
+
+    /// The quota hold this command served, so the measured call span stays the
+    /// call itself. Taking it clears it.
+    fn take_rate_wait_ns(&mut self) -> Option<u64> {
+        self.quota
+            .as_ref()
+            .map(|quota| quota.held_ns.swap(0, std::sync::atomic::Ordering::Relaxed))
+    }
+
     async fn send_order(&mut self, req: &OrderRequest) -> Result<OrderAck, VenueError> {
         let px = match req.kind {
             OrderKind::Limit { px, .. } => px,
@@ -851,6 +987,9 @@ impl VenueGateway for HttpVenue {
              \"price\":\"{px}\",\"orderLinkId\":\"{}\",\"reduceOnly\":{}}}",
             req.symbol.0, req.side, req.qty, req.client_order_id, req.reduce_only
         );
+        if let Some(quota) = &self.quota {
+            quota.admit(req.reduce_only).await;
+        }
         let reply = self.call("/v5/order/create", &body).await?;
         let ack_ns = clock::now_ns();
         let code = reply.get("retCode").and_then(|v| v.as_i64()).unwrap_or(-1);
@@ -883,6 +1022,9 @@ impl VenueGateway for HttpVenue {
     }
 
     async fn cancel_order(&mut self, _symbol: SymbolId, id: &str) -> Result<(), VenueError> {
+        if let Some(quota) = &self.quota {
+            quota.admit(true).await;
+        }
         self.call("/v5/order/cancel", &format!("{{\"orderLinkId\":\"{id}\"}}"))
             .await?;
         // After the answer and never before it, the same order the accepted
@@ -916,6 +1058,9 @@ impl VenueGateway for HttpVenue {
     }
 
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError> {
+        if let Some(quota) = &self.quota {
+            quota.admit(true).await;
+        }
         self.call(
             "/v5/position/trading-stop",
             &format!(

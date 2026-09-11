@@ -153,6 +153,30 @@ impl RollingBudget {
         Err(Duration::ZERO)
     }
 
+    /// The wait `try_reserve` would impose right now, consuming nothing and
+    /// dropping nothing: what the venue task asks before it picks a command.
+    fn wait_at(&self, now: Instant, cost: u32, capacity: u32) -> Duration {
+        let stale = |at: &Instant| now.duration_since(*at) >= self.window + RATE_LIMIT_GUARD;
+        let expired: u32 = self
+            .admissions
+            .iter()
+            .take_while(|(at, _)| stale(at))
+            .map(|(_, held)| *held)
+            .sum();
+        let spent = self.spent - expired;
+        if spent + cost <= capacity {
+            return Duration::ZERO;
+        }
+        let mut must_free = spent + cost - capacity;
+        for (at, held) in self.admissions.iter().skip_while(|(at, _)| stale(at)) {
+            if *held >= must_free {
+                return (*at + self.window + RATE_LIMIT_GUARD).saturating_duration_since(now);
+            }
+            must_free -= held;
+        }
+        Duration::ZERO
+    }
+
     /// Venue arrival happens after local admission. Re-anchor what just
     /// completed to the conservative side of that uncertainty, so a fast
     /// follower cannot cross the venue's rolling window when the preceding
@@ -873,6 +897,34 @@ impl VenueGateway for BinanceGateway {
         Ok(())
     }
 
+    /// Placements, amends and stops spend the order budgets; a cancel spends
+    /// request weight, which is a different window. Each is priced at one
+    /// request: this adapter sends a group one request at a time, so what
+    /// decides whether the call can start now is its first one.
+    fn quota_wait(&self, command: engine_types::QueuedCommand) -> Duration {
+        use engine_types::QueuedCommand as Queued;
+        let now = Instant::now();
+        match command {
+            Queued::Opening { .. }
+            | Queued::Reducing { .. }
+            | Queued::Amend { .. }
+            | Queued::PositionStop => self
+                .order_minute_budget
+                .wait_at(now, 1, ORDERS_PER_MINUTE)
+                .max(
+                    self.order_ten_second_budget
+                        .wait_at(now, 1, ORDERS_PER_TEN_SECONDS),
+                ),
+            // The weight budget keeps the runtime's clock, not this module's.
+            Queued::Cancel { .. } => self
+                .weight_budget
+                .wait_at(WEIGHT_CANCEL, tokio::time::Instant::now()),
+            // Leverage and the boot reads spend weight too, but no queued
+            // mutation waits behind them.
+            Queued::Administration => Duration::ZERO,
+        }
+    }
+
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError> {
         self.set_stop_terms(symbol, trigger_px, None).await
     }
@@ -1322,6 +1374,67 @@ mod tests {
             assert!(id.len() <= 36, "{id}");
             assert!(super::super::parse::is_exchange_or_stop_id(id));
         }
+    }
+
+    #[test]
+    fn the_wait_query_is_what_the_next_reservation_serves_and_reserves_nothing() {
+        let mut budget = RollingBudget::new(ORDER_WINDOW);
+        let first = Instant::now();
+        assert_eq!(budget.wait_at(first, 1, 3), Duration::ZERO);
+        // Spread across the window: a wait has to name the right admission.
+        for step in 0..3 {
+            budget
+                .try_reserve(first + Duration::from_millis(10 * step), 1, 3)
+                .expect("an empty window takes three");
+        }
+        let now = first + Duration::from_millis(30);
+        let queried = budget.wait_at(now, 1, 3);
+        assert_eq!(
+            queried,
+            ORDER_WINDOW + RATE_LIMIT_GUARD - Duration::from_millis(30)
+        );
+        assert_eq!(
+            budget.wait_at(now, 1, 3),
+            queried,
+            "asking twice moved the window, so the query spent capacity"
+        );
+        assert!(
+            budget.wait_at(now, 2, 3) > queried,
+            "a cost of two waits for one more admission to expire"
+        );
+        assert!(
+            budget
+                .try_reserve(now + queried - Duration::from_nanos(1), 1, 3)
+                .is_err(),
+            "the reservation was served before the wait it was quoted"
+        );
+        assert!(budget.try_reserve(now + queried, 1, 3).is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_spent_order_window_does_not_hold_a_cancel_back() {
+        use engine_types::QueuedCommand as Queued;
+        let mut gw = gateway();
+        gw.order_ten_second_budget
+            .try_reserve(
+                Instant::now(),
+                ORDERS_PER_TEN_SECONDS,
+                ORDERS_PER_TEN_SECONDS,
+            )
+            .expect("an empty window takes the whole budget");
+        assert!(
+            VenueGateway::quota_wait(&gw, Queued::Opening { requests: 1 }) > Duration::ZERO,
+            "a spent order window is not reported"
+        );
+        assert_eq!(
+            VenueGateway::quota_wait(&gw, Queued::Cancel { requests: 1 }),
+            Duration::ZERO,
+            "a cancel spends request weight, which is a different window"
+        );
+        assert_eq!(
+            VenueGateway::quota_wait(&gw, Queued::Administration),
+            Duration::ZERO
+        );
     }
 
     #[tokio::test(start_paused = true)]

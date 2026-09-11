@@ -124,6 +124,36 @@ pub struct VenueCaps {
     pub close_position_below_minimum: bool,
 }
 
+/// The adapter's view of one command waiting in the venue task's queue: what
+/// it will ask the venue to do, and how many requests that is.
+///
+/// Coarse on purpose. An adapter prices this against its own request quota in
+/// [`VenueGateway::quota_wait`], so the variants are exactly the distinctions
+/// a venue's quota lanes draw — a position-stop write is its own endpoint
+/// budget on MEXC, a cancel spends the protected allowance, an opening does
+/// not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueuedCommand {
+    /// Placements whose group opens or grows the physical position.
+    Opening {
+        requests: usize,
+    },
+    /// Placements whose every request reduces the physical position.
+    Reducing {
+        requests: usize,
+    },
+    Cancel {
+        requests: usize,
+    },
+    Amend {
+        requests: usize,
+    },
+    /// A position-level stop write.
+    PositionStop,
+    /// Leverage, symbol admission, and the account reads boot makes.
+    Administration,
+}
+
 /// A venue gateway: signs and sends orders, attaches stops, reads account
 /// state. One implementation per venue; the engine picks one by name at
 /// assembly and never learns which it got.
@@ -235,6 +265,19 @@ pub trait VenueGateway: Send + 'static {
     /// it, so an older command's wait is never charged to a later one.
     fn take_rate_wait_ns(&mut self) -> Option<u64> {
         None
+    }
+    /// How long this adapter would hold a command of this shape back right
+    /// now to stay inside the venue's request quota.
+    ///
+    /// Answered without waiting and without spending quota, so the venue task
+    /// can pick something else and come back. It is an estimate: admission
+    /// happens inside the call, and the adapter's own pacer is what enforces
+    /// it, so a stale answer costs at most a short wait inside that call.
+    /// `Duration::ZERO` — the default — means this adapter does not pace
+    /// itself, and nothing is gained by holding its commands back.
+    fn quota_wait(&self, command: QueuedCommand) -> std::time::Duration {
+        let _ = command;
+        std::time::Duration::ZERO
     }
     /// Attach or move a position stop (stop-loss trigger price).
     ///

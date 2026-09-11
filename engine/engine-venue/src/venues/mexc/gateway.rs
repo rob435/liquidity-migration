@@ -778,6 +778,12 @@ impl VenueGateway for MexcGateway {
         Some(self.rest.take_mutation_wait_ns())
     }
 
+    /// Every signed request this key sends shares one rolling window, so the
+    /// answer covers the recovery reader and the probe too.
+    fn quota_wait(&self, command: engine_types::QueuedCommand) -> std::time::Duration {
+        self.rest.quota_wait(command)
+    }
+
     async fn account_view(&mut self) -> Result<AccountView, VenueError> {
         self.contracts().await?;
         engine_types::orders::AccountRecoveryClient::account_view(

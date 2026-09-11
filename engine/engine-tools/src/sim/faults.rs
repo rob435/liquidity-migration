@@ -346,6 +346,10 @@ impl<G: VenueGateway> VenueGateway for FaultyGateway<G> {
         self.inner.take_rate_wait_ns()
     }
 
+    fn quota_wait(&self, command: engine_types::QueuedCommand) -> std::time::Duration {
+        self.inner.quota_wait(command)
+    }
+
     async fn set_stop(&mut self, symbol: SymbolId, trigger_px: f64) -> Result<(), VenueError> {
         match self.roll() {
             VenueFault::None => self.inner.set_stop(symbol, trigger_px).await,

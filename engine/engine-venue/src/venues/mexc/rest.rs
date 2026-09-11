@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
-use engine_types::VenueError;
+use engine_types::{QueuedCommand, VenueError};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
@@ -54,61 +54,124 @@ pub(crate) enum QuotaGroup {
 /// 132 symbols drew `510 Requests are too frequent` on every recovery pass.
 #[derive(Debug, Default)]
 pub(crate) struct Pacer {
-    admissions: tokio::sync::Mutex<VecDeque<(Instant, QuotaGroup)>>,
+    /// Never locked across an await: the venue task reads the wait from a
+    /// synchronous context while another task may be sleeping one out.
+    admissions: std::sync::Mutex<VecDeque<(Instant, QuotaGroup)>>,
     wait_by_class_ns: [AtomicU64; 4],
 }
 
 impl Pacer {
+    /// How long a request of this shape would be held back right now.
+    /// Spends nothing: asking does not reserve a slot.
+    pub(crate) fn wait_for(&self, class: OperationClass, group: QuotaGroup) -> Duration {
+        let mut admissions = self.admissions.lock().expect("MEXC pacer poisoned");
+        let now = Instant::now();
+        expire(&mut admissions, now);
+        wait_within(&admissions, now, class, group)
+    }
+
     pub(crate) async fn reserve_for(&self, class: OperationClass, group: QuotaGroup) -> Duration {
         let started = Instant::now();
-        let limit = if class == OperationClass::Protection {
-            QUOTA_REQUESTS
-        } else {
-            QUOTA_REQUESTS - SAFETY_RESERVE
-        };
         loop {
             let wait = {
-                let mut admissions = self.admissions.lock().await;
+                let mut admissions = self.admissions.lock().expect("MEXC pacer poisoned");
                 let now = Instant::now();
-                while admissions
-                    .front()
-                    .is_some_and(|(at, _)| now.duration_since(*at) >= QUOTA_WINDOW)
-                {
-                    admissions.pop_front();
-                }
-                let stop_blocked = group == QuotaGroup::StopWrite
-                    && admissions
-                        .iter()
-                        .filter(|(_, group)| *group == QuotaGroup::StopWrite)
-                        .count()
-                        >= STOP_WRITE_REQUESTS;
-                if admissions.len() < limit && !stop_blocked {
+                expire(&mut admissions, now);
+                let wait = wait_within(&admissions, now, class, group);
+                if wait.is_zero() {
                     admissions.push_back((now, group));
                     let elapsed = started.elapsed();
                     saturating_add(&self.wait_by_class_ns[class as usize], nanos(elapsed));
                     return elapsed;
                 }
-                // Both allowances are reserved together, never while sleeping.
-                let aggregate_wait = if admissions.len() >= limit {
-                    admissions[0].0 + QUOTA_WINDOW - now
-                } else {
-                    Duration::ZERO
-                };
-                let stop_wait = if stop_blocked {
-                    admissions
-                        .iter()
-                        .find(|(_, group)| *group == QuotaGroup::StopWrite)
-                        .expect("counted a stop admission")
-                        .0
-                        + QUOTA_WINDOW
-                        - now
-                } else {
-                    Duration::ZERO
-                };
-                aggregate_wait.max(stop_wait)
+                wait
             };
             tokio::time::sleep(wait).await;
         }
+    }
+}
+
+fn expire(admissions: &mut VecDeque<(Instant, QuotaGroup)>, now: Instant) {
+    while admissions
+        .front()
+        .is_some_and(|(at, _)| now.duration_since(*at) >= QUOTA_WINDOW)
+    {
+        admissions.pop_front();
+    }
+}
+
+/// The wait a request serves against the window as it stands, expired
+/// admissions already dropped. `Duration::ZERO` is admission. Both
+/// allowances are read together, never one while sleeping out the other.
+fn wait_within(
+    admissions: &VecDeque<(Instant, QuotaGroup)>,
+    now: Instant,
+    class: OperationClass,
+    group: QuotaGroup,
+) -> Duration {
+    let limit = if class == OperationClass::Protection {
+        QUOTA_REQUESTS
+    } else {
+        QUOTA_REQUESTS - SAFETY_RESERVE
+    };
+    let stop_blocked = group == QuotaGroup::StopWrite
+        && admissions
+            .iter()
+            .filter(|(_, group)| *group == QuotaGroup::StopWrite)
+            .count()
+            >= STOP_WRITE_REQUESTS;
+    if admissions.len() < limit && !stop_blocked {
+        return Duration::ZERO;
+    }
+    let aggregate_wait = if admissions.len() >= limit {
+        admissions[0].0 + QUOTA_WINDOW - now
+    } else {
+        Duration::ZERO
+    };
+    let stop_wait = if stop_blocked {
+        admissions
+            .iter()
+            .find(|(_, group)| *group == QuotaGroup::StopWrite)
+            .expect("counted a stop admission")
+            .0
+            + QUOTA_WINDOW
+            - now
+    } else {
+        Duration::ZERO
+    };
+    aggregate_wait.max(stop_wait)
+}
+
+/// Which allowances a queued command spends. Written once: the venue task's
+/// wait query and the signed POST below must price the same request the same
+/// way, or the task holds a command the pacer would have taken.
+pub(crate) fn quota_lanes(command: QueuedCommand) -> (OperationClass, QuotaGroup) {
+    match command {
+        QueuedCommand::PositionStop => (OperationClass::Protection, QuotaGroup::StopWrite),
+        QueuedCommand::Cancel { .. } | QueuedCommand::Reducing { .. } => {
+            (OperationClass::Protection, QuotaGroup::General)
+        }
+        QueuedCommand::Administration => (OperationClass::Administration, QuotaGroup::General),
+        QueuedCommand::Opening { .. } | QueuedCommand::Amend { .. } => {
+            (OperationClass::Trading, QuotaGroup::General)
+        }
+    }
+}
+
+/// What one signed POST is, in the terms the venue task queues commands in.
+fn posted_command(path: &str, body: &Value) -> QueuedCommand {
+    if path.starts_with("/api/v1/private/stoporder/") {
+        QueuedCommand::PositionStop
+    } else if path == "/api/v1/private/order/cancel_with_external" {
+        QueuedCommand::Cancel { requests: 1 }
+    } else if path == "/api/v1/private/order/create"
+        && body.get("reduceOnly").and_then(Value::as_bool) == Some(true)
+    {
+        QueuedCommand::Reducing { requests: 1 }
+    } else if path == "/api/v1/private/position/change_leverage" {
+        QueuedCommand::Administration
+    } else {
+        QueuedCommand::Opening { requests: 1 }
     }
 }
 
@@ -251,18 +314,7 @@ impl RestClient {
             engine_types::CommandAuthority,
         )>,
     ) -> Result<Value, VenueError> {
-        let (class, group) = if path.starts_with("/api/v1/private/stoporder/") {
-            (OperationClass::Protection, QuotaGroup::StopWrite)
-        } else if path == "/api/v1/private/order/cancel_with_external"
-            || path == "/api/v1/private/order/create"
-                && body.get("reduceOnly").and_then(Value::as_bool) == Some(true)
-        {
-            (OperationClass::Protection, QuotaGroup::General)
-        } else if path == "/api/v1/private/position/change_leverage" {
-            (OperationClass::Administration, QuotaGroup::General)
-        } else {
-            (OperationClass::Trading, QuotaGroup::General)
-        };
+        let (class, group) = quota_lanes(posted_command(path, body));
         let body =
             serde_json::to_string(body).map_err(|e| VenueError::BadRequest(e.to_string()))?;
         self.admit(class, group).await;
@@ -285,6 +337,12 @@ impl RestClient {
         }
         tracing::debug!(operation_class=?class, quota_group=?group, waited_ns,
             "MEXC local quota admission");
+    }
+
+    /// How long the shared window would hold this command back right now.
+    pub(crate) fn quota_wait(&self, command: QueuedCommand) -> Duration {
+        let (class, group) = quota_lanes(command);
+        self.pacer.wait_for(class, group)
     }
 
     pub(crate) fn take_mutation_wait_ns(&self) -> u64 {
@@ -331,6 +389,90 @@ mod tests {
         assert_eq!(
             first.pacer.wait_by_class_ns[OperationClass::Recovery as usize].load(Ordering::Relaxed),
             nanos(QUOTA_WINDOW)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_query_is_what_the_next_reservation_serves_and_reserves_nothing() {
+        let pacer = Pacer::default();
+        for _ in 0..QUOTA_REQUESTS - SAFETY_RESERVE - 1 {
+            pacer
+                .reserve_for(OperationClass::Trading, QuotaGroup::General)
+                .await;
+        }
+        for _ in 0..8 {
+            assert_eq!(
+                pacer.wait_for(OperationClass::Trading, QuotaGroup::General),
+                Duration::ZERO
+            );
+        }
+        let started = Instant::now();
+        pacer
+            .reserve_for(OperationClass::Trading, QuotaGroup::General)
+            .await;
+        assert_eq!(
+            started.elapsed(),
+            Duration::ZERO,
+            "the queries spent the last slot"
+        );
+
+        let queried = pacer.wait_for(OperationClass::Trading, QuotaGroup::General);
+        assert_eq!(queried, QUOTA_WINDOW);
+        assert_eq!(
+            pacer.wait_for(OperationClass::Protection, QuotaGroup::General),
+            Duration::ZERO,
+            "the protected allowance is not what an opening waits for"
+        );
+        let started = Instant::now();
+        pacer
+            .reserve_for(OperationClass::Trading, QuotaGroup::General)
+            .await;
+        assert_eq!(started.elapsed(), queried);
+    }
+
+    #[test]
+    fn the_lanes_a_signed_post_spends_are_the_lanes_the_queued_command_is_priced_in() {
+        let create = serde_json::json!({"symbol": "BTC_USDT", "vol": 1});
+        let reduce = serde_json::json!({"symbol": "BTC_USDT", "vol": 1, "reduceOnly": true});
+        for (path, body, command, lanes) in [
+            (
+                "/api/v1/private/stoporder/change_price",
+                &create,
+                QueuedCommand::PositionStop,
+                (OperationClass::Protection, QuotaGroup::StopWrite),
+            ),
+            (
+                "/api/v1/private/order/cancel_with_external",
+                &create,
+                QueuedCommand::Cancel { requests: 1 },
+                (OperationClass::Protection, QuotaGroup::General),
+            ),
+            (
+                "/api/v1/private/order/create",
+                &reduce,
+                QueuedCommand::Reducing { requests: 1 },
+                (OperationClass::Protection, QuotaGroup::General),
+            ),
+            (
+                "/api/v1/private/order/create",
+                &create,
+                QueuedCommand::Opening { requests: 1 },
+                (OperationClass::Trading, QuotaGroup::General),
+            ),
+            (
+                "/api/v1/private/position/change_leverage",
+                &create,
+                QueuedCommand::Administration,
+                (OperationClass::Administration, QuotaGroup::General),
+            ),
+        ] {
+            assert_eq!(posted_command(path, body), command, "{path}");
+            assert_eq!(quota_lanes(command), lanes, "{path}");
+        }
+        // The one shape with no endpoint of its own.
+        assert_eq!(
+            quota_lanes(QueuedCommand::Amend { requests: 1 }),
+            (OperationClass::Trading, QuotaGroup::General)
         );
     }
 

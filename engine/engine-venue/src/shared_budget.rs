@@ -55,6 +55,33 @@ impl SharedBudget {
             .min()
             .unwrap_or(window))
     }
+    /// The wait `reserve` would impose right now, taking nothing and
+    /// completing nothing: what the venue task asks before it picks a command.
+    #[cfg(feature = "binance")]
+    pub(crate) fn wait_at(&self, cost: u32, now: Instant) -> Duration {
+        let state = self.0.lock().expect("quota mutex poisoned");
+        let window = state.window;
+        let live = |completed: &Option<Instant>| {
+            completed.is_none_or(|at| now.saturating_duration_since(at) < window)
+        };
+        let used: u32 = state
+            .reservations
+            .values()
+            .filter(|(_, completed)| live(completed))
+            .map(|(cost, _)| cost)
+            .sum();
+        if used + cost <= state.capacity {
+            return Duration::ZERO;
+        }
+        state
+            .reservations
+            .values()
+            .filter(|(_, completed)| live(completed))
+            .filter_map(|(_, at)| at.map(|at| (at + window).saturating_duration_since(now)))
+            .min()
+            .unwrap_or(window)
+    }
+
     #[cfg(feature = "binance")]
     pub(crate) async fn reserve(&self, cost: u32) -> Reservation {
         loop {
