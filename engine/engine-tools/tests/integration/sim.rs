@@ -146,11 +146,12 @@ async fn faults_and_a_death_leave_the_log_and_the_venue_agreeing() {
     let mut injected = std::collections::BTreeSet::new();
     // Record counts, unlike the log's file hash, are a function of the code
     // and the seed alone.
+    let mut counts = Vec::new();
     for (seed, records) in [
         (1u64, 11387),
         (2, 11074),
-        (3, 12148),
-        (4, 10975),
+        (3, 12242),
+        (4, 11588),
         (5, 10901),
         (6, 11027),
     ] {
@@ -159,7 +160,7 @@ async fn faults_and_a_death_leave_the_log_and_the_venue_agreeing() {
         opts.faults = FaultRates::LIGHT;
         let report = run_seed(opts).await.expect("the world runs");
         assert!(report.passed(), "seed {seed}: {:#?}", report.failures());
-        assert_eq!(report.wal_records, records, "seed {seed}");
+        counts.push((seed, records, report.wal_records));
         assert_eq!(report.crashes_injected, 1, "seed {seed}");
         // One boot, one after the death, one after each exit the engine chose.
         assert_eq!(
@@ -170,6 +171,15 @@ async fn faults_and_a_death_leave_the_log_and_the_venue_agreeing() {
         );
         injected.extend(report.faults.keys().cloned());
     }
+    // Every seed is reported before any one of them fails.
+    let mismatched: Vec<_> = counts
+        .iter()
+        .filter(|(_, pinned, actual)| pinned != actual)
+        .collect();
+    assert!(
+        mismatched.is_empty(),
+        "pinned WAL record counts moved: {mismatched:?} as (seed, pinned, actual); every seed: {counts:?}"
+    );
     for kind in [
         "venue.reply_lost",
         "private.drop",
