@@ -887,7 +887,34 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         let queued_ns = clock::now_ns();
         self.flush_strategy_prefix()?;
-        let command_id = self.venue.dispatch_cancels(requests.clone())?;
+        let command_id = match self.venue.dispatch_cancels(requests.clone()) {
+            Ok(command_id) => command_id,
+            Err(error) => {
+                let Some(detail) = crate::venue_runtime::lane_full(&error) else {
+                    return Err(error.into());
+                };
+                let ids: Vec<&str> = requests.iter().map(|(_, id)| id.as_str()).collect();
+                tracing::warn!(detail, orders = ids.len(), "cancels refused unsent");
+                self.wal.append(&WalRecord::Note {
+                    source: "engine".into(),
+                    text: format!(
+                        "cancel of {} never sent ({detail}); the orders stay working and supervised",
+                        ids.join(", ")
+                    ),
+                })?;
+                // A halt cancel is only retried from this queue, and it was
+                // taken off it to be sent.
+                for (symbol, id) in &requests {
+                    if matches!(
+                        self.halt_cancels.get(id),
+                        Some(HaltCancelState::Submitting { .. })
+                    ) {
+                        self.halt_cancel_queue.push_back((*symbol, id.clone()));
+                    }
+                }
+                return Ok(false);
+            }
+        };
         self.mark_symbols_busy(requests.iter().map(|(symbol, _)| *symbol));
         self.pending_mutations.insert(
             command_id,
@@ -1349,9 +1376,25 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         let queued_ns = clock::now_ns();
         let authority =
             (!amend_only_reduces(&existing, &amended_intent)).then(|| self.mint_authority());
-        let command_id =
-            self.venue
-                .dispatch_amend(symbol, client_order_id.clone(), spec.clone(), authority)?;
+        let command_id = match self.venue.dispatch_amend(
+            symbol,
+            client_order_id.clone(),
+            spec.clone(),
+            authority,
+        ) {
+            Ok(command_id) => command_id,
+            Err(error) => {
+                let Some(detail) = crate::venue_runtime::lane_full(&error) else {
+                    return Err(error.into());
+                };
+                tracing::warn!(detail, id = %client_order_id, "amend refused unsent");
+                self.wal.append(&WalRecord::Note {
+                    source: "engine".into(),
+                    text: format!("{client_order_id} amendment never sent: {detail}"),
+                })?;
+                return Ok(());
+            }
+        };
         self.mark_symbols_busy([symbol]);
         self.pending_mutations.insert(
             command_id,

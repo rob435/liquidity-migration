@@ -460,8 +460,29 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             }
             let queued_ns = clock::now_ns();
             let command_id =
-                self.venue
-                    .dispatch_stop(stop.symbol, stop.trigger_px, stop.exact.clone())?;
+                match self
+                    .venue
+                    .dispatch_stop(stop.symbol, stop.trigger_px, stop.exact.clone())
+                {
+                    Ok(command_id) => command_id,
+                    Err(error) => {
+                        let Some(detail) = crate::venue_runtime::lane_full(&error) else {
+                            return Err(error.into());
+                        };
+                        // The level stays intended and unconfirmed, which is what
+                        // the supervisor reads to ask again.
+                        tracing::warn!(detail, symbol = stop.symbol.0, "stop refused unsent");
+                        self.wal.append(&WalRecord::Note {
+                            source: "stop-supervisor".into(),
+                            text: format!(
+                                "{} stop at {} never sent ({detail}); still supervised",
+                                self.books.market.table.name(stop.symbol),
+                                stop.trigger_px
+                            ),
+                        })?;
+                        continue;
+                    }
+                };
             self.mark_symbols_busy([stop.symbol]);
             self.pending_mutations
                 .insert(command_id, PendingMutation::SetStop { stop, queued_ns });

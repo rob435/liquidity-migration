@@ -1,5 +1,8 @@
 //! The venue task. The engine owns state; this task owns blocking venue I/O.
 
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
@@ -10,10 +13,33 @@ use engine_types::{
     Symbol, SymbolId, VenueCaps, VenueError, VenueGateway, VenueMutationTiming, VenueOrder,
 };
 
-const COMMAND_CAPACITY: usize = 4096;
-const COMPLETION_CAPACITY: usize = 4096;
+pub const COMMAND_CAPACITY: usize = 4096;
+pub const URGENT_CAPACITY: usize = 1024;
+/// Ordinary commands the ready set holds before the task stops taking more
+/// from the ordinary mailbox. The urgent mailbox is never throttled.
+pub const READY_ORDINARY_CAPACITY: usize = COMMAND_CAPACITY;
+pub const COMPLETION_CAPACITY: usize = 4096;
 /// Amends coalesced into one gateway call, as the venue's batch endpoints cap it.
 const MAX_AMEND_BATCH: usize = 10;
+/// Requests one command may carry. `MAX_ORDERS_PER_BATCH` and
+/// `MAX_CANCELS_PER_BATCH` (engine.rs) are both 10, and Bybit refuses a larger
+/// group before the wire (`ORDER_CREATES_PER_SECOND`, `MAX_CANCEL_BATCH_ITEMS`).
+pub const MAX_REQUESTS_PER_COMMAND: usize = 10;
+
+const ORDINARY_LANE: &str = "ordinary";
+const URGENT_LANE: &str = "urgent";
+/// Every full-lane refusal starts with this, so a caller can tell the engine's
+/// own backpressure from a venue transport fault.
+const LANE_FULL: &str = "venue dispatch lane full";
+
+/// The detail of a refusal the client made because its lane is full, or
+/// `None` for every other error.
+pub fn lane_full(error: &VenueError) -> Option<&str> {
+    match error {
+        VenueError::Transport(detail) if detail.starts_with(LANE_FULL) => Some(detail.as_str()),
+        _ => None,
+    }
+}
 
 /// What a queued mutation is for, and therefore what it may wait behind.
 ///
@@ -43,6 +69,107 @@ pub fn send_class(requests: &[OrderRequest]) -> DispatchClass {
         DispatchClass::RiskReducing
     } else {
         DispatchClass::Opening
+    }
+}
+
+/// What the venue task is holding, updated by the task each turn and read by
+/// whoever reports on it. Refusals are counted by the client.
+#[derive(Debug)]
+pub struct VenueQueueGauges {
+    ready_ordinary: AtomicUsize,
+    ready_urgent: AtomicUsize,
+    oldest_ready_queued_ns: AtomicU64,
+    in_flight_since_ns: AtomicU64,
+    /// 0 is nothing in flight; otherwise the [`DispatchClass`] position + 1.
+    in_flight_class: AtomicU8,
+    refused_ordinary: AtomicU64,
+    refused_urgent: AtomicU64,
+    pub ordinary_capacity: usize,
+    pub urgent_capacity: usize,
+}
+
+/// One reading of [`VenueQueueGauges`], ages resolved against a clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VenueQueueSnapshot {
+    pub ready_ordinary: usize,
+    pub ready_urgent: usize,
+    pub oldest_ready_ms: u64,
+    pub in_flight_ms: u64,
+    pub in_flight_class: Option<DispatchClass>,
+    pub refused_ordinary: u64,
+    pub refused_urgent: u64,
+    pub ordinary_capacity: usize,
+    pub urgent_capacity: usize,
+}
+
+fn class_code(class: DispatchClass) -> u8 {
+    match class {
+        DispatchClass::RiskReducing => 1,
+        DispatchClass::Amend => 2,
+        DispatchClass::Opening => 3,
+        DispatchClass::Administration => 4,
+    }
+}
+
+fn class_of_code(code: u8) -> Option<DispatchClass> {
+    match code {
+        1 => Some(DispatchClass::RiskReducing),
+        2 => Some(DispatchClass::Amend),
+        3 => Some(DispatchClass::Opening),
+        4 => Some(DispatchClass::Administration),
+        _ => None,
+    }
+}
+
+impl VenueQueueGauges {
+    fn new() -> Self {
+        Self {
+            ready_ordinary: AtomicUsize::new(0),
+            ready_urgent: AtomicUsize::new(0),
+            oldest_ready_queued_ns: AtomicU64::new(0),
+            in_flight_since_ns: AtomicU64::new(0),
+            in_flight_class: AtomicU8::new(0),
+            refused_ordinary: AtomicU64::new(0),
+            refused_urgent: AtomicU64::new(0),
+            ordinary_capacity: COMMAND_CAPACITY,
+            urgent_capacity: URGENT_CAPACITY,
+        }
+    }
+
+    pub fn snapshot(&self, now_ns: u64) -> VenueQueueSnapshot {
+        let age_ms = |since: u64| match since {
+            0 => 0,
+            since => now_ns.saturating_sub(since) / 1_000_000,
+        };
+        VenueQueueSnapshot {
+            ready_ordinary: self.ready_ordinary.load(Ordering::Relaxed),
+            ready_urgent: self.ready_urgent.load(Ordering::Relaxed),
+            oldest_ready_ms: age_ms(self.oldest_ready_queued_ns.load(Ordering::Relaxed)),
+            in_flight_ms: age_ms(self.in_flight_since_ns.load(Ordering::Relaxed)),
+            in_flight_class: class_of_code(self.in_flight_class.load(Ordering::Relaxed)),
+            refused_ordinary: self.refused_ordinary.load(Ordering::Relaxed),
+            refused_urgent: self.refused_urgent.load(Ordering::Relaxed),
+            ordinary_capacity: self.ordinary_capacity,
+            urgent_capacity: self.urgent_capacity,
+        }
+    }
+
+    fn observe_ready(&self, ordinary: usize, urgent: usize, oldest_queued_ns: u64) {
+        self.ready_ordinary.store(ordinary, Ordering::Relaxed);
+        self.ready_urgent.store(urgent, Ordering::Relaxed);
+        self.oldest_ready_queued_ns
+            .store(oldest_queued_ns, Ordering::Relaxed);
+    }
+
+    fn enter_flight(&self, class: DispatchClass, now_ns: u64) {
+        self.in_flight_class
+            .store(class_code(class), Ordering::Relaxed);
+        self.in_flight_since_ns.store(now_ns, Ordering::Relaxed);
+    }
+
+    fn leave_flight(&self) {
+        self.in_flight_class.store(0, Ordering::Relaxed);
+        self.in_flight_since_ns.store(0, Ordering::Relaxed);
     }
 }
 
@@ -86,7 +213,7 @@ pub enum MutationCompletion {
     },
 }
 
-enum Command {
+pub(crate) enum Command {
     DispatchLeverage {
         command_id: u64,
         symbol: SymbolId,
@@ -169,10 +296,21 @@ struct LookupRequest {
 pub(crate) type SymbolAdmissionReceiver =
     oneshot::Receiver<Result<Vec<Option<SymbolId>>, VenueError>>;
 
+/// One command waiting for its turn at the venue.
+pub(crate) struct Queued {
+    pub(crate) arrival: u64,
+    pub(crate) queued_ns: u64,
+    pub(crate) command: Command,
+}
+
 pub struct VenueClient {
     caps: VenueCaps,
     lookups: Option<mpsc::Sender<LookupRequest>>,
+    /// Risk-off only, so a cancel never queues behind openings the engine has
+    /// already handed over.
+    urgent: mpsc::Sender<Command>,
     commands: mpsc::Sender<Command>,
+    gauges: Arc<VenueQueueGauges>,
     next_command_id: u64,
 }
 
@@ -191,17 +329,32 @@ impl VenueClient {
             send
         });
         let (command_tx, command_rx) = mpsc::channel(COMMAND_CAPACITY);
+        let (urgent_tx, urgent_rx) = mpsc::channel(URGENT_CAPACITY);
         let (completion_tx, completion_rx) = mpsc::channel(COMPLETION_CAPACITY);
-        tokio::spawn(run(venue, command_rx, completion_tx, authority));
+        let gauges = Arc::new(VenueQueueGauges::new());
+        tokio::spawn(run(
+            venue,
+            urgent_rx,
+            command_rx,
+            completion_tx,
+            authority,
+            gauges.clone(),
+        ));
         (
             Self {
                 caps,
                 lookups,
+                urgent: urgent_tx,
                 commands: command_tx,
+                gauges,
                 next_command_id: 1,
             },
             completion_rx,
         )
+    }
+
+    pub fn gauges(&self) -> Arc<VenueQueueGauges> {
+        self.gauges.clone()
     }
 
     pub fn dispatch_leverage(
@@ -223,6 +376,7 @@ impl VenueClient {
         requests: Vec<OrderRequest>,
         authority: Option<CommandAuthority>,
     ) -> Result<u64, VenueError> {
+        refuse_oversized("placement", requests.len())?;
         let command_id = self.mint_command_id();
         let class = send_class(&requests);
         self.send(Command::SendOrders {
@@ -238,6 +392,7 @@ impl VenueClient {
         &mut self,
         requests: Vec<(SymbolId, String)>,
     ) -> Result<u64, VenueError> {
+        refuse_oversized("cancel", requests.len())?;
         let command_id = self.mint_command_id();
         self.send(Command::CancelOrders {
             command_id,
@@ -334,9 +489,34 @@ impl VenueClient {
     }
 
     fn send(&self, command: Command) -> Result<(), VenueError> {
-        self.commands.try_send(command).map_err(|error| {
-            VenueError::Transport(format!("venue task queue unavailable: {error}"))
-        })
+        let (lane, capacity, sender, refused) = if class_of(&command) == DispatchClass::RiskReducing
+        {
+            (
+                URGENT_LANE,
+                URGENT_CAPACITY,
+                &self.urgent,
+                &self.gauges.refused_urgent,
+            )
+        } else {
+            (
+                ORDINARY_LANE,
+                COMMAND_CAPACITY,
+                &self.commands,
+                &self.gauges.refused_ordinary,
+            )
+        };
+        match sender.try_send(command) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                refused.fetch_add(1, Ordering::Relaxed);
+                Err(VenueError::Transport(format!(
+                    "{LANE_FULL}: the {lane} lane holds its {capacity} commands"
+                )))
+            }
+            Err(error @ mpsc::error::TrySendError::Closed(_)) => Err(VenueError::Transport(
+                format!("venue task queue unavailable: {error}"),
+            )),
+        }
     }
 }
 
@@ -516,6 +696,17 @@ async fn run_lookups(
     }
 }
 
+/// One command carries at most [`MAX_REQUESTS_PER_COMMAND`] requests, so the
+/// bytes one lane can hold follow from its capacity.
+fn refuse_oversized(what: &str, requests: usize) -> Result<(), VenueError> {
+    if requests > MAX_REQUESTS_PER_COMMAND {
+        return Err(VenueError::BadRequest(format!(
+            "{what} command carries {requests} requests; one command takes at most {MAX_REQUESTS_PER_COMMAND}"
+        )));
+    }
+    Ok(())
+}
+
 /// Which class one queued command belongs to.
 fn class_of(command: &Command) -> DispatchClass {
     match command {
@@ -536,19 +727,52 @@ fn class_of(command: &Command) -> DispatchClass {
     }
 }
 
+/// Every client id a placement still waiting in this ready set will ask the
+/// venue to create. Built once a turn; every dependency check reads it.
+pub(crate) fn queued_send_ids(ready: &[Queued]) -> HashSet<&str> {
+    ready
+        .iter()
+        .flat_map(|queued| match &queued.command {
+            Command::SendOrders { requests, .. } | Command::SendOrdersWait { requests, .. } => {
+                requests.as_slice()
+            }
+            _ => &[][..],
+        })
+        .map(|request| request.client_order_id.as_str())
+        .collect()
+}
+
 /// Whether a cancel or amend names an order whose placement is still waiting
 /// in this ready set. Cancelling an order the venue has not been told about
 /// cannot work, so it waits behind that send — and only behind that send.
-fn depends_on_a_queued_send(command: &Command, ready: &[(u64, Command)]) -> bool {
+fn depends_on_a_queued_send(command: &Command, sends: &HashSet<&str>) -> bool {
+    match command {
+        Command::CancelOrders { requests, .. } | Command::CancelOrdersWait { requests, .. } => {
+            requests.iter().any(|(_, id)| sends.contains(id.as_str()))
+        }
+        Command::Amend {
+            client_order_id, ..
+        }
+        | Command::AmendWait {
+            client_order_id, ..
+        } => sends.contains(client_order_id.as_str()),
+        _ => false,
+    }
+}
+
+/// The same answer as [`selectable`], read off the ready set itself rather
+/// than off the index. The test oracle the index is proved against.
+#[cfg(test)]
+pub(crate) fn selectable_by_scan(ready: &[Queued]) -> Vec<usize> {
     let queued = |id: &str| {
-        ready.iter().any(|(_, other)| match other {
+        ready.iter().any(|other| match &other.command {
             Command::SendOrders { requests, .. } | Command::SendOrdersWait { requests, .. } => {
                 requests.iter().any(|request| request.client_order_id == id)
             }
             _ => false,
         })
     };
-    match command {
+    let blocked = |command: &Command| match command {
         Command::CancelOrders { requests, .. } | Command::CancelOrdersWait { requests, .. } => {
             requests.iter().any(|(_, id)| queued(id))
         }
@@ -559,6 +783,14 @@ fn depends_on_a_queued_send(command: &Command, ready: &[(u64, Command)]) -> bool
             client_order_id, ..
         } => queued(client_order_id),
         _ => false,
+    };
+    let unblocked: Vec<usize> = (0..ready.len())
+        .filter(|index| !blocked(&ready[*index].command))
+        .collect();
+    if unblocked.is_empty() {
+        (0..ready.len()).collect()
+    } else {
+        unblocked
     }
 }
 
@@ -602,9 +834,9 @@ fn queued_shape(command: &Command) -> QueuedCommand {
 /// A send is never blocked, so whenever anything blocks something there is
 /// also something selectable; the fallback exists so no arrangement of the
 /// ready set can leave the worker with nothing to do.
-fn selectable(ready: &[(u64, Command)]) -> Vec<usize> {
+pub(crate) fn selectable(ready: &[Queued], sends: &HashSet<&str>) -> Vec<usize> {
     let unblocked: Vec<usize> = (0..ready.len())
-        .filter(|index| !depends_on_a_queued_send(&ready[*index].1, ready))
+        .filter(|index| !depends_on_a_queued_send(&ready[*index].command, sends))
         .collect();
     if unblocked.is_empty() {
         (0..ready.len()).collect()
@@ -619,28 +851,28 @@ fn selectable(ready: &[(u64, Command)]) -> Vec<usize> {
 ///
 /// Planned before pricing, because what the venue's quota is asked to take is
 /// the whole group, not the head alone.
-fn amend_batch(ready: &[(u64, Command)], head: usize) -> Vec<usize> {
+fn amend_batch(ready: &[Queued], head: usize, sends: &HashSet<&str>) -> Vec<usize> {
     let Command::Amend {
         client_order_id, ..
-    } = &ready[head].1
+    } = &ready[head].command
     else {
         return vec![head];
     };
     let mut ids = vec![client_order_id.as_str()];
     let mut chosen = vec![head];
-    for (index, (_, command)) in ready.iter().enumerate() {
+    for (index, queued) in ready.iter().enumerate() {
         if chosen.len() >= MAX_AMEND_BATCH {
             break;
         }
         let Command::Amend {
             client_order_id, ..
-        } = command
+        } = &queued.command
         else {
             continue;
         };
         if index == head
             || ids.contains(&client_order_id.as_str())
-            || depends_on_a_queued_send(command, ready)
+            || depends_on_a_queued_send(&queued.command, sends)
         {
             continue;
         }
@@ -652,13 +884,17 @@ fn amend_batch(ready: &[(u64, Command)], head: usize) -> Vec<usize> {
 
 /// The next command to hand the venue: one the venue's quota will take now,
 /// then lowest class, then arrival order.
-fn choose(ready: &[(u64, Command)], waits: &[Duration], eligible: &[usize]) -> usize {
+fn choose(ready: &[Queued], waits: &[Duration], eligible: &[usize]) -> usize {
     eligible
         .iter()
         .copied()
         .min_by_key(|index| {
-            let (arrival, command) = &ready[*index];
-            (!waits[*index].is_zero(), class_of(command), *arrival)
+            let queued = &ready[*index];
+            (
+                !waits[*index].is_zero(),
+                class_of(&queued.command),
+                queued.arrival,
+            )
         })
         .unwrap_or_default()
 }
@@ -752,47 +988,94 @@ async fn dispatch_amends<V: VenueGateway>(
 
 async fn run<V: VenueGateway>(
     mut venue: V,
+    mut urgent: mpsc::Receiver<Command>,
     mut commands: mpsc::Receiver<Command>,
     completions: mpsc::Sender<MutationCompletion>,
     epoch: AuthorityEpoch,
+    gauges: Arc<VenueQueueGauges>,
 ) {
     let refusal = |authority: Option<CommandAuthority>| {
         authority.and_then(|authority| {
             authority_refusal(&epoch, authority, engine_types::clock::mono_ns())
         })
     };
-    let mut ready: Vec<(u64, Command)> = Vec::new();
+    let mut ready: Vec<Queued> = Vec::new();
     let mut arrival = 0u64;
-    // Set when the engine has dropped the sender. Everything taken from the
-    // channel is still answered or refused, never dropped; nothing can arrive
-    // to preempt a hold any more, so the drain does not park and the
-    // adapter's own pacer serves the quota wait inside the call.
-    let mut closed = false;
+    // Set when the engine has dropped that sender. Everything taken from a
+    // lane is still answered or refused, never dropped; once both are closed
+    // nothing can arrive to preempt a hold any more, so the drain does not
+    // park and the adapter's own pacer serves the quota wait inside the call.
+    let mut urgent_closed = false;
+    let mut commands_closed = false;
     loop {
-        // Everything already in the channel competes for this turn; only an
-        // empty ready set waits.
-        while let Ok(command) = commands.try_recv() {
-            ready.push((arrival, command));
+        let mut take = |command, ready: &mut Vec<Queued>| {
+            ready.push(Queued {
+                arrival,
+                queued_ns: engine_types::clock::mono_ns(),
+                command,
+            });
             arrival = arrival.wrapping_add(1);
+        };
+        // Risk-off first and without limit: nothing the engine has handed
+        // over may sit in front of a cancel.
+        loop {
+            match urgent.try_recv() {
+                Ok(command) => take(command, &mut ready),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    urgent_closed = true;
+                    break;
+                }
+            }
         }
+        // The ordinary mailbox is the engine's backpressure: the ready set
+        // takes no more than it can name, and the client refuses the rest.
+        let mut ordinary = ready
+            .iter()
+            .filter(|queued| class_of(&queued.command) != DispatchClass::RiskReducing)
+            .count();
+        while ordinary < READY_ORDINARY_CAPACITY {
+            match commands.try_recv() {
+                Ok(command) => {
+                    take(command, &mut ready);
+                    ordinary += 1;
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    commands_closed = true;
+                    break;
+                }
+            }
+        }
+        gauges.observe_ready(
+            ordinary,
+            ready.len() - ordinary,
+            ready.first().map_or(0, |queued| queued.queued_ns),
+        );
+        let closed = urgent_closed && commands_closed;
         if ready.is_empty() {
             if closed {
                 break;
             }
-            match commands.recv().await {
-                Some(command) => {
-                    ready.push((arrival, command));
-                    arrival = arrival.wrapping_add(1);
-                    continue;
-                }
-                None => break,
+            tokio::select! {
+                biased;
+                received = urgent.recv(), if !urgent_closed => match received {
+                    Some(command) => take(command, &mut ready),
+                    None => urgent_closed = true,
+                },
+                received = commands.recv(), if !commands_closed => match received {
+                    Some(command) => take(command, &mut ready),
+                    None => commands_closed = true,
+                },
             }
+            continue;
         }
         let waits: Vec<Duration> = ready
             .iter()
-            .map(|(_, command)| venue.quota_wait(queued_shape(command)))
+            .map(|queued| venue.quota_wait(queued_shape(&queued.command)))
             .collect();
-        let eligible = selectable(&ready);
+        let sends = queued_send_ids(&ready);
+        let eligible = selectable(&ready, &sends);
         let index = choose(&ready, &waits, &eligible);
         // The venue would hold this call back anyway, and it would hold it
         // inside the gateway where nothing else can be picked. Wait out here
@@ -804,16 +1087,20 @@ async fn run<V: VenueGateway>(
         let hold = (!closed)
             .then(|| held_for(&waits, &eligible, index))
             .flatten()
-            .filter(|_| refusal(queued_authority(&ready[index].1)).is_none());
+            .filter(|_| refusal(queued_authority(&ready[index].command)).is_none());
         if let Some(hold) = hold {
+            drop(sends);
             tokio::select! {
+                biased;
+                received = urgent.recv(), if !urgent_closed => match received {
+                    Some(command) => take(command, &mut ready),
+                    None => urgent_closed = true,
+                },
                 _ = tokio::time::sleep(hold) => {}
-                received = commands.recv() => match received {
-                    Some(command) => {
-                        ready.push((arrival, command));
-                        arrival = arrival.wrapping_add(1);
-                    }
-                    None => closed = true,
+                received = commands.recv(),
+                    if !commands_closed && ordinary < READY_ORDINARY_CAPACITY => match received {
+                    Some(command) => take(command, &mut ready),
+                    None => commands_closed = true,
                 },
             }
             continue;
@@ -821,8 +1108,8 @@ async fn run<V: VenueGateway>(
         // One amend is priced as the smallest group it can shrink to, so the
         // group the quota is actually asked for is settled here: the largest
         // prefix of the planned batch the venue would take now.
-        if matches!(ready[index].1, Command::Amend { .. }) {
-            let mut batch = amend_batch(&ready, index);
+        if matches!(ready[index].command, Command::Amend { .. }) {
+            let mut batch = amend_batch(&ready, index, &sends);
             while batch.len() > 1
                 && !venue
                     .quota_wait(QueuedCommand::Amend {
@@ -833,10 +1120,11 @@ async fn run<V: VenueGateway>(
                 batch.pop();
             }
             batch.sort_unstable();
+            drop(sends);
             let mut taken: Vec<(u64, AmendRequest)> = batch
                 .iter()
                 .rev()
-                .map(|index| match ready.remove(*index).1 {
+                .map(|index| match ready.remove(*index).command {
                     Command::Amend {
                         command_id,
                         symbol,
@@ -856,10 +1144,14 @@ async fn run<V: VenueGateway>(
                 })
                 .collect();
             taken.reverse();
+            gauges.enter_flight(DispatchClass::Amend, engine_types::clock::mono_ns());
             dispatch_amends(&mut venue, &completions, &epoch, taken).await;
+            gauges.leave_flight();
             continue;
         }
-        let (_, command) = ready.remove(index);
+        drop(sends);
+        let command = ready.remove(index).command;
+        gauges.enter_flight(class_of(&command), engine_types::clock::mono_ns());
         match command {
             Command::DispatchLeverage {
                 command_id,
@@ -1029,6 +1321,7 @@ async fn run<V: VenueGateway>(
                 let _ = reply.send(venue.executions(start_ms, end_ms).await);
             }
         }
+        gauges.leave_flight();
     }
 }
 

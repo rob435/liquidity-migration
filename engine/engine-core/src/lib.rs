@@ -47,7 +47,7 @@ mod test_clock;
 #[path = "../../test-support/io.rs"]
 mod test_io;
 pub mod trades;
-mod venue_runtime;
+pub mod venue_runtime;
 pub mod working;
 
 #[cfg(test)]

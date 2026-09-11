@@ -392,3 +392,81 @@ async fn a_reduce_only_orders_reprice_reaches_the_venue_after_the_epoch_advances
         "an exit's reprice was refused at the send boundary; tape was {tape:?}"
     );
 }
+
+/// A dispatch lane the engine has filled is the engine's own backpressure,
+/// not a venue fault: the opening is never sent, its reservation is released,
+/// and the loop goes on. A refusal raised to the run loop ends the process.
+#[tokio::test(start_paused = true)]
+async fn a_full_ordinary_lane_refuses_an_opening_unsent_and_the_engine_keeps_running() {
+    let Held {
+        mut engine,
+        records,
+        control,
+    } = held_worker().await;
+    // Symbol admission is answered on its own oneshot, so filling the lane
+    // with it never enters the engine's mutation bookkeeping.
+    for _ in 0..crate::venue_runtime::COMMAND_CAPACITY {
+        engine
+            .venue
+            .dispatch_symbol_admission(None, Vec::new())
+            .expect("the ordinary lane refused before it was full");
+    }
+    assert!(engine
+        .venue
+        .dispatch_symbol_admission(None, Vec::new())
+        .is_err());
+
+    let prepared = prepared_opening(&mut engine, "lane-full-opening");
+    engine.queue_order_dispatches(vec![prepared]).unwrap();
+    let result = engine.dispatches.durable.recv().await;
+    engine
+        .on_order_dispatch_durable(result)
+        .await
+        .expect("a full dispatch lane ended the run");
+
+    assert!(
+        control.sends.lock().unwrap().is_empty(),
+        "the refused opening reached the venue"
+    );
+    let reason = rejected_for(&records.lock().unwrap(), "lane-full-opening")
+        .expect("the refused opening was never journaled as refused");
+    assert!(
+        reason.starts_with("never sent: venue dispatch lane full"),
+        "{reason}"
+    );
+    assert!(
+        !engine.dispatches.orders.contains_key("lane-full-opening"),
+        "the reservation was left open"
+    );
+    assert!(!engine.books.orders.orders["lane-full-opening"].in_flight());
+    assert!(
+        engine.pending_mutations.is_empty(),
+        "an opening that was never sent is still counted in flight"
+    );
+
+    // Risk-off has its own lane, and the worker takes it first.
+    let working = super::tests::prepared_order(&mut engine, "protective");
+    engine
+        .complete_order_dispatch(&working.request.client_order_id)
+        .unwrap();
+    assert!(engine
+        .process_cancels(vec![(SymbolId(0), "protective".into())])
+        .await
+        .expect("the cancel was refused"));
+    control.release.notify_one();
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        control
+            .tape
+            .lock()
+            .unwrap()
+            .contains(&crate::tests::Step::Cancel("protective".into())),
+        "the protective cancel never reached the venue"
+    );
+    engine
+        .service_order_dispatches()
+        .await
+        .expect("the next pass after a refused lane");
+}

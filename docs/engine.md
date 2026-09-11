@@ -50,7 +50,7 @@ The engine workspace is under `engine/`:
 | `engine/engine-core/src/reconcile.rs` | The log's exposure and intended stops against the venue's positions |
 | `engine/engine-core/src/signal_state.rs` | Accepted input ownership, consumer backpressure, source cursors/gaps/subscriptions and current boot producer frontiers |
 | `engine/engine-core/src/signals/` | Signal feeds: validation, availability deadlines, in-process channel, spool, socket doorbell |
-| `engine/engine-core/src/venue_runtime.rs` | The venue task that owns blocking venue I/O: one gateway call in flight; the next is chosen among the commands the venue's request quota would take now (`VenueGateway::quota_wait`), then by `DispatchClass` (risk-reducing > amend > opening > administration, FIFO within a class, a cancel or amend waits only behind its own order's still-queued send). When every selectable command is over quota the task parks for the shortest of their waits, preempted by whatever arrives meanwhile; a held opening or amend whose `CommandAuthority` epoch or TTL has already lapsed is answered `never sent` at once instead of being held, and one that lapses during the hold is answered `never sent` when the hold ends, before any gateway call. One queued amend is priced as `QueuedCommand::Amend { requests: 1 }` — the smallest group it can be sent in — and the group actually dispatched is sized by `amend_batch` and then by the venue's quota (`MAX_AMEND_BATCH` = 10). Once the engine drops the command channel the task drains what it holds without parking and the adapter's own pacer serves the wait inside the call |
+| `engine/engine-core/src/venue_runtime.rs` | The venue task that owns blocking venue I/O. Two mailboxes, urgent (risk-off) and ordinary, with the bounds in §4 Venue task budgets; one gateway call in flight; the next is chosen among the commands the venue's request quota would take now (`VenueGateway::quota_wait`), then by `DispatchClass` (risk-reducing > amend > opening > administration, FIFO within a class, a cancel or amend waits only behind its own order's still-queued send). When every selectable command is over quota the task parks for the shortest of their waits, preempted by whatever arrives meanwhile; a held opening or amend whose `CommandAuthority` epoch or TTL has already lapsed is answered `never sent` at once instead of being held, and one that lapses during the hold is answered `never sent` when the hold ends, before any gateway call. One queued amend is priced as `QueuedCommand::Amend { requests: 1 }` — the smallest group it can be sent in — and the group actually dispatched is sized by `amend_batch` and then by the venue's quota (`MAX_AMEND_BATCH` = 10). Once the engine drops both command channels the task drains what it holds without parking and the adapter's own pacer serves the wait inside the call |
 | `engine/engine-core/src/ledger.rs`, `engine/engine-tools/src/timing.rs` | Latency segments live, and read back from the log |
 | `engine/engine-core/src/execution.rs`, `engine/engine-core/src/trades.rs` | Fill costs and closed round trips |
 | `engine/engine-tools/src/cohort.rs` | `engine cohort`: every opportunity the log holds and where it stopped. Two lanes — source rows keyed by `(destination, source, sequence, observation_id)` and settled by `signal_observation_consumed`/`_rejected`; order decisions keyed by the `intent` record and settled by its `verdict`, an `order_sent_v2`, a `never sent:` reject or an `intent_refused` record. Each lane splits into admitted, rejected, expired and unresolved, grouped by `intent_refused.code` and `DenyReason::code`; every record is counted once and the totals are printed. `intent.cause` joins the lanes: a decision woken by a signal names its row's id, so the `rows → intents → allowed → wire → filled` funnel runs per source and in total, and every other decision is counted under what woke it (`timer`, `order`, `none`, …). Measurable ages: source `observed_wall_ts_ms` to the acknowledgement's `wall_ts_ms` and to `intent.cause.callback_wall_ms` (two processes' realtime clocks), the acknowledgement to that same callback stamp (one realtime clock read twice), and `order_sent_v2.dispatch.intent.decided_ns` to `wire_ns` (one monotonic clock); `decided_ns` is never subtracted from a wall stamp, and a decision carrying no such stamp is counted in `without_a_stamp`. A log with the old free-text refusal notes and no `intent_refused` record counts its refusals unresolved and says so. Coalesced and unlisted-name drops happen in the worker and are named in the footer, never counted here |
@@ -384,6 +384,27 @@ A run that ends without being asked returns one `EngineError`. The supervisor re
 | Terminal rotation retention | Terminal timestamp compared with `min(wall_ms, execution_history_through_ms) - (7 days + 120 s)`. | Incomplete history cannot expire ownership early. Cache eviction uses the retained archive; missing archive segments are explicit errors. |
 | Retained WAL family | Order lineage requires every segment from segment 1; unresolved callback cursors retain their source segments. | Rotation and terminal-cache expiry do not authorize archive pruning. Missing source frames remain recovery errors. |
 
+#### Venue task budgets
+
+Outstanding venue work is bounded at every stage. `VenueClient::send` routes by
+`DispatchClass`: `RiskReducing` to the urgent lane, everything else to the
+ordinary lane.
+
+| Stage | Bound | When full |
+| --- | --- | --- |
+| Ordinary mailbox (`COMMAND_CAPACITY`) | 4096 commands | `VenueClient::send` refuses with `VenueError::Transport("venue dispatch lane full: the ordinary lane holds its 4096 commands")` and counts `refused_ordinary`. The engine takes that refusal as its own backpressure: openings take the never-sent path (`never sent: …` reject, reservation released), an amend and a stop write one WAL `Note` and stay supervised, leverage retries on the next pass. It is never raised to the run loop |
+| Urgent mailbox (`URGENT_CAPACITY`) | 1024 commands | The same refusal naming the urgent lane, counted in `refused_urgent`. Cancels leave the orders working and supervised, write one WAL `Note`, and a halt cancel returns to `halt_cancel_queue` |
+| Ready set | `READY_ORDINARY_CAPACITY` = 4096 ordinary commands, plus whatever the urgent lane holds | The task stops draining the ordinary mailbox until the ready set falls below the bound; the urgent mailbox is drained in full every turn and before every dispatch |
+| In flight | One gateway call | Every other queued command waits; a quota hold is waited out in the task, not inside the call |
+| Completion channel (`COMPLETION_CAPACITY`) | 4096 completions | The task blocks on `send().await`, so it stops taking new work; the ready set plateaus and the mailboxes refuse |
+| Per-command requests (`MAX_REQUESTS_PER_COMMAND`) | 10 | `dispatch_orders` / `dispatch_cancels` refuse with `VenueError::BadRequest`. Every producer already satisfies it: `MAX_ORDERS_PER_BATCH` = `MAX_CANCELS_PER_BATCH` = 10, and Bybit refuses a larger group before the wire |
+| Derived bytes | (4096 + 1024 + 4096 + 1) commands × 10 requests × one `OrderRequest` | Follows from the counts above; no separate byte cap exists or is needed |
+
+Gauges: `VenueClient::gauges()` returns the shared `VenueQueueGauges`, and
+`VenueQueueGauges::snapshot(now_ns)` reads `ready_ordinary`, `ready_urgent`,
+`oldest_ready_ms`, `in_flight_ms`, `in_flight_class`, `refused_ordinary`,
+`refused_urgent`, `ordinary_capacity` and `urgent_capacity`.
+
 #### REST History Fetch Ceilings
 Bounded acquisition envelopes prevent runaway memory during cold starts:
 
@@ -403,6 +424,7 @@ Bounded acquisition envelopes prevent runaway memory during cold starts:
 | --- | --- |
 | `[engine]` | WAL paths, group flush timing (`1–1000 ms`), socket paths and heartbeat interval. |
 | `[risk]` | Gross capital reference, leverage, order size bounds and rolling-loss limit. |
+| `[canary]` | The operating policy a `live-canary` realm runs under: window, accepted unproven set, allowed sleeves and symbols, and absolute opening ceilings. §2 *Canary policy*. |
 | `[[strategy]]` | Sleeve configurations (`CARRY`, `LONG`, `EXODUS`, `MAKER`) resolved by stable key into durable ID order. |
 
 #### Signal identities and who checks them
@@ -424,7 +446,6 @@ The signal worker's config identity (`engine/signal-worker/src/config.rs`) carri
 
 #### Execution and account limits
 
-| `[canary]` | The operating policy a `live-canary` realm runs under: window, accepted unproven set, allowed sleeves and symbols, and absolute opening ceilings. §2 *Canary policy*. |
 | Control | Runtime contract |
 |---|---|
 | Entry work | LONG in both realms rests PostOnly for 30 s. Crossing cancels first; an independent terminal REST lookup must agree exactly with recovered fills before one fresh IOC remainder is admitted. Restart cancels recovered entries, including sleeve growth that reduces the physical position |

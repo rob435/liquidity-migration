@@ -6,7 +6,11 @@
 
 use super::*;
 
-use crate::venue_runtime::{send_class, DispatchClass, MutationCompletion, VenueClient};
+use crate::venue_runtime::{
+    lane_full, queued_send_ids, selectable, selectable_by_scan, send_class, Command, DispatchClass,
+    MutationCompletion, Queued, VenueClient, COMMAND_CAPACITY, COMPLETION_CAPACITY,
+    MAX_REQUESTS_PER_COMMAND, READY_ORDINARY_CAPACITY, URGENT_CAPACITY,
+};
 use engine_types::{AuthorityEpoch, CommandAuthority};
 use tokio::sync::mpsc;
 
@@ -911,4 +915,443 @@ async fn every_amend_parked_behind_a_quota_hold_is_answered_after_the_client_is_
     answered.sort_unstable();
     queued.sort_unstable();
     assert_eq!(answered, queued, "a parked amend was dropped, not answered");
+}
+
+// ------------------------------------------------- lanes and their capacity
+
+/// A venue whose placements wait for the test to let them through, one permit
+/// at a time; everything else is answered at once. The worker parks inside
+/// the gateway call, which is where a producer flood finds it.
+struct ParkedVenue {
+    gate: Arc<tokio::sync::Semaphore>,
+    marks: Arc<Mutex<Vec<String>>>,
+}
+
+impl ParkedVenue {
+    fn parked() -> Self {
+        ParkedVenue {
+            gate: Arc::new(tokio::sync::Semaphore::new(0)),
+            marks: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn open() -> Self {
+        let venue = ParkedVenue::parked();
+        venue.gate.add_permits(tokio::sync::Semaphore::MAX_PERMITS);
+        venue
+    }
+
+    fn mark(&self, what: String) {
+        self.marks.lock().unwrap().push(what);
+    }
+}
+
+#[engine_types::async_trait]
+impl VenueGateway for ParkedVenue {
+    fn caps(&self) -> VenueCaps {
+        VenueCaps {
+            native_position_stop: true,
+            amend_in_place: true,
+            set_leverage: false,
+            close_position_below_minimum: false,
+        }
+    }
+
+    async fn account_identity(&mut self) -> Result<AccountIdentity, VenueError> {
+        Ok(AccountIdentity {
+            venue: "parked".into(),
+            user_id: "7000002".into(),
+            realm: "demo".into(),
+        })
+    }
+
+    async fn send_order(&mut self, req: &OrderRequest) -> Result<OrderAck, VenueError> {
+        // Marked on arrival, not on release: what the tape records is the
+        // worker reaching the gateway, which is where the flood finds it.
+        self.mark(format!("send {}", req.client_order_id));
+        self.gate
+            .acquire()
+            .await
+            .expect("the gate outlives the venue")
+            .forget();
+        Ok(OrderAck {
+            client_order_id: req.client_order_id.clone(),
+            venue_order_id: format!("venue-{}", req.client_order_id),
+            sent_ns: clock::now_ns(),
+            ack_ns: clock::now_ns(),
+        })
+    }
+
+    async fn cancel_order(&mut self, _symbol: SymbolId, id: &str) -> Result<(), VenueError> {
+        self.mark(format!("cancel {id}"));
+        Ok(())
+    }
+
+    async fn amend_order(
+        &mut self,
+        _symbol: SymbolId,
+        id: &str,
+        _spec: AmendSpec,
+    ) -> Result<(), VenueError> {
+        self.mark(format!("amend {id}"));
+        Ok(())
+    }
+
+    async fn set_stop(&mut self, symbol: SymbolId, _trigger_px: f64) -> Result<(), VenueError> {
+        self.mark(format!("stop {}", symbol.0));
+        Ok(())
+    }
+
+    async fn account_view(&mut self) -> Result<AccountView, VenueError> {
+        Ok(AccountView {
+            exact_amounts: None,
+            equity_usdt: 10_000.0,
+            available_usdt: 10_000.0,
+            positions: Vec::new(),
+            observed_ns: clock::now_ns(),
+        })
+    }
+
+    async fn instrument_rules(&mut self) -> Result<Vec<(Symbol, InstrumentRule)>, VenueError> {
+        Ok(Vec::new())
+    }
+
+    async fn working_orders(&mut self) -> Result<Vec<VenueOrder>, VenueError> {
+        Ok(Vec::new())
+    }
+}
+
+/// Openings until the client refuses one, counted from `from`.
+fn flood(client: &mut VenueClient, epoch: &AuthorityEpoch, from: usize) -> (usize, VenueError) {
+    let mut accepted = 0;
+    loop {
+        let id = format!("flood-{}", from + accepted);
+        match client.dispatch_orders(vec![request(&id, false)], Some(live(epoch))) {
+            Ok(_) => accepted += 1,
+            Err(error) => return (accepted, error),
+        }
+        assert!(
+            accepted <= COMMAND_CAPACITY + READY_ORDINARY_CAPACITY,
+            "the ordinary lane took {accepted} openings without refusing one"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_ordinary_lane_refuses_a_producer_flood_and_risk_off_still_overtakes_it() {
+    let venue = ParkedVenue::parked();
+    let gate = venue.gate.clone();
+    let marks = venue.marks.clone();
+    let epoch = AuthorityEpoch::new();
+    let (mut client, mut completions) = VenueClient::spawn(venue, epoch.clone());
+    client
+        .dispatch_orders(vec![request("in-flight", false)], Some(live(&epoch)))
+        .unwrap();
+    tokio::task::yield_now().await;
+    assert_eq!(seen(&marks), vec!["send in-flight".to_string()]);
+
+    // The mailbox fills behind the send the worker is parked in.
+    let (mailbox, _) = flood(&mut client, &epoch, 0);
+    assert_eq!(mailbox, COMMAND_CAPACITY);
+
+    // One release, and the worker takes a whole ready set out of the mailbox
+    // before parking in the next send.
+    gate.add_permits(1);
+    drain(&mut completions, 1).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        seen(&marks).len(),
+        2,
+        "the worker did not drain the mailbox"
+    );
+    let (refilled, refusal) = flood(&mut client, &epoch, mailbox);
+
+    let accepted = 1 + mailbox + refilled;
+    assert_eq!(
+        accepted,
+        COMMAND_CAPACITY + READY_ORDINARY_CAPACITY + 1,
+        "the ordinary lane and the ready set do not add up to the documented bound"
+    );
+    let detail = lane_full(&refusal).unwrap_or_else(|| panic!("{refusal:?}"));
+    assert!(
+        detail.contains("ordinary") && detail.contains(&COMMAND_CAPACITY.to_string()),
+        "the refusal names neither the lane nor its capacity: {detail}"
+    );
+
+    client
+        .dispatch_cancels(vec![(SymbolId(0), "risk-off".into())])
+        .unwrap();
+    gate.add_permits(1);
+    drain(&mut completions, 2).await;
+    let tape = seen(&marks);
+    let cancel = tape
+        .iter()
+        .position(|mark| mark == "cancel risk-off")
+        .unwrap_or_else(|| panic!("the cancel never reached the venue; tape was {tape:?}"));
+    assert_eq!(
+        cancel, 2,
+        "the cancel waited behind openings the worker was already holding; tape was {tape:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_urgent_lane_refuses_a_cancel_burst_and_takes_cancels_again_once_it_drains() {
+    let venue = ParkedVenue::parked();
+    let gate = venue.gate.clone();
+    let marks = venue.marks.clone();
+    let epoch = AuthorityEpoch::new();
+    let (mut client, mut completions) = VenueClient::spawn(venue, epoch.clone());
+    client
+        .dispatch_orders(vec![request("parking-opening", false)], Some(live(&epoch)))
+        .unwrap();
+    tokio::task::yield_now().await;
+    assert_eq!(seen(&marks), vec!["send parking-opening".to_string()]);
+
+    let mut accepted = 0;
+    let refusal = loop {
+        match client.dispatch_cancels(vec![(SymbolId(0), format!("pull-{accepted}"))]) {
+            Ok(_) => accepted += 1,
+            Err(error) => break error,
+        }
+        assert!(
+            accepted <= URGENT_CAPACITY,
+            "the urgent lane took {accepted} cancels without refusing one"
+        );
+    };
+    assert_eq!(accepted, URGENT_CAPACITY);
+    let detail = lane_full(&refusal).unwrap_or_else(|| panic!("{refusal:?}"));
+    assert!(
+        detail.contains("urgent") && detail.contains(&URGENT_CAPACITY.to_string()),
+        "the refusal names neither the lane nor its capacity: {detail}"
+    );
+
+    gate.add_permits(1);
+    drain(&mut completions, URGENT_CAPACITY + 1).await;
+    client
+        .dispatch_cancels(vec![(SymbolId(0), "after-the-drain".into())])
+        .expect("the drained urgent lane still refuses cancels");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_engine_that_never_reads_completions_plateaus_the_ready_set_and_climbs_the_refusals() {
+    let venue = ParkedVenue::open();
+    let marks = venue.marks.clone();
+    let epoch = AuthorityEpoch::new();
+    let (mut client, _completions) = VenueClient::spawn(venue, epoch.clone());
+    let gauges = client.gauges();
+    let limit = COMMAND_CAPACITY + READY_ORDINARY_CAPACITY + COMPLETION_CAPACITY + 512;
+
+    let mut accepted = 0usize;
+    let mut refused = 0usize;
+    for n in 0..limit {
+        match client.dispatch_orders(
+            vec![request(&format!("flood-{n}"), false)],
+            Some(live(&epoch)),
+        ) {
+            Ok(_) => accepted += 1,
+            Err(error) => {
+                assert!(lane_full(&error).is_some(), "{error:?}");
+                refused += 1;
+            }
+        }
+        if n % 64 == 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    assert!(
+        refused > 0,
+        "the ordinary lane took {accepted} openings with nothing reading completions"
+    );
+    assert!(
+        accepted <= COMMAND_CAPACITY + READY_ORDINARY_CAPACITY + COMPLETION_CAPACITY + 1,
+        "the task holds {accepted} commands, more than its stages can name"
+    );
+    let snapshot = gauges.snapshot(clock::now_ns());
+    assert!(
+        snapshot.ready_ordinary <= READY_ORDINARY_CAPACITY,
+        "the ready set grew to {} with the completion channel full",
+        snapshot.ready_ordinary
+    );
+    assert_eq!(snapshot.refused_ordinary as usize, refused);
+    assert_eq!(snapshot.refused_urgent, 0);
+    assert_eq!(snapshot.ordinary_capacity, COMMAND_CAPACITY);
+    assert_eq!(snapshot.urgent_capacity, URGENT_CAPACITY);
+    assert!(
+        seen(&marks).len() >= COMPLETION_CAPACITY,
+        "the venue stopped answering before the completion channel filled"
+    );
+}
+
+#[test]
+fn one_command_carries_no_more_requests_than_every_producer_already_sends() {
+    let epoch = AuthorityEpoch::new();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _guard = runtime.enter();
+    let (mut client, _completions) = VenueClient::spawn(ParkedVenue::open(), epoch.clone());
+
+    let requests: Vec<_> = (0..=MAX_REQUESTS_PER_COMMAND)
+        .map(|n| request(&format!("oversized-{n}"), false))
+        .collect();
+    assert!(matches!(
+        client.dispatch_orders(requests, Some(live(&epoch))),
+        Err(VenueError::BadRequest(_))
+    ));
+    let cancels: Vec<_> = (0..=MAX_REQUESTS_PER_COMMAND)
+        .map(|n| (SymbolId(0), format!("oversized-{n}")))
+        .collect();
+    assert!(matches!(
+        client.dispatch_cancels(cancels),
+        Err(VenueError::BadRequest(_))
+    ));
+    assert!(client
+        .dispatch_orders(
+            (0..MAX_REQUESTS_PER_COMMAND)
+                .map(|n| request(&format!("legal-{n}"), false))
+                .collect(),
+            Some(live(&epoch))
+        )
+        .is_ok());
+}
+
+// ------------------------------------------------------ the dependency index
+
+/// Ready sets drawn from a small alphabet, so cancels and amends name
+/// placements that are sometimes queued here and sometimes not.
+fn random_ready(next: &mut impl FnMut() -> u64) -> Vec<Queued> {
+    let len = (next() % 9) as usize;
+    (0..len)
+        .map(|arrival| {
+            let arrival = arrival as u64;
+            let drawn: Vec<String> = (0..4).map(|_| format!("id-{}", next() % 4)).collect();
+            let mut drawn = drawn.into_iter();
+            let mut id = move || drawn.next().expect("four ids are drawn per command");
+            let command = match next() % 7 {
+                0 => Command::SendOrders {
+                    command_id: arrival,
+                    requests: vec![request(&id(), false)],
+                    class: DispatchClass::Opening,
+                    authority: None,
+                },
+                1 => Command::SendOrders {
+                    command_id: arrival,
+                    requests: vec![request(&id(), false), request(&id(), true)],
+                    class: DispatchClass::Opening,
+                    authority: None,
+                },
+                2 => Command::SendOrdersWait {
+                    requests: vec![request(&id(), true)],
+                    class: DispatchClass::RiskReducing,
+                    reply: tokio::sync::oneshot::channel().0,
+                },
+                3 => Command::CancelOrders {
+                    command_id: arrival,
+                    requests: vec![(SymbolId(0), id()), (SymbolId(0), id())],
+                },
+                4 => Command::CancelOrdersWait {
+                    requests: vec![(SymbolId(0), id())],
+                    reply: tokio::sync::oneshot::channel().0,
+                },
+                5 => Command::Amend {
+                    command_id: arrival,
+                    symbol: SymbolId(0),
+                    client_order_id: id(),
+                    spec: reprice(),
+                    authority: None,
+                },
+                _ => Command::AmendWait {
+                    symbol: SymbolId(0),
+                    client_order_id: id(),
+                    spec: reprice(),
+                    reply: tokio::sync::oneshot::channel().0,
+                },
+            };
+            Queued {
+                arrival,
+                queued_ns: arrival,
+                command,
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn the_dependency_index_selects_what_scanning_every_queued_send_selects() {
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for _ in 0..2_000 {
+        let ready = random_ready(&mut next);
+        let sends = queued_send_ids(&ready);
+        assert_eq!(
+            selectable(&ready, &sends),
+            selectable_by_scan(&ready),
+            "the index and the scan disagree on a ready set of {} commands",
+            ready.len()
+        );
+    }
+}
+
+// ----------------------------------------------------------------- shutdown
+
+#[tokio::test(start_paused = true)]
+async fn every_lane_and_the_hold_are_answered_after_the_client_is_dropped() {
+    let venue = QuotaVenue::new();
+    venue.hold_openings(HELD_BY_QUOTA);
+    let epoch = AuthorityEpoch::new();
+    let (mut client, mut completions) = VenueClient::spawn(venue, epoch.clone());
+    let gauges = client.gauges();
+    let mut dispatched = 0usize;
+    client
+        .dispatch_orders(vec![request("held-opening", false)], Some(live(&epoch)))
+        .unwrap();
+    dispatched += 1;
+    tokio::task::yield_now().await;
+    // Nothing is awaited from here to the drop, so both mailboxes still hold
+    // what they were given when the senders close.
+    for n in 0..3 {
+        client
+            .dispatch_orders(
+                vec![request(&format!("queued-opening-{n}"), false)],
+                Some(live(&epoch)),
+            )
+            .unwrap();
+        dispatched += 1;
+    }
+    for n in 0..2 {
+        client
+            .dispatch_cancels(vec![(SymbolId(0), format!("queued-cancel-{n}"))])
+            .unwrap();
+        dispatched += 1;
+    }
+    drop(client);
+
+    let mut answered = 0usize;
+    while answered < dispatched {
+        tokio::time::timeout(Duration::from_secs(30), completions.recv())
+            .await
+            .expect("a command held at shutdown was never answered")
+            .expect("the worker stopped with commands outstanding");
+        answered += 1;
+    }
+    let snapshot = gauges.snapshot(clock::now_ns());
+    let refused = (snapshot.refused_ordinary + snapshot.refused_urgent) as usize;
+    assert_eq!(
+        answered + refused,
+        dispatched,
+        "the worker dropped commands on the way out"
+    );
+    assert!(
+        completions.recv().await.is_none(),
+        "the worker answered more than it was given"
+    );
 }

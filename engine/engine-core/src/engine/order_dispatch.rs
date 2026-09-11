@@ -347,19 +347,40 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                     let authority = (crate::venue_runtime::send_class(&requests)
                         == crate::venue_runtime::DispatchClass::Opening)
                         .then(|| self.mint_authority());
-                    let command_id = self.venue.dispatch_orders(requests.clone(), authority)?;
-                    self.mark_symbols_busy(requests.iter().map(|request| request.symbol));
-                    self.pending_mutations.insert(
-                        command_id,
-                        PendingMutation::Orders {
-                            requests,
-                            timings,
-                            queued_ns,
-                            authority,
-                        },
-                    );
-                    // The venue actor shares this executor; start I/O before route maintenance.
-                    tokio::task::yield_now().await;
+                    match self.venue.dispatch_orders(requests.clone(), authority) {
+                        Ok(command_id) => {
+                            self.mark_symbols_busy(requests.iter().map(|request| request.symbol));
+                            self.pending_mutations.insert(
+                                command_id,
+                                PendingMutation::Orders {
+                                    requests,
+                                    timings,
+                                    queued_ns,
+                                    authority,
+                                },
+                            );
+                            // The venue actor shares this executor; start I/O
+                            // before route maintenance.
+                            tokio::task::yield_now().await;
+                        }
+                        Err(error) => {
+                            // The engine's own backpressure, not the venue's:
+                            // nothing was signed, so these take the never-sent
+                            // path and their reservations are released here.
+                            let Some(detail) = crate::venue_runtime::lane_full(&error) else {
+                                return Err(error.into());
+                            };
+                            tracing::warn!(
+                                detail,
+                                orders = requests.len(),
+                                "placements refused unsent"
+                            );
+                            for request in &requests {
+                                self.refuse_unsent_dispatch(&request.client_order_id, detail)
+                                    .await?;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -392,7 +413,19 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 ));
             }
             let queued_ns = clock::now_ns();
-            let command_id = self.venue.dispatch_leverage(symbol, want)?;
+            let command_id = match self.venue.dispatch_leverage(symbol, want) {
+                Ok(command_id) => command_id,
+                Err(error) => {
+                    let Some(detail) = crate::venue_runtime::lane_full(&error) else {
+                        return Err(error.into());
+                    };
+                    // Nothing changed: the dependent orders stay queued and
+                    // still name a leverage this account has not confirmed,
+                    // so the next pass asks again.
+                    tracing::warn!(detail, symbol = symbol.0, "leverage refused unsent");
+                    return Ok(());
+                }
+            };
             self.leverage_at.remove(&symbol);
             self.mark_symbols_busy([symbol]);
             self.pending_mutations.insert(
