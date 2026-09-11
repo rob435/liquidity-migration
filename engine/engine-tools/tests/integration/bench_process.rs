@@ -13,8 +13,18 @@ impl Drop for TempPath {
         let _ = std::fs::remove_file(&self.0);
     }
 }
+/// The venue task's queue is what these cells judge, not the disk: on a shared
+/// runner the barrier behind every command can stall for seconds while other
+/// cells fsync beside it, so the log goes to memory-backed storage where the
+/// box has it.
 fn temp_path(name: &str) -> TempPath {
-    TempPath(std::env::temp_dir().join(format!(
+    let shm = std::path::Path::new("/dev/shm");
+    let dir = if shm.is_dir() {
+        shm.to_path_buf()
+    } else {
+        std::env::temp_dir()
+    };
+    TempPath(dir.join(format!(
         "{name}-{}-{}.wal",
         std::process::id(),
         engine_types::clock::mono_ns()
