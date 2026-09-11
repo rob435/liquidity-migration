@@ -33,7 +33,7 @@ use super::parse::{
 use super::realm::VenueRealm;
 use super::rest::RestClient;
 use super::sign::RECV_WINDOW_MS;
-use super::trade_ws::TradeClient;
+use super::trade_ws::{SendGate, TradeClient};
 use super::CATEGORY;
 use crate::creds::Credentials;
 use crate::fmt::venue_num;
@@ -251,6 +251,22 @@ fn copy_venue_error(error: &VenueError) -> VenueError {
 
 fn cancel_batch_error(count: usize, error: VenueError) -> Vec<Result<(), VenueError>> {
     (0..count).map(|_| Err(copy_venue_error(&error))).collect()
+}
+
+/// The same refusal this adapter reads before it signs anything, handed to the
+/// trade worker so it is read again in the instant before the frame is
+/// written. `None` authority is a command nothing can refuse locally.
+fn send_gate(
+    authority: Option<(
+        &engine_types::AuthorityEpoch,
+        engine_types::CommandAuthority,
+    )>,
+) -> Option<SendGate> {
+    let (shared, held) = authority?;
+    let shared = shared.clone();
+    Some(Box::new(move || {
+        engine_types::authority_refusal(&shared, held, crate::mono_ns())
+    }))
 }
 
 /// A deliberately narrow live capability for deployment attestation.
@@ -767,10 +783,16 @@ impl BybitGateway {
         Ok(Value::Object(body))
     }
 
-    async fn send_one(&mut self, req: &OrderRequest) -> Result<OrderAck, VenueError> {
+    async fn send_one(
+        &mut self,
+        req: &OrderRequest,
+        gate: Option<SendGate>,
+    ) -> Result<OrderAck, VenueError> {
         let body = self.order_body(req)?;
         if let Some(trade) = &mut self.trade {
-            let reply = trade.request("order.create", vec![body]).await?;
+            let reply = trade
+                .request_under("order.create", vec![body], gate)
+                .await?;
             Self::note_quota(
                 &mut self.create_limiter,
                 "order.create",
@@ -794,6 +816,7 @@ impl BybitGateway {
     async fn send_trade_batch(
         &mut self,
         reqs: &[OrderRequest],
+        gate: Option<SendGate>,
     ) -> Vec<Result<OrderAck, VenueError>> {
         let mut items = Vec::with_capacity(reqs.len());
         for req in reqs {
@@ -813,7 +836,7 @@ impl BybitGateway {
             .trade
             .as_mut()
             .expect("called only with WebSocket transport")
-            .request("order.create-batch", args)
+            .request_under("order.create-batch", args, gate)
             .await
         {
             Ok(reply) => reply,
@@ -943,15 +966,15 @@ impl BybitGateway {
         }
         if self.trade.is_some() {
             let replies = if reqs.len() == 1 {
-                vec![self.send_one(&reqs[0]).await]
+                vec![self.send_one(&reqs[0], send_gate(authority)).await]
             } else if !trade_batch_preserves_stops(reqs) {
                 let mut replies = Vec::with_capacity(reqs.len());
                 for request in reqs {
-                    replies.push(self.send_one(request).await);
+                    replies.push(self.send_one(request, send_gate(authority)).await);
                 }
                 replies
             } else {
-                self.send_trade_batch(reqs).await
+                self.send_trade_batch(reqs, send_gate(authority)).await
             };
             self.create_limiter
                 .anchor_completion(Instant::now(), reqs.len());
@@ -1044,6 +1067,12 @@ impl BybitGateway {
                 })
             })
             .collect();
+        let gates: Vec<Option<SendGate>> = requests
+            .iter()
+            .zip(&refusals)
+            .filter(|(_, refusal)| refusal.is_none())
+            .map(|(request, _)| send_gate(epoch.zip(request.authority)))
+            .collect();
         let bodies: Vec<Value> = bodies
             .into_iter()
             .zip(&refusals)
@@ -1054,9 +1083,10 @@ impl BybitGateway {
             Vec::new()
         } else if let Some(trade) = &mut self.trade {
             let replies = trade
-                .requests(
+                .requests_under(
                     "order.amend",
                     bodies.into_iter().map(|body| vec![body]).collect(),
+                    gates,
                 )
                 .await;
             for reply in replies.iter().filter_map(|reply| reply.as_ref().ok()) {
@@ -1295,7 +1325,7 @@ impl VenueGateway for BybitGateway {
         self.last_rate_wait_ns = None;
         self.require_one_way(req.symbol).await?;
         self.reserve_create_capacity(1).await;
-        let reply = self.send_one(req).await;
+        let reply = self.send_one(req, None).await;
         self.create_limiter.anchor_completion(Instant::now(), 1);
         reply
     }

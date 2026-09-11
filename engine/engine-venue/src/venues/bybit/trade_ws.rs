@@ -41,12 +41,22 @@ pub(crate) struct TradeReply {
     pub(crate) quota_per_second: Option<usize>,
 }
 
+/// Whether this request may still be transmitted, read by the worker in the
+/// instant before the frame is written. `Some(reason)` writes nothing.
+///
+/// The queue between [`TradeClient::request`] and the socket is unbounded in
+/// time: a frame can wait behind other commands, a reconnect backoff and a
+/// dial. The caller's own check happens before that wait; this one happens
+/// after it.
+pub(crate) type SendGate = Box<dyn Fn() -> Option<String> + Send + 'static>;
+
 enum Command {
     Warm(oneshot::Sender<Result<(), VenueError>>),
     Request {
         req_id: String,
         operation: &'static str,
         args: Vec<Value>,
+        gate: Option<SendGate>,
         reply: oneshot::Sender<Result<TradeReply, VenueError>>,
     },
 }
@@ -83,6 +93,15 @@ impl TradeClient {
         operation: &'static str,
         args: Vec<Value>,
     ) -> Result<TradeReply, VenueError> {
+        self.request_under(operation, args, None).await
+    }
+
+    pub(crate) async fn request_under(
+        &mut self,
+        operation: &'static str,
+        args: Vec<Value>,
+        gate: Option<SendGate>,
+    ) -> Result<TradeReply, VenueError> {
         let req_id = format!("eng-{}", self.next_request);
         self.next_request = self.next_request.wrapping_add(1).max(1);
         let sender = self.sender();
@@ -92,6 +111,7 @@ impl TradeClient {
                 req_id,
                 operation,
                 args,
+                gate,
                 reply,
             })
             .await
@@ -99,14 +119,18 @@ impl TradeClient {
         receive.await.map_err(|_| stopped())?
     }
 
-    pub(crate) async fn requests(
+    /// One gate per body, by position. A shorter `gates` leaves the remaining
+    /// bodies ungated.
+    pub(crate) async fn requests_under(
         &mut self,
         operation: &'static str,
         bodies: Vec<Vec<Value>>,
+        mut gates: Vec<Option<SendGate>>,
     ) -> Vec<Result<TradeReply, VenueError>> {
+        gates.resize_with(bodies.len(), || None);
         let sender = self.sender();
         let mut receivers = Vec::with_capacity(bodies.len());
-        for args in bodies {
+        for (args, gate) in bodies.into_iter().zip(gates) {
             let req_id = format!("eng-{}", self.next_request);
             self.next_request = self.next_request.wrapping_add(1).max(1);
             let (reply, receive) = oneshot::channel();
@@ -116,6 +140,7 @@ impl TradeClient {
                     req_id,
                     operation,
                     args,
+                    gate,
                     reply,
                 })
                 .await;
@@ -249,7 +274,7 @@ impl Worker {
                     let Some(command) = command else { return Ok(()); };
                     match command {
                         Command::Warm(reply) => { let _ = reply.send(Ok(())); }
-                        Command::Request { req_id, operation, args, reply } => {
+                        Command::Request { req_id, operation, args, gate, reply } => {
                             let frame = json!({
                                 "reqId": req_id,
                                 "header": {"X-BAPI-TIMESTAMP": wall_ms().to_string(),
@@ -257,6 +282,12 @@ impl Worker {
                                 "op": operation,
                                 "args": args,
                             });
+                            // Nothing may await between this answer and the write below:
+                            // the gap it reopens is the one this gate closes.
+                            if let Some(reason) = gate.and_then(|gate| gate()) {
+                                let _ = reply.send(Err(VenueError::BadRequest(reason)));
+                                continue;
+                            }
                             // Sent requests are never replayed here: REST recovery owns uncertainty.
                             pending.insert(req_id.clone(), PendingRequest {
                                 operation, reply, sent_ns: 0,
@@ -504,6 +535,7 @@ mod tests {
                     req_id: index.to_string(),
                     operation: "order.amend",
                     args: vec![],
+                    gate: None,
                     reply,
                 })
                 .await

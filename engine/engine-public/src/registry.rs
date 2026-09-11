@@ -651,7 +651,7 @@ impl VenueName {
     /// the qty=0 whole-position close, and the execution stream both funded
     /// Bybit realms' receipts were read off.
     const BYBIT_SEMANTICS: &'static str =
-        "d28ae5211dfc5056706bbdd88ef8a22a00c0ce5aea3c602c284a1802c72c73c5";
+        "4fa5f63f502924cddbf5f94ddddd1d37c6c9d69321fcf9a32cc82c3358f47988";
     /// The USDT-M futures REST and user-stream encoding.
     const BINANCE_SEMANTICS: &'static str =
         "2cc4bc87617eb2bee1ed2d185402552510304d75ecd7024de0e1ba6584044b02";

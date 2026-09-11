@@ -31,6 +31,8 @@ mod recorded_private;
 mod registry_forwarding;
 #[cfg(feature = "bybit")]
 mod request_shape;
+#[cfg(feature = "bybit")]
+mod trade_ws_authority;
 mod venue_fence;
 #[cfg(feature = "bybit")]
 mod venue_registry;
