@@ -2044,3 +2044,195 @@ async fn a_restored_route_for_an_unlisted_name_does_not_hold_up_boot() {
     )
     .is_empty());
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_malformed_spool_row_is_quarantined_and_leaves_its_sequence_as_a_gap() {
+    let directory = temp_path("signal-spool-malformed");
+    std::fs::create_dir_all(directory.path()).unwrap();
+    let delivered = Rc::new(RefCell::new(Vec::new()));
+    let strategies = || {
+        vec![
+            Box::new(ScopedSignalBuyer {
+                name: "independent",
+                symbol: "BTCUSDT",
+                dependency: None,
+                reduce_only: false,
+            }) as Box<dyn Strategy>,
+            Box::new(SequenceRecorder {
+                name: "destination",
+                delivered: delivered.clone(),
+            }),
+            Box::new(ScopedSignalBuyer {
+                name: "dependent",
+                symbol: "ETHUSDT",
+                dependency: Some("destination"),
+                reduce_only: false,
+            }),
+        ]
+    };
+    let source = "spool-worker.g1";
+    let (mut engine, harness) =
+        build(allow_all(), strategies(), &["BTCUSDT", "ETHUSDT"], &[]).await;
+    let mut spool = crate::signals::SpoolSignalFeed::new(directory.path())
+        .with_poll_interval(Duration::from_millis(1));
+    let first = source_row(source, 1, 1);
+    let third = source_row(source, 3, 1);
+    let bad_path = spool.path_for(&source_row(source, 2, 1));
+    std::fs::write(spool.path_for(&first), serde_json::to_vec(&first).unwrap()).unwrap();
+    std::fs::write(&bad_path, br#"{"schema_version":"#).unwrap();
+    std::fs::write(spool.path_for(&third), serde_json::to_vec(&third).unwrap()).unwrap();
+    let records = harness.records.clone();
+    engine
+        .run_with_signals(
+            &mut ScriptFeed::quotes(SymbolId(0), 0, false),
+            &mut ScriptOrderFeed::empty(),
+            &mut spool,
+            async move {
+                loop {
+                    if records
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|row| matches!(row, WalRecord::SignalGapRecorded { .. }))
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(*delivered.lock().unwrap(), [(1, source.into(), 1)]);
+    let name = bad_path.file_name().unwrap().to_str().unwrap().to_string();
+    assert!(!bad_path.exists());
+    let sidecar: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            directory
+                .path()
+                .join("quarantine")
+                .join(format!("{name}.reason")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(sidecar["source"], "engine");
+    assert_eq!(sidecar["original_path"], bad_path.display().to_string());
+    let recorded: Vec<_> = harness
+        .records
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|row| match row {
+            WalRecord::SignalGapRecorded { gap, .. } => Some(gap.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        recorded,
+        [engine_types::SignalGap {
+            source: source.into(),
+            destination: StrategyId(1),
+            next_sequence: 2,
+            observed_sequence: 3,
+        }]
+    );
+    let rotated = engine.rotation_base(recent_replay_ms());
+    drop(engine);
+    drop(spool);
+    std::fs::remove_dir_all(directory.path()).unwrap();
+
+    let (mut engine, harness) = build(
+        allow_all(),
+        strategies(),
+        &["BTCUSDT", "ETHUSDT"],
+        &[rotated],
+    )
+    .await;
+    let mut market = ScriptFeed::quotes(SymbolId(0), 1, true);
+    market.symbols = vec!["BTCUSDT".into(), "ETHUSDT".into()];
+    market
+        .events
+        .extend(ScriptFeed::quotes(SymbolId(1), 1, true).events);
+    engine
+        .run(
+            &mut market,
+            &mut ScriptOrderFeed::empty(),
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+    let sends = harness.sends.lock().unwrap();
+    assert_eq!(sends.len(), 1);
+    assert_eq!(sends[0].strategy, StrategyId(0));
+    assert_eq!(
+        harness
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|record| matches!(record,
+                WalRecord::Verdict { verdict: RiskVerdict::Deny { reason: DenyReason::UnknownState { detail } }, .. }
+                    if detail.contains("signal_sequence_gap")))
+            .count(),
+        1
+    );
+}
+
+/// One unusable row is quarantined, but a signal error that is not one row —
+/// a protocol breach, a dead scan task, a spool the engine cannot list — is
+/// still the end of the run.
+#[tokio::test(start_paused = true)]
+async fn a_signal_error_that_is_not_one_row_still_ends_the_run() {
+    struct BrokenSignals;
+    impl engine_types::SignalFeed for BrokenSignals {
+        fn set_gap_requests(
+            &mut self,
+            _gaps: &[engine_types::SignalGapRequest],
+            _blocked_destinations: &[StrategyId],
+        ) -> Result<(), engine_types::SignalError> {
+            Ok(())
+        }
+        fn acknowledge_last(&mut self) -> Result<(), engine_types::SignalError> {
+            Ok(())
+        }
+        fn defer_last(
+            &mut self,
+            _observation: SignalObservation,
+        ) -> Result<(), engine_types::SignalError> {
+            Ok(())
+        }
+        async fn next_observation(
+            &mut self,
+        ) -> Result<SignalObservation, engine_types::SignalError> {
+            Err(engine_types::SignalError::Source(
+                "signal scan task failed: the blocking pool died".into(),
+            ))
+        }
+    }
+
+    let delivered = Rc::new(RefCell::new(Vec::new()));
+    let (mut engine, _harness) = build(
+        allow_all(),
+        vec![Box::new(SequenceRecorder {
+            name: "one",
+            delivered,
+        })],
+        &[],
+        &[],
+    )
+    .await;
+    let error = engine
+        .run_with_signals(
+            &mut ScriptFeed::quotes(SymbolId(0), 0, false),
+            &mut ScriptOrderFeed::empty(),
+            &mut BrokenSignals,
+            std::future::pending(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("signal scan task failed"),
+        "{error}"
+    );
+}

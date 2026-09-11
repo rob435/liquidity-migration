@@ -39,7 +39,7 @@ The signal worker delivers observations to the engine as immutable spool rows, a
 | Property | Path | Format | Permissions | Ownership |
 | :--- | :--- | :--- | :--- | :--- |
 | **Spool row** | `/var/lib/liquidity-migration/signals/<realm>/<sequence:020>-<content_sha256>.json` | One `SignalObservation` JSON envelope, renamed into place after `fsync` | `0770` dir | `liquidity-signal-worker:liquidity-migration` |
-| **Quarantined candidate** | `/var/lib/liquidity-migration/signals/<realm>/quarantine/<original file name>` | The candidate byte for byte, renamed out of the scan path, beside `<original file name>.reason`: JSON `{reason, bytes, modified_wall_ts_ms, quarantined_wall_ts_ms, original_path}` | `0770` dir | `liquidity-signal-worker:liquidity-migration` |
+| **Quarantined candidate** | `/var/lib/liquidity-migration/signals/<realm>/quarantine/<original file name>` | The candidate byte for byte, renamed out of the scan path, beside `<original file name>.reason`: JSON `{reason, bytes, modified_wall_ts_ms, quarantined_wall_ts_ms, original_path}`, plus `source: "engine"` when the engine's scan got there first. Either writer isolates a row the other has not reached; neither delivers it, and the engine meets the sequence it carried as an ordinary gap | `0770` dir | `liquidity-signal-worker:liquidity-migration`, or the realm's engine user |
 | **Demo doorbell** | `/var/lib/liquidity-migration/signals/demo/stream.sock` | `[u32 len_le][the row's bytes]` | `0770` | `liquidity-engine-demo:liquidity-migration` |
 | **Mainnet doorbell** | `/var/lib/liquidity-migration/signals/mainnet/stream.sock` | `[u32 len_le][the row's bytes]` | `0770` | `liquidity-engine-mainnet:liquidity-migration` |
 | **MEXC doorbell** | `/var/lib/liquidity-migration/signals/mexc/stream.sock` | `[u32 len_le][the row's bytes]` | `0770` | `liquidity-engine-mexc:liquidity-migration` |
@@ -59,7 +59,7 @@ The signal worker delivers observations to the engine as immutable spool rows, a
 
 * **Must**: every observation exist as a row before any frame names it.
 * **Must never** retire an unacknowledged spool row or advance a cursor across a known gap.
-* **Must never** delete anything under `quarantine/`: the worker only adds there, and an operator removes the pair by hand after [signal recovery](operations.md#signal-prefix-recovery).
+* **Must never** delete anything under `quarantine/`: the worker and the engine only add there, and an operator removes the pair by hand after [signal recovery](operations.md#signal-prefix-recovery).
 * **Must** preserve the complete source/generation identity and its strategy destination; changing generation cannot clear an older known gap.
 * **Must** retain the spool together with WAL during recovery. WAL retains gap metadata and accepted observations; it does not copy deferred payloads. See [signal recovery](operations.md#signal-prefix-recovery).
 * **Must** treat legacy accepted cursors as an evidence boundary: history already skipped by an older engine cannot be reconstructed from a cursor.

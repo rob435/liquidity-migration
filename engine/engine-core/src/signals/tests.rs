@@ -87,22 +87,157 @@ async fn spool_retires_only_the_previously_returned_file() {
     std::fs::remove_dir(directory.path()).unwrap();
 }
 
+fn sequenced(sequence: u64) -> SignalObservation {
+    let mut row = observation();
+    row.sequence = sequence;
+    row.observation_id = format!("funding-{sequence}");
+    row.content_sha256 = content_sha256(&row);
+    row
+}
+
+fn quarantined(directory: &Path, name: &str) -> PathBuf {
+    directory.join("quarantine").join(name)
+}
+
+fn quarantine_reason(directory: &Path, name: &str) -> serde_json::Value {
+    let raw = std::fs::read(quarantined(directory, &format!("{name}.reason"))).unwrap();
+    serde_json::from_slice(&raw).unwrap()
+}
+
+fn spool_name(path: &Path) -> String {
+    path.file_name().unwrap().to_str().unwrap().to_string()
+}
+
 #[tokio::test(start_paused = true)]
-async fn invalid_spool_row_is_never_retired() {
+async fn a_malformed_row_is_quarantined_and_its_neighbours_are_still_delivered() {
     let directory = crate::testpath::temp_path("bad-signal-spool");
     std::fs::create_dir(directory.path()).unwrap();
-    let mut bad = observation();
-    bad.content_sha256 = "0".repeat(64);
-    let path = spool_path(directory.path(), &bad);
-    publish_test_row(&path, &serde_json::to_vec(&bad).unwrap());
-    let mut feed = SpoolSignalFeed::new(directory.path());
-    assert!(feed.next_observation().await.is_err());
+    let first = sequenced(1);
+    let bad = sequenced(2);
+    let third = sequenced(3);
+    let first_path = spool_path(directory.path(), &first);
+    let bad_path = spool_path(directory.path(), &bad);
+    let third_path = spool_path(directory.path(), &third);
+    let truncated = br#"{"schema_version":"#;
+    publish_test_row(&first_path, &serde_json::to_vec(&first).unwrap());
+    publish_test_row(&bad_path, truncated);
+    publish_test_row(&third_path, &serde_json::to_vec(&third).unwrap());
+
+    let mut feed =
+        SpoolSignalFeed::new(directory.path()).with_poll_interval(Duration::from_millis(1));
+    assert_eq!(feed.next_observation().await.unwrap(), first);
+    feed.acknowledge_last().unwrap();
+    assert_eq!(feed.next_observation().await.unwrap(), third);
+    assert!(!bad_path.exists(), "the unusable row leaves the scan");
+    let name = spool_name(&bad_path);
+    assert!(quarantined(directory.path(), &name).exists());
+    let reason = quarantine_reason(directory.path(), &name);
     assert!(
-        path.exists(),
-        "a failed admission source stays for inspection"
+        reason["reason"]
+            .as_str()
+            .unwrap()
+            .contains("is not an observation"),
+        "{reason}"
     );
-    std::fs::remove_file(path).unwrap();
-    std::fs::remove_dir(directory.path()).unwrap();
+    assert_eq!(reason["bytes"], truncated.len());
+    assert_eq!(reason["original_path"], bad_path.display().to_string());
+    assert_eq!(reason["source"], "engine");
+    assert!(reason["quarantined_wall_ts_ms"].as_i64().is_some());
+    assert!(reason["modified_wall_ts_ms"].as_i64().is_some());
+
+    std::fs::remove_dir_all(directory.path()).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_oversized_row_and_a_row_without_a_sequence_are_quarantined_unread() {
+    let directory = crate::testpath::temp_path("unusable-signal-spool");
+    std::fs::create_dir(directory.path()).unwrap();
+    let live = sequenced(1);
+    let live_path = spool_path(directory.path(), &live);
+    let oversized_path = spool_path(directory.path(), &sequenced(2));
+    let unnamed_path = directory.path().join("notes.json");
+    publish_test_row(&live_path, &serde_json::to_vec(&live).unwrap());
+    std::fs::File::create(&oversized_path)
+        .unwrap()
+        .set_len(MAX_SIGNAL_FILE_BYTES + 1)
+        .unwrap();
+    publish_test_row(&unnamed_path, b"{}");
+
+    let mut feed =
+        SpoolSignalFeed::new(directory.path()).with_poll_interval(Duration::from_millis(1));
+    assert_eq!(feed.next_observation().await.unwrap(), live);
+    feed.acknowledge_last().unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), feed.next_observation())
+            .await
+            .is_err(),
+        "an unusable row is not an error the engine must die on"
+    );
+    assert!(!oversized_path.exists() && !unnamed_path.exists());
+    let oversized = quarantine_reason(directory.path(), &spool_name(&oversized_path));
+    assert!(
+        oversized["reason"].as_str().unwrap().contains("exceeds"),
+        "{oversized}"
+    );
+    assert_eq!(oversized["bytes"], MAX_SIGNAL_FILE_BYTES + 1);
+    let unnamed = quarantine_reason(directory.path(), "notes.json");
+    assert!(
+        unnamed["reason"]
+            .as_str()
+            .unwrap()
+            .contains("must be <sequence>-<sha256>.json"),
+        "{unnamed}"
+    );
+
+    std::fs::remove_dir_all(directory.path()).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_row_that_cannot_be_isolated_stays_where_it_is_and_is_never_read_again() {
+    let directory = crate::testpath::temp_path("colliding-signal-spool");
+    std::fs::create_dir(directory.path()).unwrap();
+    std::fs::create_dir(directory.path().join("quarantine")).unwrap();
+    let first = sequenced(1);
+    let bad_path = spool_path(directory.path(), &sequenced(2));
+    let third = sequenced(3);
+    let fourth = sequenced(4);
+    let held = quarantined(directory.path(), &spool_name(&bad_path));
+    std::fs::write(&held, b"an earlier copy").unwrap();
+    publish_test_row(
+        &spool_path(directory.path(), &first),
+        &serde_json::to_vec(&first).unwrap(),
+    );
+    publish_test_row(&bad_path, b"not json");
+    publish_test_row(
+        &spool_path(directory.path(), &third),
+        &serde_json::to_vec(&third).unwrap(),
+    );
+
+    let mut feed =
+        SpoolSignalFeed::new(directory.path()).with_poll_interval(Duration::from_millis(1));
+    assert_eq!(feed.next_observation().await.unwrap(), first);
+    feed.acknowledge_last().unwrap();
+    assert_eq!(feed.next_observation().await.unwrap(), third);
+    assert!(bad_path.exists(), "a refused row is never deleted");
+    assert_eq!(std::fs::read(&held).unwrap(), b"an earlier copy");
+    assert!(!quarantined(
+        directory.path(),
+        &format!("{}.reason", spool_name(&bad_path))
+    )
+    .exists());
+
+    // The collision clears, and the refused row is still not read: the scan
+    // reached it once, not once per poll.
+    std::fs::remove_file(&held).unwrap();
+    publish_test_row(
+        &spool_path(directory.path(), &fourth),
+        &serde_json::to_vec(&fourth).unwrap(),
+    );
+    feed.acknowledge_last().unwrap();
+    assert_eq!(feed.next_observation().await.unwrap(), fourth);
+    assert!(bad_path.exists() && !held.exists());
+
+    std::fs::remove_dir_all(directory.path()).unwrap();
 }
 
 #[tokio::test(start_paused = true)]

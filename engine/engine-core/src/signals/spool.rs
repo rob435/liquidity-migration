@@ -1,4 +1,5 @@
 use super::*;
+use std::time::SystemTime;
 
 /// Read immutable, ordered JSON envelopes from one spool directory.
 ///
@@ -31,9 +32,29 @@ type ScanResult = (
     Result<SelectedRow, SignalError>,
 );
 
+/// Isolated rows live here, beside the reason they were isolated. The signal
+/// worker's scan writes the same directory and the same sidecar; either side
+/// can reach a bad row first.
+const QUARANTINE_DIRECTORY: &str = "quarantine";
+const QUARANTINE_REASON_SUFFIX: &str = ".reason";
+
+/// The sidecar the worker also writes, plus `source`: which side isolated it.
+#[derive(serde::Serialize)]
+struct QuarantineReason<'a> {
+    reason: &'a str,
+    bytes: u64,
+    modified_wall_ts_ms: Option<i64>,
+    quarantined_wall_ts_ms: Option<i64>,
+    original_path: String,
+    source: &'static str,
+}
+
 #[derive(Default)]
 pub(super) struct SpoolScanner {
     pub(super) deferred: BTreeMap<PathBuf, DeliveryIdentity>,
+    /// Rows the reader cannot use and cannot isolate. They stay in the spool,
+    /// so without this the next pass would read and refuse them again.
+    refused: BTreeSet<PathBuf>,
     next_available_ms: Option<i64>,
 }
 
@@ -51,6 +72,59 @@ impl SpoolScanner {
         }
         self.deferred
             .insert(path, DeliveryIdentity::of(observation));
+    }
+
+    /// Rename the row out of the delivery path and record why beside it. The
+    /// sequence it carried is then missing, which the cursor meets as an
+    /// ordinary gap when the next row of that source arrives. Nothing is
+    /// deleted: the row and its reason stay under `quarantine/`.
+    fn quarantine(&mut self, directory: &Path, path: &Path, reason: &str) {
+        let Some(name) = path.file_name() else {
+            self.refuse(path, reason, "the spool entry has no file name");
+            return;
+        };
+        let quarantine = directory.join(QUARANTINE_DIRECTORY);
+        let target = quarantine.join(name);
+        if target.exists() {
+            self.refuse(path, reason, "quarantine already holds this file name");
+            return;
+        }
+        let metadata = std::fs::metadata(path).ok();
+        if let Err(error) =
+            create_shared_directory(&quarantine).and_then(|()| std::fs::rename(path, &target))
+        {
+            self.refuse(path, reason, &format!("cannot quarantine: {error}"));
+            return;
+        }
+        tracing::error!(
+            path = %path.display(),
+            reason,
+            quarantined = %target.display(),
+            "signal spool row quarantined; its sequence is missing until the producer republishes it"
+        );
+        // A crash between the rename and the sidecar leaves the row without
+        // one; the worker's next scan writes it.
+        if let Err(error) = write_quarantine_reason(&target, reason, metadata.as_ref(), path) {
+            tracing::error!(
+                path = %target.display(),
+                %error,
+                "cannot record why the signal spool row was quarantined"
+            );
+        }
+    }
+
+    /// The row could not be isolated, so it stays in the spool. Refuse the
+    /// path for the rest of this process rather than read it again every poll.
+    fn refuse(&mut self, path: &Path, reason: &str, refusal: &str) {
+        if self.refused.len() < SPOOL_METADATA_CAPACITY {
+            self.refused.insert(path.to_owned());
+        }
+        tracing::error!(
+            path = %path.display(),
+            reason,
+            refusal,
+            "unusable signal spool row stays in the spool and is skipped"
+        );
     }
 
     pub(super) fn page(
@@ -82,8 +156,12 @@ impl SpoolScanner {
                 continue;
             }
             if let Some(exact) = exact {
-                let (sequence, _) = SpoolSignalFeed::parse_name(&path)?;
-                if !exact.contains(&sequence) {
+                // A name that carries no sequence belongs to no source, so no
+                // page can exclude it: the selection pass meets it and
+                // quarantines it.
+                if SpoolSignalFeed::parse_name(&path)
+                    .is_ok_and(|(sequence, _)| !exact.contains(&sequence))
+                {
                     continue;
                 }
             }
@@ -116,6 +194,9 @@ impl SpoolScanner {
             }
             after = page.last().cloned();
             for path in page {
+                if self.refused.contains(&path) {
+                    continue;
+                }
                 if let Some(known) = self.deferred.get(&path) {
                     let next = requested_sequence(gaps, &known.source);
                     if (exact && next != Some(known.sequence))
@@ -135,9 +216,19 @@ impl SpoolScanner {
                         continue;
                     }
                 }
-                let Some(observation) = SpoolSignalFeed::read_one(&path)? else {
-                    self.deferred.remove(&path);
-                    continue;
+                let observation = match SpoolSignalFeed::read_one(&path) {
+                    Ok(Some(observation)) => observation,
+                    Ok(None) => {
+                        self.deferred.remove(&path);
+                        continue;
+                    }
+                    // One row the reader cannot use is not an engine fault.
+                    Err(SignalError::Source(reason)) => {
+                        self.deferred.remove(&path);
+                        self.quarantine(directory, &path, &reason);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
                 };
                 let eligible = if exact {
                     signal_requested(gaps, &observation)
@@ -491,4 +582,65 @@ impl SignalFeed for SpoolSignalFeed {
             };
         }
     }
+}
+
+fn reason_path(quarantined: &Path) -> PathBuf {
+    let mut name = quarantined.file_name().unwrap_or_default().to_owned();
+    name.push(QUARANTINE_REASON_SUFFIX);
+    quarantined.with_file_name(name)
+}
+
+fn write_quarantine_reason(
+    quarantined: &Path,
+    reason: &str,
+    metadata: Option<&std::fs::Metadata>,
+    original: &Path,
+) -> Result<(), String> {
+    let encoded = serde_json::to_vec_pretty(&QuarantineReason {
+        reason,
+        bytes: metadata.map_or(0, std::fs::Metadata::len),
+        modified_wall_ts_ms: metadata
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(wall_ts_ms),
+        quarantined_wall_ts_ms: wall_ts_ms(SystemTime::now()),
+        original_path: original.display().to_string(),
+        source: "engine",
+    })
+    .map_err(|error| error.to_string())?;
+    let path = reason_path(quarantined);
+    // A dot-prefixed name: the worker's scan skips it if a crash leaves it.
+    let temporary = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    let result = std::fs::write(&temporary, &encoded)
+        .and_then(|()| std::fs::rename(&temporary, &path))
+        .map_err(|error| error.to_string());
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// The sidecar's times are the host's, not the engine's virtual clock: the
+/// scan runs on the blocking pool, where that clock is not installed.
+fn wall_ts_ms(time: SystemTime) -> Option<i64> {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+}
+
+/// The engine and the signal worker both rename into `quarantine/`, as
+/// different users of one group and both under `UMask=0027`, which would drop
+/// the group's write bit from a directory either of them creates.
+fn create_shared_directory(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if path.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(path)?;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o770));
+    Ok(())
 }
