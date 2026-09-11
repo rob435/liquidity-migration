@@ -247,15 +247,18 @@ sleeve's `entry_blockers`.
 | `max_open_orders` | integer > 0 | Live orders that add exposure. Reductions are not counted |
 | `max_gross_notional_usdt` | number > 0 | Account gross plus this opening, valued at the marks the engine holds. Absolute money in the account's settlement asset, which the engine labels `usdt` even where it is USDC |
 | `max_position_notional_usdt` | number > 0 | The same for one symbol |
-| `max_loss_usdt` | number > 0 | Realised loss since `started_at` from the risk kernel's closed round trips, plus unrealised loss now. At or past it every opening is `canary_loss_ceiling` |
+| `max_loss_usdt` | number > 0 | Realised loss on round trips closed at or after `started_at`, plus unrealised loss now. At or past it every opening is `canary_loss_ceiling` |
 
-The realised half reads `RiskKernel::rolling_loss_rows`, whose window is
-`engine_risk::ROLLING_LOSS_WINDOW_MS` (one day) wide: on a policy window longer
-than a day it answers for the last day of closed trips and not the ones before
-it, and a trip the log could not value counts as zero. The unrealised half is
-the engine's own marks against the account's entry prices, counted only while
-negative. `Engine::canary_status` reports the window, the book and the word
-every opening would be refused with.
+The realised half is the policy's own exact accumulator, not the risk kernel's
+`ROLLING_LOSS_WINDOW_MS` (one day) window: every round trip closed at or after
+`started_at` counts for the whole policy window, and a trip the log could not
+value is counted in `unvalued_trips` rather than as a trip that lost nothing.
+It is derived state — `enforce_canary` seeds it from the trips the boot replay
+rebuilt and `record_trades` adds each trip that closes while the run is up — so
+no WAL record carries it across a rotation. The unrealised half is the engine's
+own marks against the account's entry prices, counted only while negative.
+`Engine::canary_status` reports the window, the book, the unvalued count and
+the word every opening would be refused with.
 
 Refusal words: `canary_expired`, `canary_strategy_not_allowed`,
 `canary_symbol_not_allowed`, `canary_positions_at_cap`,

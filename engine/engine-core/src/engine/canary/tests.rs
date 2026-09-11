@@ -265,6 +265,8 @@ fn policy() -> CanaryPolicy {
         max_gross_notional_usdt: 105.0,
         max_position_notional_usdt: 15.0,
         max_loss_usdt: 3.0,
+        realised_loss_usdt: Exact::zero(),
+        unvalued_trips: 0,
     }
 }
 
@@ -481,6 +483,112 @@ mod through_the_engine {
         }
     }
 
+    fn fill(side: Side, px: f64, venue_ts_ms: i64) -> crate::execution::Fill {
+        crate::execution::Fill {
+            amounts: None,
+            qty: 1.0,
+            px,
+            fee: Some(0.0),
+            side,
+            venue_ts_ms,
+            is_maker: false,
+            client_order_id: format!("eng-{venue_ts_ms}"),
+            strategy: StrategyId(0),
+            symbol: SymbolId(0),
+            arrival_mid: 100.0,
+        }
+    }
+
+    /// Ten bought at 100 and sold at 90, less the two charges of 0.10.
+    const LOST_USDT: f64 = 100.2;
+
+    fn sent(id: &str, side: Side) -> WalRecord {
+        WalRecord::OrderSent {
+            dispatch: None,
+            request: OrderRequest {
+                client_order_id: id.to_string(),
+                strategy: StrategyId(0),
+                symbol: SymbolId(0),
+                side,
+                qty: 10.0,
+                kind: OrderKind::Market,
+                stop: None,
+                reduce_only: side == Side::Sell,
+                exact_terms: None,
+                sleeve_effect: None,
+                close_position: false,
+            },
+            wire_ns: 1,
+            arrival_mid: 100.0,
+        }
+    }
+
+    fn filled(id: &str, side: Side, px: f64, venue_ts_ms: i64) -> WalRecord {
+        WalRecord::OrderUpdate {
+            callbacks: None,
+            update: OrderUpdate::Fill {
+                allocation: None,
+                amounts: None,
+                exec_id: format!("exec-{id}"),
+                client_order_id: id.to_string(),
+                symbol: SymbolId(0),
+                side,
+                qty: 10.0,
+                px,
+                fee: Some(0.10),
+                is_maker: false,
+                forced_close: None,
+                venue_ts_ms,
+                recv_ns: 2,
+            },
+        }
+    }
+
+    const DAY_MS: i64 = 86_400_000;
+
+    /// Three days before this boot, and two.
+    fn older_close_ms() -> i64 {
+        clock::wall_ms() - 3 * DAY_MS
+    }
+
+    fn newer_close_ms() -> i64 {
+        clock::wall_ms() - 2 * DAY_MS
+    }
+
+    /// A previous run whose two round trips each lost [`LOST_USDT`].
+    fn a_run_that_lost_twice() -> Vec<WalRecord> {
+        let trip = |n: u32, closed_ms: i64| {
+            vec![
+                sent(&format!("eng-{n}-in"), Side::Buy),
+                filled(&format!("eng-{n}-in"), Side::Buy, 100.0, closed_ms - 1),
+                sent(&format!("eng-{n}-out"), Side::Sell),
+                filled(&format!("eng-{n}-out"), Side::Sell, 90.0, closed_ms),
+            ]
+        };
+        let mut log = trip(1, older_close_ms());
+        log.extend(trip(2, newer_close_ms()));
+        log
+    }
+
+    /// Boot on that log, then attach a policy whose window began at
+    /// `started_ms` — the order `runner::run` does it in.
+    async fn booted(started_ms: i64) -> TestEngine {
+        let params = toml::from_str("symbol = 'BTCUSDT'\nevery_s = 60\nenabled = false").unwrap();
+        let strategy = engine_strategies::build_strategy("probe", StrategyId(0), &params).unwrap();
+        let mut engine =
+            crate::tests::replayed_test_fixture(vec![strategy], &a_run_that_lost_twice()).await;
+        // The kernel's window is a day wide and both trips are older than
+        // that. The mock keeps every row it is handed, so age them out by
+        // hand.
+        engine.risk.restore_rolling_loss_rows(&[]);
+        let mut policy = super::policy();
+        policy.started_ms = started_ms;
+        policy.expires_ms = clock::wall_ms() + DAY_MS;
+        policy.sleeves = BTreeSet::from([engine.host.names[0].clone()]);
+        engine.enforce_canary(policy);
+        engine
+    }
+
     fn held(qty: f64, entry_px: f64) -> PositionView {
         PositionView {
             exact_amounts: None,
@@ -493,6 +601,33 @@ mod through_the_engine {
             stop_px: 0.0,
             leverage: None,
         }
+    }
+
+    fn closed(closed_ms: i64, net_usdt: f64) -> engine_types::risk::ClosedTradeRow {
+        engine_types::risk::ClosedTradeRow {
+            unpriced: None,
+            net_usdt_exact: None,
+            closed_ms,
+            net_usdt,
+        }
+    }
+
+    fn observe(engine: &mut TestEngine, row: engine_types::risk::ClosedTradeRow) {
+        engine
+            .canary
+            .as_mut()
+            .expect("this run is under a policy")
+            .observe_closed_trip(&row);
+    }
+
+    /// What the policy has accumulated, positive when the window is down.
+    fn realised_usdt(engine: &TestEngine) -> f64 {
+        engine
+            .canary
+            .as_ref()
+            .expect("this run is under a policy")
+            .realised_loss_usdt
+            .reporting_f64()
     }
 
     fn canary_refusals(records: &Records) -> Vec<String> {
@@ -549,39 +684,32 @@ mod through_the_engine {
     }
 
     /// Closed round trips inside the policy's own window, and only those.
+    /// The risk kernel's day-wide window is not consulted at all.
     #[tokio::test(start_paused = true)]
     async fn the_loss_ceiling_counts_closed_trips_since_the_policy_started() {
-        use engine_types::risk::ClosedTradeRow;
         let policy = super::policy();
         let started_ms = policy.started_ms;
         let (mut engine, _) = fixture(policy).await;
-        let row = |closed_ms: i64, net_usdt: f64| ClosedTradeRow {
-            unpriced: None,
-            net_usdt_exact: None,
-            closed_ms,
-            net_usdt,
-        };
-        engine
-            .risk
-            .restore_rolling_loss_rows(&[row(started_ms - 1, -50.0)]);
+        observe(&mut engine, closed(started_ms - 1, -50.0));
         assert_eq!(
             engine.canary_refusal(&intent(false, 0.01)),
             None,
             "a trip closed before the window began is not this experiment's loss"
         );
-        engine
-            .risk
-            .restore_rolling_loss_rows(&[row(started_ms - 1, -50.0), row(started_ms + 1, -3.0)]);
+        observe(&mut engine, closed(started_ms + 1, -3.0));
         assert_eq!(
             engine.canary_refusal(&intent(false, 0.01)),
             Some(OpeningRefusal::CanaryLossCeiling)
+        );
+        assert!(
+            engine.risk.rolling_loss_rows().is_empty(),
+            "the ceiling is the policy's own accumulation, not the kernel's window"
         );
     }
 
     /// Unrealised loss counts; unrealised profit does not pay for a loss.
     #[tokio::test(start_paused = true)]
     async fn open_loss_counts_toward_the_ceiling_and_open_profit_does_not_offset_it() {
-        use engine_types::risk::ClosedTradeRow;
         let policy = super::policy();
         let started_ms = policy.started_ms;
         let (mut engine, _) = fixture(policy).await;
@@ -593,12 +721,7 @@ mod through_the_engine {
             "3.04 unrealised down is past the 3.0 ceiling"
         );
         engine.books.account.positions = vec![held(0.1, 40.0)];
-        engine.risk.restore_rolling_loss_rows(&[ClosedTradeRow {
-            unpriced: None,
-            net_usdt_exact: None,
-            closed_ms: started_ms + 1,
-            net_usdt: -3.0,
-        }]);
+        observe(&mut engine, closed(started_ms + 1, -3.0));
         assert_eq!(
             engine.canary_refusal(&intent(false, 0.01)),
             Some(OpeningRefusal::CanaryLossCeiling),
@@ -647,6 +770,87 @@ mod through_the_engine {
             canary_refusals(&records),
             vec!["canary_expired".to_string()],
             "taking risk off never meets this policy"
+        );
+    }
+
+    /// A trip the log could not value is money the ceiling is not counting,
+    /// and the status says how many such trips there are.
+    #[tokio::test(start_paused = true)]
+    async fn a_trip_the_log_could_not_value_is_counted_and_lowers_no_loss() {
+        let policy = super::policy();
+        let started_ms = policy.started_ms;
+        let (mut engine, _) = fixture(policy).await;
+        observe(&mut engine, closed(started_ms + 1, -2.0));
+        observe(
+            &mut engine,
+            engine_types::risk::ClosedTradeRow {
+                unpriced: Some(engine_types::risk::UnpricedTradeReason::FeeValue),
+                net_usdt_exact: None,
+                closed_ms: started_ms + 2,
+                net_usdt: 0.0,
+            },
+        );
+        let status = engine.canary_status().expect("this run is under a policy");
+        assert_eq!(status.unvalued_trips, 1);
+        assert_eq!(status.loss_usdt, 2.0, "the priced trip, and only it");
+        assert_eq!(realised_usdt(&engine), 2.0);
+    }
+
+    /// The fill ledger's own close, through the engine's trade recording.
+    #[tokio::test(start_paused = true)]
+    async fn a_trip_that_closes_while_the_run_is_up_is_counted_once() {
+        let policy = super::policy();
+        let started_ms = policy.started_ms;
+        let (mut engine, _) = fixture(policy).await;
+        engine
+            .fills
+            .on_fill(&fill(Side::Buy, 100.0, started_ms + 1), clock::now_ns());
+        engine
+            .fills
+            .on_fill(&fill(Side::Sell, 90.0, started_ms + 2), clock::now_ns());
+        engine.record_trades();
+        assert_eq!(realised_usdt(&engine), 10.0, "one down ten, once");
+        engine.record_trades();
+        assert_eq!(
+            realised_usdt(&engine),
+            10.0,
+            "the next tick has no trip left to take"
+        );
+        assert_eq!(
+            engine.canary_refusal(&intent(false, 0.01)),
+            Some(OpeningRefusal::CanaryLossCeiling)
+        );
+    }
+
+    /// The kernel's rolling window is a day wide and the policy's window is
+    /// the whole experiment: boot seeds the ceiling from the replay itself.
+    #[tokio::test(start_paused = true)]
+    async fn boot_seeds_the_ceiling_with_trips_the_kernels_window_has_dropped() {
+        let engine = booted(older_close_ms() - DAY_MS).await;
+        assert!(
+            engine.risk.rolling_loss_rows().is_empty(),
+            "the kernel's window has nothing left to answer with"
+        );
+        assert!(
+            (realised_usdt(&engine) - 2.0 * LOST_USDT).abs() < 1e-9,
+            "both replayed trips: {}",
+            realised_usdt(&engine)
+        );
+        assert_eq!(
+            engine.canary_refusal(&intent(false, 0.01)),
+            Some(OpeningRefusal::CanaryLossCeiling)
+        );
+    }
+
+    /// The window's own boundary, seeded: at or after `started_at` counts,
+    /// and what closed before it belongs to whatever ran before.
+    #[tokio::test(start_paused = true)]
+    async fn boot_leaves_out_a_trip_that_closed_before_the_window_began() {
+        let engine = booted(newer_close_ms()).await;
+        assert!(
+            (realised_usdt(&engine) - LOST_USDT).abs() < 1e-9,
+            "the trip inside the window, and not the one before it: {}",
+            realised_usdt(&engine)
         );
     }
 

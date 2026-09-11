@@ -8,6 +8,8 @@
 
 use std::collections::BTreeSet;
 
+use engine_types::numeric::Exact;
+use engine_types::risk::ClosedTradeRow;
 use engine_venue::{VenueName, VenueReadiness};
 
 use super::intent_admission::OpeningRefusal;
@@ -30,6 +32,13 @@ pub struct CanaryPolicy {
     max_gross_notional_usdt: f64,
     max_position_notional_usdt: f64,
     max_loss_usdt: f64,
+    /// Money lost on round trips closed at or after `started_ms`, as a
+    /// positive number: `-` their net. Derived state, rebuilt by the boot
+    /// replay, so no WAL record carries it across a rotation.
+    realised_loss_usdt: Exact,
+    /// Closed trips the log could not value. Reported, never counted as a
+    /// trip that lost nothing.
+    unvalued_trips: usize,
 }
 
 /// One opening, in the terms the policy judges.
@@ -72,6 +81,9 @@ pub struct CanaryStatus {
     pub positions: usize,
     pub open_orders: usize,
     pub loss_usdt: f64,
+    /// Closed trips since `started_at` the log could not value: money the
+    /// loss ceiling is not counting.
+    pub unvalued_trips: usize,
     /// The word every opening would be refused with, whatever it asked for.
     pub blocked: Option<&'static str>,
 }
@@ -193,7 +205,25 @@ impl CanaryPolicy {
             max_gross_notional_usdt: section.max_gross_notional_usdt,
             max_position_notional_usdt: section.max_position_notional_usdt,
             max_loss_usdt: section.max_loss_usdt,
+            realised_loss_usdt: Exact::zero(),
+            unvalued_trips: 0,
         }))
+    }
+
+    /// Fold one closed round trip into the window's realised loss.
+    ///
+    /// Called once per trip: at boot for every trip the replay rebuilt, and
+    /// from `record_trades` for every trip that closes while the run is up.
+    /// The risk kernel's own window is a day wide and this one is the whole
+    /// experiment, so the two do not share an accumulator.
+    pub(crate) fn observe_closed_trip(&mut self, row: &ClosedTradeRow) {
+        if row.closed_ms < self.started_ms {
+            return;
+        }
+        match row.net() {
+            Ok(Some(net)) => self.realised_loss_usdt -= net,
+            Ok(None) | Err(_) => self.unvalued_trips += 1,
+        }
     }
 
     /// Why this opening may not go. `None` admits it.
@@ -256,6 +286,7 @@ impl CanaryPolicy {
             positions: book.positions.len(),
             open_orders: book.open_orders,
             loss_usdt: book.loss_usdt,
+            unvalued_trips: self.unvalued_trips,
             blocked: blocked.map(OpeningRefusal::as_str),
         }
     }
@@ -357,7 +388,13 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
     /// Put this run under a canary policy. `runner::run` calls it once, after
     /// boot and before the loop.
-    pub fn enforce_canary(&mut self, policy: CanaryPolicy) {
+    ///
+    /// The trips the boot replay rebuilt are folded in here: the policy's
+    /// loss window is the whole experiment, and the kernel's is a day.
+    pub fn enforce_canary(&mut self, mut policy: CanaryPolicy) {
+        for row in std::mem::take(&mut self.canary_seed) {
+            policy.observe_closed_trip(&row);
+        }
         self.canary = Some(policy);
     }
 
@@ -435,22 +472,13 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
 
     /// Realised loss since the policy started, plus unrealised loss now.
     ///
-    /// The realised half is the risk kernel's own closed round trips. That
-    /// window is [`engine_risk::ROLLING_LOSS_WINDOW_MS`] wide, so on a policy
-    /// window longer than a day it answers for the last day of closed trips
-    /// and not for the ones before it; a trip the log could not value counts
-    /// as zero. The unrealised half is this engine's marks against the
-    /// account's entry prices, counted only while it is negative.
+    /// The realised half is the policy's own accumulator: every round trip
+    /// closed since `started_at`, whatever the risk kernel's day-wide window
+    /// has dropped since. The unrealised half is this engine's marks against
+    /// the account's entry prices, counted only while it is negative.
     fn canary_loss_usdt(&self, policy: &CanaryPolicy) -> f64 {
-        let realised: f64 = self
-            .risk
-            .rolling_loss_rows()
-            .iter()
-            .filter(|row| row.closed_ms >= policy.started_ms)
-            .map(|row| row.net_usdt)
-            .sum();
-        let open = self.canary_open_pnl_usdt().min(0.0);
-        (-(realised + open)).max(0.0)
+        let open_loss = (-self.canary_open_pnl_usdt()).max(0.0);
+        (policy.realised_loss_usdt.reporting_f64() + open_loss).max(0.0)
     }
 
     fn canary_open_pnl_usdt(&self) -> f64 {

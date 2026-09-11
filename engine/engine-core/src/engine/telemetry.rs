@@ -16,6 +16,9 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         for trade in &closed {
             if let Some(row) = trade.loss_row() {
+                if let Some(canary) = self.canary.as_mut() {
+                    canary.observe_closed_trip(&row);
+                }
                 self.risk.observe_closed_trade(row);
             }
         }

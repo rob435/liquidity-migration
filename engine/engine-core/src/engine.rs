@@ -605,6 +605,10 @@ pub struct Engine<W: Wal, R: RiskKernel, V: VenueGateway> {
     /// `live-canary` realm and absent everywhere else; `runner::run` compiles
     /// it from `[canary]` before the log claim.
     canary: Option<canary::CanaryPolicy>,
+    /// Every round trip the boot replay rebuilt, in the order it closed them.
+    /// `enforce_canary` takes them to seed the policy's realised loss; a run
+    /// without a policy never reads them.
+    canary_seed: Vec<engine_types::risk::ClosedTradeRow>,
     /// Monotonic stamp of the transition into unready, `None` while ready.
     /// It is what separates a venue's paced re-read, which clears readiness
     /// and restores it within one sweep, from a private stream that never

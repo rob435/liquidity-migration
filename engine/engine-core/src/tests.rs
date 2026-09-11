@@ -2007,6 +2007,16 @@ pub(crate) async fn callback_test_fixture(
     (engine, harness.records)
 }
 
+/// The same, booting from a log the caller wrote: what a restart finds.
+pub(crate) async fn replayed_test_fixture(
+    strategies: Vec<Box<dyn Strategy>>,
+    replayed: &[WalRecord],
+) -> Engine<MockWal, MockRisk, MockVenue> {
+    build(allow_all(), strategies, &["BTCUSDT"], replayed)
+        .await
+        .0
+}
+
 pub(crate) struct LeverageControl {
     pub release: Arc<tokio::sync::Notify>,
     pub calls: Arc<Mutex<Vec<(SymbolId, f64)>>>,

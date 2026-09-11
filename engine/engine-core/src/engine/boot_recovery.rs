@@ -65,6 +65,9 @@ pub(super) struct RecoveryOutcome {
     pub(super) orders: LedgerOfOrders,
     pub(super) attribution: Attribution,
     fills: Fills,
+    /// Every trip `fold_closed` handed the kernel, for a canary policy to
+    /// seed itself from after boot.
+    closed_trips: Vec<engine_types::risk::ClosedTradeRow>,
     portfolio_controls: crate::portfolio_control::PortfolioControls,
     physical: reconcile::PhysicalExposure,
     intended: BTreeMap<SymbolId, reconcile::IntendedPositionStop>,
@@ -93,9 +96,17 @@ impl RecoveryOutcome {
         }) {
             risk.restore_rolling_loss_rows(rows);
         }
+        self.fold_closed(risk);
+    }
+
+    /// Hand every trip that has closed to the kernel, and keep the rows: the
+    /// kernel's window is a day wide, and a canary policy's is its whole
+    /// experiment.
+    fn fold_closed<R: RiskKernel>(&mut self, risk: &mut R) {
         for trade in self.fills.take_closed() {
             if let Some(row) = trade.loss_row() {
-                risk.observe_closed_trade(row);
+                risk.observe_closed_trade(row.clone());
+                self.closed_trips.push(row);
             }
         }
     }
@@ -115,6 +126,7 @@ impl RecoveryOutcome {
                 .map_err(EngineError::Boot)?,
             fills: Fills::recovery_lots(records, pending, clock::now_ns(), clock::wall_ms())
                 .map_err(EngineError::Boot)?,
+            closed_trips: Vec::new(),
             portfolio_controls: crate::portfolio_control::PortfolioControls::replay(records)
                 .map_err(EngineError::Boot)?,
             physical,
@@ -494,6 +506,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             mut orders,
             attribution,
             fills,
+            closed_trips,
             mut portfolio_controls,
             physical: logged_exposure,
             intended: intended_stops,
@@ -686,6 +699,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
             opening_dispatch_ttl_ns: settings.opening_dispatch_ttl_ms.saturating_mul(1_000_000),
             rolling_loss_tripped,
             canary: None,
+            canary_seed: closed_trips,
             private_stream_ready: true,
             private_stream_unready_since_ns: None,
             logged_exposure,
@@ -1103,11 +1117,7 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                             .on_fill_with_quantity(sleeve, table.name(symbol), &fill, None)
                             .map_err(EngineError::State)?;
                     }
-                    for trade in recovered_state.fills.take_closed() {
-                        if let Some(row) = trade.loss_row() {
-                            risk.observe_closed_trade(row);
-                        }
-                    }
+                    recovered_state.fold_closed(risk);
                 }
             } else {
                 recovered_state.reject(
