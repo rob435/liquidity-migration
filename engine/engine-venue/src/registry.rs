@@ -421,6 +421,27 @@ impl VenueGateway for Venue {
         }
     }
 
+    async fn amend_orders_under(
+        &mut self,
+        requests: &[engine_types::AmendRequest],
+        epoch: &engine_types::AuthorityEpoch,
+    ) -> Vec<Result<(), VenueError>> {
+        match self {
+            #[cfg(feature = "bybit")]
+            Venue::Bybit(gw) => gw.amend_orders_under(requests, epoch).await,
+            #[cfg(feature = "hyperliquid")]
+            Venue::Hyperliquid(gw) => gw.amend_orders_under(requests, epoch).await,
+            #[cfg(feature = "lighter")]
+            Venue::Lighter(gw) => gw.amend_orders_under(requests, epoch).await,
+            #[cfg(feature = "mexc")]
+            Venue::Mexc(gw) => gw.amend_orders_under(requests, epoch).await,
+            #[cfg(feature = "binance")]
+            Venue::Binance(gw) => gw.amend_orders_under(requests, epoch).await,
+            #[cfg(feature = "variational")]
+            Venue::Variational(gw) => gw.amend_orders_under(requests, epoch).await,
+        }
+    }
+
     async fn set_stop_exact(
         &mut self,
         symbol: SymbolId,

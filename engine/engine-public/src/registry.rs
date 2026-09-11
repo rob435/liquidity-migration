@@ -651,10 +651,10 @@ impl VenueName {
     /// the qty=0 whole-position close, and the execution stream both funded
     /// Bybit realms' receipts were read off.
     const BYBIT_SEMANTICS: &'static str =
-        "cb9569ffe9bef481a21f97927f23068ca117861ca37ff10ba75f8aace69bc6ab";
+        "d28ae5211dfc5056706bbdd88ef8a22a00c0ce5aea3c602c284a1802c72c73c5";
     /// The USDT-M futures REST and user-stream encoding.
     const BINANCE_SEMANTICS: &'static str =
-        "9690eac80bd6cb249ed26c82e52a8fc910e6a599425ce06b22c553aa6199bec5";
+        "2cc4bc87617eb2bee1ed2d185402552510304d75ecd7024de0e1ba6584044b02";
     /// The signed exchange actions (`order`, `batchModify`, `cancel`), the
     /// EIP-712 digest, the `cloid` scheme, and the fill and open-order reads
     /// the funded address's canary receipt was taken against.

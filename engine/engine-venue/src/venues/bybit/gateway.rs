@@ -991,6 +991,119 @@ impl BybitGateway {
         replies.into_iter().map(|(_, reply)| reply).collect()
     }
 
+    /// Every amendment path, with the venue task's send permission.
+    /// `None` is a group nothing can refuse locally.
+    async fn amend_orders_authorized(
+        &mut self,
+        requests: &[engine_types::AmendRequest],
+        epoch: Option<&engine_types::AuthorityEpoch>,
+    ) -> Vec<Result<(), VenueError>> {
+        // Cleared before any path that can return without reserving, so a
+        // group refused here is never charged the previous one's wait.
+        self.last_mutation_timing = None;
+        self.last_rate_wait_ns = None;
+        if requests.is_empty() {
+            return Vec::new();
+        }
+        let mut ids = HashSet::new();
+        if requests.len() > ORDER_AMENDS_PER_SECOND
+            || requests
+                .iter()
+                .any(|request| !ids.insert(&request.client_order_id))
+        {
+            return cancel_batch_error(
+                requests.len(),
+                VenueError::BadRequest("amend group exceeds quota or repeats an order".into()),
+            );
+        }
+        let bodies: Result<Vec<_>, _> = requests
+            .iter()
+            .map(|request| self.amend_body(request.symbol, &request.client_order_id, &request.spec))
+            .collect();
+        let bodies = match bodies {
+            Ok(bodies) => bodies,
+            Err(error) => return cancel_batch_error(requests.len(), error),
+        };
+        self.last_rate_wait_ns = Some(
+            reserve_rate_capacity(
+                &mut self.amend_limiter,
+                requests.len(),
+                ORDER_AMENDS_PER_SECOND,
+            )
+            .await,
+        );
+        // The last point at which nothing has been signed. An amendment whose
+        // permission lapsed while it held the amend budget is refused here
+        // instead of sent; the budget it took is released to the window.
+        let now_ns = mono_ns();
+        let refusals: Vec<Option<String>> = requests
+            .iter()
+            .map(|request| {
+                epoch.zip(request.authority).and_then(|(shared, held)| {
+                    engine_types::authority_refusal(shared, held, now_ns)
+                })
+            })
+            .collect();
+        let bodies: Vec<Value> = bodies
+            .into_iter()
+            .zip(&refusals)
+            .filter(|(_, refusal)| refusal.is_none())
+            .map(|(body, _)| body)
+            .collect();
+        let replies = if bodies.is_empty() {
+            Vec::new()
+        } else if let Some(trade) = &mut self.trade {
+            let replies = trade
+                .requests(
+                    "order.amend",
+                    bodies.into_iter().map(|body| vec![body]).collect(),
+                )
+                .await;
+            for reply in replies.iter().filter_map(|reply| reply.as_ref().ok()) {
+                Self::note_quota(
+                    &mut self.amend_limiter,
+                    "order.amend",
+                    ORDER_AMENDS_PER_SECOND,
+                    reply.quota_per_second,
+                );
+                self.last_mutation_timing = Some(match self.last_mutation_timing.take() {
+                    None => VenueMutationTiming {
+                        sent_ns: reply.sent_ns,
+                        ack_ns: reply.ack_ns,
+                    },
+                    Some(old) => VenueMutationTiming {
+                        sent_ns: old.sent_ns.min(reply.sent_ns),
+                        ack_ns: old.ack_ns.max(reply.ack_ns),
+                    },
+                });
+            }
+            replies.into_iter().map(|reply| reply.map(|_| ())).collect()
+        } else {
+            futures_util::future::join_all(bodies.iter().map(|body| async {
+                self.rest
+                    .post_signed(PATH_ORDER_AMEND, body)
+                    .await
+                    .and_then(venue_result)
+                    .map(|_| ())
+            }))
+            .await
+        };
+        self.amend_limiter
+            .anchor_completion(Instant::now(), requests.len());
+        let mut replies = replies.into_iter();
+        refusals
+            .into_iter()
+            .map(|refusal| match refusal {
+                Some(reason) => Err(VenueError::BadRequest(reason)),
+                None => replies.next().unwrap_or_else(|| {
+                    Err(VenueError::BadReply(
+                        "amend response count differs from request count".into(),
+                    ))
+                }),
+            })
+            .collect()
+    }
+
     async fn inventory_positions(
         &self,
         category: &str,
@@ -1409,75 +1522,27 @@ impl VenueGateway for BybitGateway {
         &mut self,
         requests: &[(SymbolId, String, AmendSpec)],
     ) -> Vec<Result<(), VenueError>> {
-        self.last_mutation_timing = None;
-        self.last_rate_wait_ns = None;
-        if requests.is_empty() {
-            return Vec::new();
-        }
-        let mut ids = HashSet::new();
-        if requests.len() > ORDER_AMENDS_PER_SECOND
-            || requests.iter().any(|(_, id, _)| !ids.insert(id))
-        {
-            return cancel_batch_error(
-                requests.len(),
-                VenueError::BadRequest("amend group exceeds quota or repeats an order".into()),
-            );
-        }
-        let bodies: Result<Vec<_>, _> = requests
+        let requests: Vec<engine_types::AmendRequest> = requests
             .iter()
-            .map(|(symbol, id, spec)| self.amend_body(*symbol, id, spec))
+            .map(|(symbol, id, spec)| engine_types::AmendRequest {
+                symbol: *symbol,
+                client_order_id: id.clone(),
+                spec: spec.clone(),
+                authority: None,
+            })
             .collect();
-        let bodies = match bodies {
-            Ok(bodies) => bodies,
-            Err(error) => return cancel_batch_error(requests.len(), error),
-        };
-        self.last_rate_wait_ns = Some(
-            reserve_rate_capacity(
-                &mut self.amend_limiter,
-                requests.len(),
-                ORDER_AMENDS_PER_SECOND,
-            )
-            .await,
-        );
-        let replies = if let Some(trade) = &mut self.trade {
-            let replies = trade
-                .requests(
-                    "order.amend",
-                    bodies.into_iter().map(|body| vec![body]).collect(),
-                )
-                .await;
-            for reply in replies.iter().filter_map(|reply| reply.as_ref().ok()) {
-                Self::note_quota(
-                    &mut self.amend_limiter,
-                    "order.amend",
-                    ORDER_AMENDS_PER_SECOND,
-                    reply.quota_per_second,
-                );
-                self.last_mutation_timing = Some(match self.last_mutation_timing.take() {
-                    None => VenueMutationTiming {
-                        sent_ns: reply.sent_ns,
-                        ack_ns: reply.ack_ns,
-                    },
-                    Some(old) => VenueMutationTiming {
-                        sent_ns: old.sent_ns.min(reply.sent_ns),
-                        ack_ns: old.ack_ns.max(reply.ack_ns),
-                    },
-                });
-            }
-            replies.into_iter().map(|reply| reply.map(|_| ())).collect()
-        } else {
-            futures_util::future::join_all(bodies.iter().map(|body| async {
-                self.rest
-                    .post_signed(PATH_ORDER_AMEND, body)
-                    .await
-                    .and_then(venue_result)
-                    .map(|_| ())
-            }))
-            .await
-        };
-        self.amend_limiter
-            .anchor_completion(Instant::now(), requests.len());
-        replies
+        self.amend_orders_authorized(&requests, None).await
+    }
+
+    /// Amendments the venue task queued under authorities that may have
+    /// lapsed while this adapter held them back for the per-second amend
+    /// budget. Re-read after the reservation and before anything is signed.
+    async fn amend_orders_under(
+        &mut self,
+        requests: &[engine_types::AmendRequest],
+        epoch: &engine_types::AuthorityEpoch,
+    ) -> Vec<Result<(), VenueError>> {
+        self.amend_orders_authorized(requests, Some(epoch)).await
     }
 
     fn take_mutation_timing(&mut self) -> Option<VenueMutationTiming> {

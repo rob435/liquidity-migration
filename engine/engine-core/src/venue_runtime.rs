@@ -5,9 +5,9 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 use engine_types::{
-    authority_refusal, AccountIdentity, AccountInventory, AccountView, AmendSpec, AuthorityEpoch,
-    CommandAuthority, InstrumentRule, OrderAck, OrderRequest, QueuedCommand, Symbol, SymbolId,
-    VenueCaps, VenueError, VenueGateway, VenueMutationTiming, VenueOrder,
+    authority_refusal, AccountIdentity, AccountInventory, AccountView, AmendRequest, AmendSpec,
+    AuthorityEpoch, CommandAuthority, InstrumentRule, OrderAck, OrderRequest, QueuedCommand,
+    Symbol, SymbolId, VenueCaps, VenueError, VenueGateway, VenueMutationTiming, VenueOrder,
 };
 
 const COMMAND_CAPACITY: usize = 4096;
@@ -613,6 +613,43 @@ fn selectable(ready: &[(u64, Command)]) -> Vec<usize> {
     }
 }
 
+/// The amends that may go out with the one at `head` in a single call:
+/// distinct client ids, arrival order, none waiting on a placement still
+/// queued here, capped at [`MAX_AMEND_BATCH`].
+///
+/// Planned before pricing, because what the venue's quota is asked to take is
+/// the whole group, not the head alone.
+fn amend_batch(ready: &[(u64, Command)], head: usize) -> Vec<usize> {
+    let Command::Amend {
+        client_order_id, ..
+    } = &ready[head].1
+    else {
+        return vec![head];
+    };
+    let mut ids = vec![client_order_id.as_str()];
+    let mut chosen = vec![head];
+    for (index, (_, command)) in ready.iter().enumerate() {
+        if chosen.len() >= MAX_AMEND_BATCH {
+            break;
+        }
+        let Command::Amend {
+            client_order_id, ..
+        } = command
+        else {
+            continue;
+        };
+        if index == head
+            || ids.contains(&client_order_id.as_str())
+            || depends_on_a_queued_send(command, ready)
+        {
+            continue;
+        }
+        ids.push(client_order_id.as_str());
+        chosen.push(index);
+    }
+    chosen
+}
+
 /// The next command to hand the venue: one the venue's quota will take now,
 /// then lowest class, then arrival order.
 fn choose(ready: &[(u64, Command)], waits: &[Duration], eligible: &[usize]) -> usize {
@@ -646,6 +683,71 @@ fn held_for(waits: &[Duration], eligible: &[usize], index: usize) -> Option<Dura
         .map(|index| waits[*index])
         .min()
         .filter(|hold| !hold.is_zero())
+}
+
+/// Answer the amends whose authority is already spent, then hand the rest to
+/// the gateway as one call. A refusal costs no quota: the venue never sees it
+/// either way, so it is answered now rather than a request window later.
+async fn dispatch_amends<V: VenueGateway>(
+    venue: &mut V,
+    completions: &mpsc::Sender<MutationCompletion>,
+    epoch: &AuthorityEpoch,
+    batch: Vec<(u64, AmendRequest)>,
+) {
+    let mut ids = Vec::with_capacity(batch.len());
+    let mut requests = Vec::with_capacity(batch.len());
+    for (command_id, request) in batch {
+        let refusal = request
+            .authority
+            .and_then(|held| authority_refusal(epoch, held, engine_types::clock::mono_ns()));
+        if let Some(reason) = refusal {
+            let at = engine_types::clock::mono_ns();
+            let _ = completions
+                .send(MutationCompletion::Amend {
+                    command_id,
+                    started_ns: at,
+                    completed_ns: at,
+                    timing: None,
+                    rate_wait_ns: None,
+                    reply: Err(VenueError::BadRequest(reason)),
+                })
+                .await;
+            continue;
+        }
+        ids.push(command_id);
+        requests.push(request);
+    }
+    if ids.is_empty() {
+        return;
+    }
+    let started_ns = engine_types::clock::mono_ns();
+    let replies = venue.amend_orders_under(&requests, epoch).await;
+    let timing = venue.take_mutation_timing();
+    let mut rate_wait_ns = venue.take_rate_wait_ns();
+    let completed_ns = engine_types::clock::mono_ns();
+    let replies = if replies.len() == ids.len() {
+        replies
+    } else {
+        ids.iter()
+            .map(|_| {
+                Err(VenueError::BadReply(
+                    "amend response count differs from request count".into(),
+                ))
+            })
+            .collect()
+    };
+    for (command_id, reply) in ids.into_iter().zip(replies) {
+        let _ = completions
+            .send(MutationCompletion::Amend {
+                command_id,
+                started_ns,
+                completed_ns,
+                timing,
+                rate_wait_ns: rate_wait_ns.take(),
+                reply,
+            })
+            .await;
+    }
 }
 
 async fn run<V: VenueGateway>(
@@ -714,6 +816,47 @@ async fn run<V: VenueGateway>(
                     None => closed = true,
                 },
             }
+            continue;
+        }
+        // One amend is priced as the smallest group it can shrink to, so the
+        // group the quota is actually asked for is settled here: the largest
+        // prefix of the planned batch the venue would take now.
+        if matches!(ready[index].1, Command::Amend { .. }) {
+            let mut batch = amend_batch(&ready, index);
+            while batch.len() > 1
+                && !venue
+                    .quota_wait(QueuedCommand::Amend {
+                        requests: batch.len(),
+                    })
+                    .is_zero()
+            {
+                batch.pop();
+            }
+            batch.sort_unstable();
+            let mut taken: Vec<(u64, AmendRequest)> = batch
+                .iter()
+                .rev()
+                .map(|index| match ready.remove(*index).1 {
+                    Command::Amend {
+                        command_id,
+                        symbol,
+                        client_order_id,
+                        spec,
+                        authority,
+                    } => (
+                        command_id,
+                        AmendRequest {
+                            symbol,
+                            client_order_id,
+                            spec,
+                            authority,
+                        },
+                    ),
+                    _ => unreachable!("amend_batch selects only amends"),
+                })
+                .collect();
+            taken.reverse();
+            dispatch_amends(&mut venue, &completions, &epoch, taken).await;
             continue;
         }
         let (_, command) = ready.remove(index);
@@ -797,91 +940,8 @@ async fn run<V: VenueGateway>(
                     })
                     .await;
             }
-            Command::Amend {
-                command_id,
-                symbol,
-                client_order_id,
-                spec,
-                authority,
-            } => {
-                if let Some(reason) = refusal(authority) {
-                    let at = engine_types::clock::mono_ns();
-                    let _ = completions
-                        .send(MutationCompletion::Amend {
-                            command_id,
-                            started_ns: at,
-                            completed_ns: at,
-                            timing: None,
-                            rate_wait_ns: None,
-                            reply: Err(VenueError::BadRequest(reason)),
-                        })
-                        .await;
-                    continue;
-                }
-                let mut ids = vec![command_id];
-                let mut requests = vec![(symbol, client_order_id, spec)];
-                while requests.len() < MAX_AMEND_BATCH {
-                    let next = ready.iter().position(|(_, waiting)| {
-                        matches!(waiting, Command::Amend { client_order_id, .. }
-                            if !requests.iter().any(|(_, held, _)| held == client_order_id))
-                            && !depends_on_a_queued_send(waiting, &ready)
-                    });
-                    let Some(index) = next else { break };
-                    let Command::Amend {
-                        command_id,
-                        symbol,
-                        client_order_id,
-                        spec,
-                        authority,
-                    } = ready.remove(index).1
-                    else {
-                        unreachable!("the position above matched an amend")
-                    };
-                    if let Some(reason) = refusal(authority) {
-                        let at = engine_types::clock::mono_ns();
-                        let _ = completions
-                            .send(MutationCompletion::Amend {
-                                command_id,
-                                started_ns: at,
-                                completed_ns: at,
-                                timing: None,
-                                rate_wait_ns: None,
-                                reply: Err(VenueError::BadRequest(reason)),
-                            })
-                            .await;
-                        continue;
-                    }
-                    ids.push(command_id);
-                    requests.push((symbol, client_order_id, spec));
-                }
-                let started_ns = engine_types::clock::mono_ns();
-                let replies = venue.amend_orders(&requests).await;
-                let timing = venue.take_mutation_timing();
-                let mut rate_wait_ns = venue.take_rate_wait_ns();
-                let completed_ns = engine_types::clock::mono_ns();
-                let replies = if replies.len() == ids.len() {
-                    replies
-                } else {
-                    ids.iter()
-                        .map(|_| {
-                            Err(VenueError::BadReply(
-                                "amend response count differs from request count".into(),
-                            ))
-                        })
-                        .collect()
-                };
-                for (command_id, reply) in ids.into_iter().zip(replies) {
-                    let _ = completions
-                        .send(MutationCompletion::Amend {
-                            command_id,
-                            started_ns,
-                            completed_ns,
-                            timing,
-                            rate_wait_ns: rate_wait_ns.take(),
-                            reply,
-                        })
-                        .await;
-                }
+            Command::Amend { .. } => {
+                unreachable!("every queued amend leaves through the batch above")
             }
             Command::DispatchStop {
                 command_id,

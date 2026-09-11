@@ -43,7 +43,7 @@ pub use market::{
     Subscription, Ticker, TradeFlow, BOOK_DEPTH,
 };
 pub use orders::{
-    AccountInventory, AccountOrder, AccountPosition, Action, AmendSpec, ForcedClose,
+    AccountInventory, AccountOrder, AccountPosition, Action, AmendRequest, AmendSpec, ForcedClose,
     InstrumentRule, Intent, OrderAck, OrderFacts, OrderKind, OrderRequest, OrderUpdate,
     QuoteFillFeatures, RestingOrder, Side, StopSpec, TimeInForce, VenueError, VenueExecution,
     VenueOrder, WorkPolicy,
@@ -246,6 +246,63 @@ pub trait VenueGateway: Send + 'static {
             );
         }
         replies
+    }
+    /// Amendments the venue task queued under authorities that may have
+    /// lapsed while this adapter held them back to stay inside the venue's
+    /// request quota.
+    ///
+    /// The venue task has already checked the same predicate when it took
+    /// each command; this is the second reading, after the local wait, and it
+    /// is the last point at which nothing has been signed. A request refused
+    /// here answers [`VenueError::BadRequest`], the engine's never-transmitted
+    /// class, and there is exactly one reply per request, in request order.
+    ///
+    /// The default reads the predicate once and forwards the survivors: only
+    /// an adapter that paces itself can hold a command long enough for the
+    /// answer to change.
+    async fn amend_orders_under(
+        &mut self,
+        requests: &[AmendRequest],
+        epoch: &authority::AuthorityEpoch,
+    ) -> Vec<Result<(), VenueError>> {
+        let now_ns = crate::clock::mono_ns();
+        let refusals: Vec<Option<String>> = requests
+            .iter()
+            .map(|request| {
+                request
+                    .authority
+                    .and_then(|held| authority_refusal(epoch, held, now_ns))
+            })
+            .collect();
+        let forwarded: Vec<(SymbolId, String, AmendSpec)> = requests
+            .iter()
+            .zip(&refusals)
+            .filter(|(_, refusal)| refusal.is_none())
+            .map(|(request, _)| {
+                (
+                    request.symbol,
+                    request.client_order_id.clone(),
+                    request.spec.clone(),
+                )
+            })
+            .collect();
+        let replies = if forwarded.is_empty() {
+            Vec::new()
+        } else {
+            self.amend_orders(&forwarded).await
+        };
+        let mut replies = replies.into_iter();
+        refusals
+            .into_iter()
+            .map(|refusal| match refusal {
+                Some(reason) => Err(VenueError::BadRequest(reason)),
+                None => replies.next().unwrap_or_else(|| {
+                    Err(VenueError::BadReply(
+                        "amend response count differs from request count".into(),
+                    ))
+                }),
+            })
+            .collect()
     }
     /// Exact timing marks for the most recent cancel or amend when the
     /// transport exposes them. Taking the value clears it so an older

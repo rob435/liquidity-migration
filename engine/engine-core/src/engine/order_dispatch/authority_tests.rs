@@ -284,3 +284,111 @@ async fn a_slow_leverage_administration_does_not_delay_a_queued_cancel() {
         "the cancel waited behind an opening queued before it; tape was {tape:?}"
     );
 }
+
+/// A resting limit order the durable ledger knows and the venue is working.
+fn resting_limit(engine: &mut TestEngine, id: &str, reduce_only: bool) {
+    let request = OrderRequest {
+        client_order_id: id.into(),
+        strategy: StrategyId(0),
+        symbol: SymbolId(0),
+        side: Side::Buy,
+        qty: 0.1,
+        kind: OrderKind::Limit {
+            px: 100.0,
+            tif: engine_types::TimeInForce::Gtc,
+        },
+        stop: None,
+        reduce_only,
+        close_position: false,
+        sleeve_effect: None,
+        exact_terms: None,
+    };
+    let record = WalRecord::OrderSent {
+        dispatch: None,
+        request,
+        wire_ns: clock::now_ns(),
+        arrival_mid: 100.0,
+    };
+    engine.wal.append(&record).unwrap();
+    engine.books.registry.own(id, StrategyId(0));
+    engine.books.orders.apply(&record);
+}
+
+/// Reprice a resting order and take it through its durability barrier, the
+/// way the loop does, leaving the command in the venue queue.
+async fn queue_reprice(engine: &mut TestEngine, id: &str) {
+    engine
+        .process_amend(
+            SymbolId(0),
+            id,
+            engine_types::AmendSpec {
+                px: Some(101.0),
+                qty: None,
+                exact_terms: None,
+            },
+            clock::now_ns(),
+        )
+        .await
+        .unwrap();
+    let result = engine.dispatches.durable.recv().await;
+    engine.on_order_dispatch_durable(result).await.unwrap();
+    assert!(
+        !engine.pending_mutations.is_empty(),
+        "the reprice never reached the venue queue"
+    );
+}
+
+/// Answer the held leverage, then settle the amend command behind it.
+async fn release_and_settle_amend(
+    engine: &mut TestEngine,
+    control: &crate::tests::LeverageControl,
+) {
+    control.release.notify_one();
+    let leverage = engine.venue_completions.recv().await.unwrap();
+    assert!(matches!(
+        leverage,
+        crate::venue_runtime::MutationCompletion::Leverage { .. }
+    ));
+    let amend = engine.venue_completions.recv().await.unwrap();
+    engine.take_venue_completion(amend).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_openings_reprice_waiting_in_the_venue_queue_is_refused_when_the_epoch_advances() {
+    let Held {
+        mut engine,
+        control,
+        ..
+    } = held_worker().await;
+    resting_limit(&mut engine, "opening-reprice", false);
+    queue_reprice(&mut engine, "opening-reprice").await;
+
+    engine.authority.advance();
+    release_and_settle_amend(&mut engine, &control).await;
+
+    let tape = control.tape.lock().unwrap().clone();
+    assert!(
+        !tape.contains(&crate::tests::Step::Amend("opening-reprice".into())),
+        "an opening's reprice carried no authority; tape was {tape:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reduce_only_orders_reprice_reaches_the_venue_after_the_epoch_advances() {
+    let Held {
+        mut engine,
+        control,
+        ..
+    } = held_worker().await;
+    resting_limit(&mut engine, "exit-reprice", true);
+    queue_reprice(&mut engine, "exit-reprice").await;
+
+    engine.authority.advance();
+    release_and_settle_amend(&mut engine, &control).await;
+
+    let tape = control.tape.lock().unwrap().clone();
+    assert!(
+        tape.contains(&crate::tests::Step::Amend("exit-reprice".into())),
+        "an exit's reprice was refused at the send boundary; tape was {tape:?}"
+    );
+}

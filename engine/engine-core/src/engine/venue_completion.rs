@@ -1347,13 +1347,11 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         }
         self.risk.mark_order_attempted(&client_order_id);
         let queued_ns = clock::now_ns();
-        let authority = self.mint_authority();
-        let command_id = self.venue.dispatch_amend(
-            symbol,
-            client_order_id.clone(),
-            spec.clone(),
-            Some(authority),
-        )?;
+        let authority =
+            (!amend_only_reduces(&existing, &amended_intent)).then(|| self.mint_authority());
+        let command_id =
+            self.venue
+                .dispatch_amend(symbol, client_order_id.clone(), spec.clone(), authority)?;
         self.mark_symbols_busy([symbol]);
         self.pending_mutations.insert(
             command_id,
@@ -2038,5 +2036,23 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                 .map_err(EngineError::State)?;
         }
         Ok(())
+    }
+}
+
+/// Whether repricing this order can only shrink physical exposure: the
+/// planner wrote the resting order as a reduction, and the amendment asks for
+/// no more quantity than the order still has working.
+///
+/// `OrderRequest::reduce_only` is the physical effect the planner decided, so
+/// a virtual sleeve reduction that grows the physical position is not one.
+/// Only these dispatch without an authority; everything else must be
+/// refusable at the send boundary.
+fn amend_only_reduces(existing: &crate::inflight::OrderRec, amended: &Intent) -> bool {
+    if !(existing.request.reduce_only || existing.request.close_position) {
+        return false;
+    }
+    match (existing.remaining_exact(), amended.quantity()) {
+        (Ok(remaining), Ok(amended)) => amended <= remaining,
+        _ => false,
     }
 }

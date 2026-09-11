@@ -286,6 +286,17 @@ pub struct AmendSpec {
     pub exact_terms: Option<Box<crate::order_terms::ExactAmendTerms>>,
 }
 
+/// One amendment as the venue task hands it to an adapter: the order, the
+/// new terms, and the permission it was queued under. `authority: None` is an
+/// amendment nothing may refuse at the send boundary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AmendRequest {
+    pub symbol: SymbolId,
+    pub client_order_id: String,
+    pub spec: AmendSpec,
+    pub authority: Option<crate::authority::CommandAuthority>,
+}
+
 /// What a strategy asks the engine to do. Placing is one of three verbs: a
 /// market maker that can only place is a maker that cannot leave.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

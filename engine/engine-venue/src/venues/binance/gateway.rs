@@ -587,6 +587,111 @@ impl BinanceGateway {
         }
         Ok(())
     }
+
+    /// Every amendment path, with the venue task's send permission.
+    /// `None` is one nothing can refuse locally.
+    async fn amend_order_authorized(
+        &mut self,
+        symbol: SymbolId,
+        client_order_id: &str,
+        spec: AmendSpec,
+        authority: Option<(
+            &engine_types::AuthorityEpoch,
+            engine_types::CommandAuthority,
+        )>,
+    ) -> Result<(), VenueError> {
+        if let Some(terms) = crate::order_wire::amend_terms(&spec)? {
+            let rules = self.exact_specs.get(self.name_of(symbol)?).ok_or_else(|| {
+                VenueError::Unsupported("exact amendment metadata is not installed".into())
+            })?;
+            terms
+                .validate_wire_grid(rules)
+                .map_err(crate::order_wire::error)?;
+        }
+        crate::order_wire::amend_terms(&spec)?;
+        if spec.px.is_none() && spec.qty.is_none() {
+            return Err(VenueError::BadRequest(
+                "an amend that changes neither price nor size".to_string(),
+            ));
+        }
+        let name = self.name_of(symbol)?.clone();
+        // The venue's modify demands both the price and the quantity, so the
+        // half that is not changing is read back rather than assumed.
+        self.spend_weight(WEIGHT_QUERY_ORDER).await;
+        let reply = self
+            .rest
+            .get_signed_as::<Box<serde_json::value::RawValue>>(
+                PATH_ORDER,
+                &[
+                    ("symbol", name.clone()),
+                    ("origClientOrderId", client_order_id.to_string()),
+                ],
+            )
+            .await;
+        self.settle_weight(WEIGHT_QUERY_ORDER);
+        let raw = reply?;
+        let current: Value =
+            serde_json::from_str(raw.get()).map_err(|e| VenueError::BadReply(e.to_string()))?;
+        if current.get("type").and_then(Value::as_str) != Some("LIMIT") {
+            return Err(VenueError::BadRequest(format!(
+                "{client_order_id} is not a LIMIT order, and this venue modifies no other kind"
+            )));
+        }
+        let side = crate::json::str_field(&current, "side")?;
+        let (px, qty) = if let Some(terms) = crate::order_wire::amend_terms(&spec)? {
+            let (old_px, old_qty) =
+                crate::amend_state::resting_binance(raw.get(), &name, client_order_id)?;
+            (
+                engine_types::order_terms::decimal_wire(
+                    terms.limit_price.as_ref().unwrap_or(&old_px),
+                )
+                .map_err(crate::order_wire::error)?,
+                engine_types::order_terms::decimal_wire(
+                    terms.quantity.as_ref().unwrap_or(&old_qty),
+                )
+                .map_err(crate::order_wire::error)?,
+            )
+        } else {
+            (
+                match spec.px {
+                    Some(px) => venue_num(px)?,
+                    None => crate::json::num_field(&current, "price").and_then(venue_num)?,
+                },
+                match spec.qty {
+                    Some(qty) => venue_num(qty)?,
+                    None => crate::json::num_field(&current, "origQty").and_then(venue_num)?,
+                },
+            )
+        };
+
+        let waited = self.spend_orders(1).await;
+        self.last_rate_wait_ns = Some(waited);
+        // The last point at which nothing has been signed. An amendment whose
+        // permission lapsed while it held the order budget is refused here
+        // instead of sent; the budget it took is released to the window.
+        if let Some(reason) = authority.and_then(|(shared, held)| {
+            engine_types::authority_refusal(shared, held, crate::mono_ns())
+        }) {
+            self.settle_orders(1);
+            return Err(VenueError::BadRequest(reason));
+        }
+        let reply = self
+            .rest
+            .put_signed(
+                PATH_ORDER,
+                &[
+                    ("symbol", name),
+                    ("side", side),
+                    ("quantity", qty),
+                    ("price", px),
+                    ("origClientOrderId", client_order_id.to_string()),
+                ],
+            )
+            .await;
+        self.settle_orders(1);
+        reply?;
+        Ok(())
+    }
 }
 
 #[engine_types::async_trait]
@@ -813,88 +918,31 @@ impl VenueGateway for BinanceGateway {
         client_order_id: &str,
         spec: AmendSpec,
     ) -> Result<(), VenueError> {
-        if let Some(terms) = crate::order_wire::amend_terms(&spec)? {
-            let rules = self.exact_specs.get(self.name_of(symbol)?).ok_or_else(|| {
-                VenueError::Unsupported("exact amendment metadata is not installed".into())
-            })?;
-            terms
-                .validate_wire_grid(rules)
-                .map_err(crate::order_wire::error)?;
-        }
-        crate::order_wire::amend_terms(&spec)?;
-        if spec.px.is_none() && spec.qty.is_none() {
-            return Err(VenueError::BadRequest(
-                "an amend that changes neither price nor size".to_string(),
-            ));
-        }
-        let name = self.name_of(symbol)?.clone();
-        // The venue's modify demands both the price and the quantity, so the
-        // half that is not changing is read back rather than assumed.
-        self.spend_weight(WEIGHT_QUERY_ORDER).await;
-        let reply = self
-            .rest
-            .get_signed_as::<Box<serde_json::value::RawValue>>(
-                PATH_ORDER,
-                &[
-                    ("symbol", name.clone()),
-                    ("origClientOrderId", client_order_id.to_string()),
-                ],
-            )
-            .await;
-        self.settle_weight(WEIGHT_QUERY_ORDER);
-        let raw = reply?;
-        let current: Value =
-            serde_json::from_str(raw.get()).map_err(|e| VenueError::BadReply(e.to_string()))?;
-        if current.get("type").and_then(Value::as_str) != Some("LIMIT") {
-            return Err(VenueError::BadRequest(format!(
-                "{client_order_id} is not a LIMIT order, and this venue modifies no other kind"
-            )));
-        }
-        let side = crate::json::str_field(&current, "side")?;
-        let (px, qty) = if let Some(terms) = crate::order_wire::amend_terms(&spec)? {
-            let (old_px, old_qty) =
-                crate::amend_state::resting_binance(raw.get(), &name, client_order_id)?;
-            (
-                engine_types::order_terms::decimal_wire(
-                    terms.limit_price.as_ref().unwrap_or(&old_px),
-                )
-                .map_err(crate::order_wire::error)?,
-                engine_types::order_terms::decimal_wire(
-                    terms.quantity.as_ref().unwrap_or(&old_qty),
-                )
-                .map_err(crate::order_wire::error)?,
-            )
-        } else {
-            (
-                match spec.px {
-                    Some(px) => venue_num(px)?,
-                    None => crate::json::num_field(&current, "price").and_then(venue_num)?,
-                },
-                match spec.qty {
-                    Some(qty) => venue_num(qty)?,
-                    None => crate::json::num_field(&current, "origQty").and_then(venue_num)?,
-                },
-            )
-        };
+        self.amend_order_authorized(symbol, client_order_id, spec, None)
+            .await
+    }
 
-        let waited = self.spend_orders(1).await;
-        self.last_rate_wait_ns = Some(waited);
-        let reply = self
-            .rest
-            .put_signed(
-                PATH_ORDER,
-                &[
-                    ("symbol", name),
-                    ("side", side),
-                    ("quantity", qty),
-                    ("price", px),
-                    ("origClientOrderId", client_order_id.to_string()),
-                ],
-            )
-            .await;
-        self.settle_orders(1);
-        reply?;
-        Ok(())
+    /// Amendments the venue task queued under authorities that may have
+    /// lapsed while this adapter held them back for the order budgets.
+    /// Re-read after the reservation and before anything is signed.
+    async fn amend_orders_under(
+        &mut self,
+        requests: &[engine_types::AmendRequest],
+        epoch: &engine_types::AuthorityEpoch,
+    ) -> Vec<Result<(), VenueError>> {
+        let mut replies = Vec::with_capacity(requests.len());
+        for request in requests {
+            replies.push(
+                self.amend_order_authorized(
+                    request.symbol,
+                    &request.client_order_id,
+                    request.spec.clone(),
+                    request.authority.map(|held| (epoch, held)),
+                )
+                .await,
+            );
+        }
+        replies
     }
 
     /// Placements, amends and stops spend the order budgets; a cancel spends

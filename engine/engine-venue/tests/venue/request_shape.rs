@@ -1374,3 +1374,135 @@ async fn a_superseded_opening_is_refused_after_the_create_budget_and_never_signe
         .expect("a live authority was refused locally");
     assert_eq!(server.to_path("/v5/order/create").len(), 1);
 }
+
+// ------------------------------------------- the amend send boundary
+
+/// Bybit's per-second amend window (`ORDER_AMENDS_PER_SECOND`).
+const AMEND_WINDOW: usize = 10;
+
+fn reprice() -> AmendSpec {
+    AmendSpec {
+        px: Some(30_000.0),
+        qty: None,
+        exact_terms: None,
+    }
+}
+
+fn amend_under(id: &str, authority: engine_types::CommandAuthority) -> engine_types::AmendRequest {
+    engine_types::AmendRequest {
+        symbol: SymbolId(0),
+        client_order_id: id.to_string(),
+        spec: reprice(),
+        authority: Some(authority),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_amend_whose_authority_lapses_while_the_amend_window_is_full_is_never_signed() {
+    use engine_types::{AuthorityEpoch, CommandAuthority};
+
+    let server = TestServer::start(|request, prior| {
+        assert_eq!(request.path, "/v5/order/amend");
+        ok(&format!(r#"{{"orderId":"ord-{prior}"}}"#))
+    })
+    .await;
+    let mut gw = gateway(&server);
+    let clock_guard = engine_types::clock::install_virtual(
+        engine_types::clock::wall_ns(),
+        engine_types::clock::mono_ns(),
+    )
+    .unwrap();
+    for index in 0..AMEND_WINDOW {
+        gw.amend_order(SymbolId(0), &format!("filler-{index}"), reprice())
+            .await
+            .unwrap();
+    }
+
+    let epoch = AuthorityEpoch::new();
+    let queued_ns = engine_types::clock::mono_ns();
+    let doomed = CommandAuthority {
+        epoch: epoch.current(),
+        queued_ns,
+        expires_at_ns: queued_ns + 100_000_000,
+    };
+    let live = CommandAuthority {
+        epoch: epoch.current(),
+        queued_ns,
+        expires_at_ns: u64::MAX,
+    };
+    // Both lapse while the call is parked in the adapter's wait for the window.
+    let lapse = async {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        engine_types::clock::advance_virtual_to(queued_ns + 2_000_000_000).unwrap();
+        tokio::time::advance(Duration::from_secs(2)).await;
+    };
+    let group = [
+        amend_under("doomed-amend", doomed),
+        amend_under("live-amend", live),
+    ];
+    let (replies, ()) = tokio::join!(gw.amend_orders_under(&group, &epoch), lapse);
+
+    assert!(
+        matches!(&replies[0], Err(VenueError::BadRequest(reason))
+            if reason.starts_with("authority: expired after ")),
+        "{replies:?}"
+    );
+    assert!(replies[1].is_ok(), "{replies:?}");
+    let amends = server.to_path("/v5/order/amend");
+    assert_eq!(
+        amends.len(),
+        AMEND_WINDOW + 1,
+        "the refused amendment was signed and sent"
+    );
+    assert!(
+        !amends
+            .iter()
+            .any(|request| request.body.contains("doomed-amend")),
+        "the refused amendment reached the venue"
+    );
+    assert_eq!(
+        amends
+            .iter()
+            .filter(|request| request.body.contains("live-amend"))
+            .count(),
+        1,
+        "the live amendment did not go out"
+    );
+    drop(clock_guard);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_amend_the_venue_takes_without_answering_is_a_transport_failure_not_a_refusal() {
+    use engine_types::{AuthorityEpoch, CommandAuthority};
+
+    let server = TestServer::start(|request, _| {
+        if request.body.contains("lost-amend") {
+            (0, String::new())
+        } else {
+            ok("{}")
+        }
+    })
+    .await;
+    let mut gw = gateway(&server);
+    let epoch = AuthorityEpoch::new();
+    let live = CommandAuthority {
+        epoch: epoch.current(),
+        queued_ns: 0,
+        expires_at_ns: u64::MAX,
+    };
+    let replies = gw
+        .amend_orders_under(&[amend_under("lost-amend", live)], &epoch)
+        .await;
+
+    assert!(
+        matches!(&replies[0], Err(VenueError::Transport(_))),
+        "an amendment the venue may already have applied was reported as never sent: {replies:?}"
+    );
+    assert_eq!(
+        server.to_path("/v5/order/amend").len(),
+        1,
+        "the request the venue took is missing from its record"
+    );
+}

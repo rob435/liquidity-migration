@@ -39,7 +39,9 @@ impl Recorded {
 }
 
 /// Answers a request. The second argument is how many requests this path has
-/// already had, which is how the pagination test serves two pages.
+/// already had, which is how the pagination test serves two pages. Status `0`
+/// records the request and then drops the connection unanswered: the venue
+/// took it and the acknowledgement was lost.
 pub type Handler = Arc<dyn Fn(&Recorded, usize) -> (u16, String) + Send + Sync>;
 type ResponseDelay = Arc<dyn Fn(&Recorded, usize) -> Duration + Send + Sync>;
 
@@ -202,6 +204,10 @@ async fn serve(
         peak_in_flight.fetch_max(active, Ordering::SeqCst);
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
+        }
+        if status == 0 {
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+            return;
         }
 
         let response = format!(
