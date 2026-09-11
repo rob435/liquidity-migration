@@ -17,9 +17,13 @@ Quantitative research, market data capture, and low-latency algorithmic trading 
 
 ## 2. Active Strategy Sleeves
 
-| Sleeve | Rule | Strategy ID | State | Core Strategy Profile |
+IDs are per realm — a block's position in that realm's `engine.toml`. The column
+below is mainnet; [docs/trading_logic.md](docs/trading_logic.md) §1 owns the full
+registry.
+
+| Sleeve | Rule | ID (mainnet) | State | Core Strategy Profile |
 | :--- | :--- | :---: | :--- | :--- |
-| **CARRY** | `configs/lane2_carry_hold_v7.json` | `0` | Active | Sticky 48h hold on extreme negative funding crowd fees ($\le -10\text{ bp}$). |
+| **CARRY** | `configs/lane2_carry_hold_v7.json` | `0` | Active | Daily book on extreme negative funding crowd fees ($\le -10\text{ bp}$), held to the next daily decision. |
 | **LONG** | `configs/long_native_v12.json` | `1` | Active | Momentum breakouts on top liquid perpetuals with decaying ATR stops. |
 | **EXODUS** | `configs/lane2_exodus_short_v1.json` | `2` | Active | Event-driven short on distressed CARRY pairs prior to settlement. |
 | **MAKER** | `configs/lane2_toxic_flow_quoter_v1.json` | `3` | Disabled | Microstructural two-sided quoting canary (`quote_enabled = false`). |

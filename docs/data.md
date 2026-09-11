@@ -16,7 +16,7 @@ Research data, live signal state, and execution evidence are strictly separated:
 | :--- | :--- | :--- | :--- |
 | **Research Root** | `DATA_ROOT` (e.g. `data/`) | Historical klines, funding, parquet bars, reports | Python offline analytics only. No credentials. |
 | **Signal Worker State**| `/var/lib/liquidity-migration-signal-worker-{demo,mainnet,mexc,hyperliquid}` | Public kline history, funding cache, source checkpoints | Rust signal worker only. Public market data. |
-| **Signal Spool** | `/var/lib/liquidity-migration/signals/{demo,mainnet,mexc,hyperliquid}` | `stream.sock` IPC socket + fallback `.json` spool | Read by Engine, written by Signal Worker (`0770`). |
+| **Signal Spool** | `/var/lib/liquidity-migration/signals/{demo,mainnet,mexc,hyperliquid}` | `<seq:020>-<sha256>.json` rows are the delivery; `stream.sock` is the wake | Read by Engine, written by Signal Worker (`0770`). |
 | **Execution WAL** | `/var/lib/liquidity-migration-engine[-mainnet\|-mexc\|-hyperliquid]` | `engine.wal`, `heartbeat.json`, `trades.jsonl` | Sole execution & accounting authority. |
 | **Market Tape Root** | `/var/lib/liquidity-migration/forward-market[-binance]` | Compressed `.jsonl.zst` segments, manifests | Public tape capture only. Independent units. |
 
@@ -35,7 +35,7 @@ Invariants:
 
 ### Name coverage against what the sleeves trade
 
-The tiers are keyed on the same signals the sleeves decide from, so a tradeable name is captured by construction rather than by a list: LONG's top-turnover names are `core`, CARRY's and EXODUS's negative-funding names are `crowded` (entry is $\le -10$ bp, capture starts at $-8$ bp), the maker canary is `pinned`, and every other listed crypto perpetual is `wide` on ticker and liquidations. `core` is LONG's live rank band (enter 120, leave 160) with a 96-hour floor, so every name the sleeve can hold has its book through the hold; `crowded` watches CARRY's whole hold zone — predicted funding at $-3$ bp, the sleeve's exit line — for 72 hours past the last such reading. Verified 2026-09-03 against the funded book: `NEARUSDT` and `ZECUSDT` both held, both carrying a 50-level snapshot, deltas, prints and ticker.
+The tiers are keyed on the same signals the sleeves decide from, so a tradeable name is captured by construction rather than by a list: LONG's top-turnover names are `core`, CARRY's and EXODUS's negative-funding names are `crowded` (entry is $\le -10$ bp, capture starts at $-8$ bp), the maker canary is `pinned`, and every other listed crypto perpetual is `wide` on ticker and liquidations. `core` is LONG's live rank band (enter 120, leave 160) with a 96-hour floor, so every name the sleeve can hold has its book through the hold; `crowded` watches CARRY's whole hold zone — predicted funding at $-3$ bp, the registered rule's exit line — for 72 hours past the last such reading. Verified 2026-09-03 against the funded book: `NEARUSDT` and `ZECUSDT` both held, both carrying a 50-level snapshot, deltas, prints and ticker.
 
 **Coverage boundary.** The current policy uses `leave_top = 160`, `sticky_hours = 96` for core and `threshold_bp = 3`, `sticky_hours = 72` for crowded. These are capture policies, not proof of delivered data. Verify symbol membership, snapshots, gaps and shedding in each selected archive; the recorder reads no private position state.
 
@@ -49,11 +49,17 @@ unwind, cascade — runs on the whole universe. The deep tiers add the 50-level
 book for *execution* and microstructure work, and are shaped so a held name
 never loses it mid-hold:
 
-| Sleeve | Hold | Deep coverage guarantee | Exit questions the tape can answer |
+The **deployed lifecycle** column is what the reducers do today
+([trading_logic.md](trading_logic.md) §3–§5 own it). The **capture retention
+policy** is keyed on the registered rules' widest bands, so it outlives the
+deployed lifecycle on purpose; the **exit questions** are open research, not
+deployed behaviour.
+
+| Sleeve | Deployed lifecycle | Capture retention policy | Exit questions the tape can answer |
 | :--- | :--- | :--- | :--- |
 | **LONG** | ≤ 72 h on a name that surged into turnover rank ≤ 10 | `core`: rank ≤ 120, leaves below 160, **and 96 h after it last ranked inside 120** — the pump can fade to rank 300 and the book stays | trailing stop vs. time exit; volume decay (prints); OI unwind; bid-depth thinning; funding turning positive; what the exit left on the table (ticker tail) |
-| **CARRY** | days to weeks while settled funding sits between the $-10$ bp entry and the $-3$ bp exit | `crowded`: predicted funding $\le -3$ bp — the exit line — held 72 h past the last such reading; top-100 names are in `core` anyway | funding trajectory vs. the $-3$ hysteresis; 2-day recovery; OI unwind as the crowd leaves; short-liquidation squeezes; taker buy pressure; bid depth at exit |
-| **EXODUS** | ~60–75 min: short at CARRY's pre-settlement fire, cover hard at S+60 | the name is a CARRY hold seconds earlier, so it is in `crowded` or `core` with book and prints; ticker at ~100 ms, book at 20 ms | cover at S+15/30/60/120; cover on OI stabilisation or price reversal; the settlement print itself (`fundingRate` at `nextFundingTime` roll) |
+| **CARRY** | daily book, held to the next daily decision; no intraday funding exit (`early_exit_enabled=false`, `presettlement_exit_enabled=false`) | `crowded`: predicted funding $\le -3$ bp — the registered rule's exit line — held 72 h past the last such reading; top-100 names are in `core` anyway | funding trajectory vs. the $-3$ hysteresis; 2-day recovery; OI unwind as the crowd leaves; short-liquidation squeezes; taker buy pressure; bid depth at exit |
+| **EXODUS** | ~60–75 min: short at CARRY's pre-settlement fire, cover hard at S+60. Under the daily CARRY book no new fire is emitted | the name is a CARRY hold seconds earlier, so it is in `crowded` or `core` with book and prints; ticker at ~100 ms, book at 20 ms | cover at S+15/30/60/120; cover on OI stabilisation or price reversal; the settlement print itself (`fundingRate` at `nextFundingTime` roll) |
 
 The hourly book re-anchor runs in the first minutes of each hour, which is also
 when funding settles. Each re-anchored name loses one round trip of deltas and

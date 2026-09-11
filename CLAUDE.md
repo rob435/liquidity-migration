@@ -52,7 +52,7 @@ never copy sleeve status or thresholds here.
 | `.venv/bin/python -m ruff check liquidity_migration scripts tests` | lint |
 | `cargo test --manifest-path engine/Cargo.toml --workspace --locked` | engine tests |
 | `cargo build --manifest-path engine/Cargo.toml --release --locked -p engine-tools --bins` | build the runtime and companion tools used below |
-| `engine/target/release/engine-tools bench [--contention]` | the real loop on this box against a local stand-in venue: decide, durable, wire, ack and end-to-end at p50/p99. Our side of the wire, not the venue's. `--contention` measures what a risk-off cancel waits for behind slow openings and how many openings the dispatch TTL refused unsent |
+| `engine/target/release/engine-tools bench [--contention] [--json]` | the real loop on this box against a local stand-in venue: decide, durable, wire, ack and end-to-end at p50/p99. Our side of the wire, not the venue's. `--contention` measures what a risk-off cancel waits for behind slow openings and how many openings the dispatch TTL refused unsent; `--json` prints the result as JSON |
 | `engine/target/release/engine-tools wal-cost --wal PATH` | what one append and one durability barrier cost on the filesystem holding PATH: the storage's share of the order path |
 | `engine/target/release/engine-tools latency --wal PATH` | how long each step of the order path took, per operation, at p50/p90/p99/p99.9: the venue's round trip, the engine's own work, and the time it held a command back to stay inside the request quota, as separate numbers |
 | `engine/target/release/engine-tools fills --wal PATH` | what the trading cost and what the positions made: maker share, fee, arrival shortfall, markouts, and closed round trips with their P&L |

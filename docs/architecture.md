@@ -75,7 +75,8 @@ Rust Signal Worker
   ├── Settled Funding & Whale Flow
   └── Universe Selection (Top 30/120 Turnover)
        |
-       v (AF_UNIX streaming socket: stream.sock)
+       v  immutable spool row (the delivery)
+       |  + AF_UNIX frame on stream.sock (the wake, best effort)
 Rust Execution Engine
   ├── 1. Append observation to checksummed WAL (Durable Barrier)
   ├── 2. Pure Strategy Reducer Step (LONG, CARRY, EXODUS, MAKER)
@@ -90,14 +91,9 @@ Rust Execution Engine
 
 ## 4. Strategy Sleeve Registry
 
-The engine hosts four dedicated native strategy sleeves (`engine/engine-strategies/src/`):
+A strategy's ID is its block's position in that realm's `engine.toml`, so IDs are per realm and append-only: every new block appends, nothing is inserted, and each realm's tail differs.
 
-| Sleeve Name | Strategy ID | Trigger / Cadence | Core Mandate | Primary State Checkpoint |
-| :--- | :--- | :--- | :--- | :--- |
-| **`long_native`** | `0` | Hourly feature batch / LLM entry events | Momentum breakouts on top turnover USDT perps | `long-book-state-v2` |
-| **`carry_native`** | `1` | Daily score at decision phase (00:00 UTC) | Captures extreme negative funding crowd fees | `carry-sizing-anchors-v1-early-exits-v1-target-book-v1` |
-| **`exodus_native`** | `2` | Pre-settlement CARRY events | Short entry, retry, and cover for distressed pairs | `exodus-state-v1-v4-event-tape-v1-identity-v2` |
-| **`quoter` (MAKER)** | `3` | Real-time level-50 book & trade ticks | Two-sided liquidity provision around fair mid | Quoter checkpoint |
+The sleeves, their IDs per realm, and their mandates: [trading_logic.md](trading_logic.md) §1.
 
 ---
 
@@ -114,7 +110,7 @@ The engine hosts four dedicated native strategy sleeves (`engine/engine-strategi
 
 ## 6. Operator Controls & Safety Stops
 
-Operator commands are durable engine events submitted through the control spool (`/var/lib/liquidity-migration/control/<realm>/`):
+Operator commands are durable engine events submitted through the control spool (`/var/lib/liquidity-migration/controls/<realm>/`):
 
 | Action | Entry Allowed | Exit Allowed | Signal Worker State | Reducer Behavior |
 | :--- | :--- | :--- | :--- | :--- |

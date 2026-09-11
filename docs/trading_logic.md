@@ -23,7 +23,7 @@ block appends, nothing is inserted, and each realm's tail differs.
 ## 2. Common Execution Lifecycle
 
 Every directional sleeve executes via the same deterministic state loop:
-1. **Signal Stream**: Signal worker publishes immutable observation over `stream.sock`.
+1. **Signal Stream**: Signal worker publishes an immutable spool row, then rings `stream.sock` so the engine need not wait for its next poll.
 2. **WAL Barrier**: Engine syncs observation to disk *before* triggering reducers.
 3. **Pure Reducer**: Evaluates current checkpoint + observation $\to$ outputs target state & effects (zero I/O).
 4. **Risk Admission**: Kernel validates gross exposure, quote freshness, and 24h loss ceiling.
@@ -103,7 +103,7 @@ $$\text{Size} = \text{Base} \times M_{\text{depth}} \times M_{\text{persistence}
 
 * **Trigger**: Consumes `CarryPresettlementFire` event emitted by `carry_native`. Has no independent universe or scoring loop.
 * **Daily CARRY mode**: No new source fires; existing EXODUS positions retain their cover and protection paths.
-* **Short Entry**: Sells short an exact quantity equal to the CARRY position. Entry window valid from fire time until Settlement + 5 minutes ($S+5\text{m}$).
+* **Short Entry**: Sells short an exact quantity equal to the CARRY position. Entry window valid from fire time until Settlement + 5 minutes ($S+5\text{m}$): `entry_valid_minutes_after_settlement` (20) minus the reducer's fixed 15-minute `ENGINE_ENTRY_CUTOFF_MS`. The rule requires the key above 15.
 * **Cover Exit**: Hard time cover executed unconditionally at Settlement + 60 minutes ($S+60\text{m}$).
 * **Disaster Fence**: $10\%$ maximum stop-loss.
 

@@ -11,11 +11,11 @@ Define the fleet telemetry sources, freshness rules and operator views.
 | Surface | Unit | Cadence | Output | Authority |
 | :--- | :--- | :--- | :--- | :--- |
 | **Equity & recorder samples** | `liquidity-migration-equity-recorder.timer` | Every minute at :20 | JSONL under `/var/lib/liquidity-migration/equity`, plus one optional HTTP push | Read-only; loads no venue environment |
-| **Order-path probe** | the `probe` sleeve of the **demo** engine | Every 15 min at :00, :15, :30, :45 | One venue-minimum post-only `BTCUSDT` buy 3% under the bid, pulled 2 s later: one measurement in the engine's latency ledger, read by the :20 sample | Demo only; never a page, never a Telegram message; stands down while another sleeve holds the symbol ([trading_logic.md](trading_logic.md) §1) |
+| **Order-path probe** | the `probe` sleeve of the **demo** engine | Every 15 min at :00, :15, :30, :45 | One venue-minimum post-only `BTCUSDT` buy 0.5% under the bid (`offset_bps = 50`), pulled 2 s later: one measurement in the engine's latency ledger, read by the :20 sample | Demo only; never a page, never a Telegram message; stands down while another sleeve holds the symbol ([trading_logic.md](trading_logic.md) §1) |
 | **Engine heartbeat** | the engine itself | Every 5 s | `heartbeat.json`, overwritten | The engine's own statement of health |
 | **Signal-worker heartbeat** | each realm's credential-free producer | At most every 5 s | `heartbeat.json`, overwritten; sampled locally and remotely every minute | Worker verdict plus raw WebSocket, coverage, cycle, queue, and spool facts |
 | **Closed trades** | the engine itself | Per closed round trip | `trades.jsonl`, appended | Realized accounting authority |
-| **Liveness alerts** | `*-liveness.timer` | Every 3 min | Telegram, plus the on-call agent | See [notifications.md](notifications.md) |
+| **Liveness alerts** | `*-liveness.timer` | Per scope: [notifications.md](notifications.md) §2 Surfaces | Telegram, plus the on-call agent | See [notifications.md](notifications.md) |
 
 The three engine artifacts answer different questions and none substitutes for
 another: the heartbeat says how the engine is **now**, `trades.jsonl` says what

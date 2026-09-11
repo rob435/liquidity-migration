@@ -31,7 +31,7 @@ Catalog of 37 backtesting, execution, and statistical traps identified across qu
 | **7** | **Ignoring Slippage** | Assuming execution at mid-price or closing print. | Model spread crossing and volume-dependent slippage penalties. |
 | **8** | **Ignoring Market Impact** | Assuming infinite liquidity without adverse price shift. | Apply square-root participation models for large order baskets. |
 | **9** | **Short-Access Fantasy** | Assuming unrestricted shorting on illiquid or margin-restricted coins. | Check historical short-sale eligibility and borrow availability. |
-| **10** | **Financing / Funding Fantasy** | Omitting perpetual funding payments from net return. | Deduct settled 8-hour funding cash flows directly from position cash. |
+| **10** | **Financing / Funding Fantasy** | Omitting perpetual funding payments from net return. | Deduct settlement-time cash flows at the instrument's own interval: Bybit 8 h, MEXC per-contract `collectCycle` (8 h / 4 h / 1 h / 24 h), Hyperliquid hourly ([trading_logic.md](../trading_logic.md) §1 CARRY row). 8 h is correct only for a Bybit-graded study. |
 | **11** | **Trading Bans / Limits** | Missing venue circuit breakers, maintenance halts, or reduce-only. | Incorporate historical venue halt status and contract leverage limits. |
 | **22** | **Venue Mechanics Fantasy** | Omitting minimum notional, tick sizes, or lot quantizations. | Pass orders through venue instrument filters before evaluation. |
 | **35** | **100% Turnover Cost Assumption** | Assuming 100% rebalancing on slow, sticky signals. | Measure realized turnover; slow strategies do not pay 100% round trips every bar. |

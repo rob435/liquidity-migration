@@ -23,17 +23,18 @@ Python research plane, data pipeline, and operational observability package. **H
 
 Enforced strictly by `tests/repo/test_import_order.py`:
 
-```text
-Rank 1: core/
-Rank 2: marketdata/
-Rank 3: data/
-Rank 4: rules/
-Rank 5: research/
-Rank 6: policy/
-Rank 7: ops/
-Rank 8: cli/
-```
-* **Strict Rule**: A lower layer may **never import from a higher layer**. Registered rules cannot depend on research engines. Absolute imports are mandatory.
+| Rank | Subpackage |
+| :--- | :--- |
+| 1 | `core/` |
+| 2 | `marketdata/` |
+| 3 | `data/` |
+| 4 | `rules/` |
+| 5 | `research/` |
+| 6 | `policy/` |
+| 7 | `ops/`, `cli/` |
+
+* **Strict Rule**: An import may only point at a **strictly lower rank**. Registered rules cannot depend on research engines. Absolute imports are mandatory.
+* **Same rank**: `ops/` and `cli/` are peers, and a same-rank cross-package import is a violation too.
 
 ---
 

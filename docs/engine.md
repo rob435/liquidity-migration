@@ -64,6 +64,15 @@ The engine workspace is under `engine/`:
 | `engine/engine-tools/src/bench.rs` | Real-clock core run with a registered embedded strategy, durable WAL and synthetic venue; reports workload and sample scope |
 | `engine/engine-tools/src/equity_recorder.rs` | Minute fleet observations, monthly equity JSONL, optional metrics push and recorded curve display; [observability contract](observability.md) |
 
+#### Log reader CLI contract
+
+| Property | Contract |
+| --- | --- |
+| Unknown arguments | Every `engine-tools` subcommand refuses an argument it does not know, naming it, instead of ignoring it |
+| `bench --json` | Prints the benchmark result as JSON on stdout |
+| `latency --wal` | Streams the family through `engine_wal::replay_chain_visit`; it does not hold every record |
+| `fills` / `latency` / `cohort` torn flag | A trusted segment ended part-way through a record. That segment is not necessarily the newest one in the family, and records after that point are outside the numbers |
+
 #### Worker ownership
 
 | Module (repository path) | Owns | State boundary |
@@ -311,7 +320,7 @@ A run that ends without being asked returns one `EngineError`. The supervisor re
 | **WAL File** | `/var/lib/liquidity-migration-engine/engine.wal` | `/var/lib/liquidity-migration-engine-mainnet/engine.wal` | Rotates at `256 MB` (`wal_rotate_mb`). |
 | **Account Lease**| `/run/lock/liquidity-migration/bybit-demo-*.lock` | `/run/lock/liquidity-migration/bybit-mainnet-*.lock` | Single-writer exclusive advisory lock. |
 | **Signal IPC** | `/var/lib/liquidity-migration/signals/demo/` | `/var/lib/liquidity-migration/signals/mainnet/` | Disk spool row `<seq:020>-<sha256>.json` is the delivery; a frame on `stream.sock` is the doorbell, sent only when the row is ≤ 16 MiB. Payload ≤ 16 MiB; readers take it as a JSON string or a byte array. A gap in a source's sequence is an `ERROR` line, not an exit. |
-| **Control Spool**| `/var/lib/liquidity-migration/control/demo/` | `/var/lib/liquidity-migration/control/mainnet/` | Immutable command files (`0750`). |
+| **Control Spool**| `/var/lib/liquidity-migration/controls/demo/` | `/var/lib/liquidity-migration/controls/mainnet/` | Immutable command files (`0750`). |
 | **Heartbeat** | `/var/lib/liquidity-migration-engine/heartbeat.json`| `/var/lib/liquidity-migration-engine-mainnet/heartbeat.json` | Atomic 1-line JSON; max age 30s. |
 | **Trade Log** | `/var/lib/liquidity-migration-engine/trades.jsonl` | `/var/lib/liquidity-migration-engine-mainnet/trades.jsonl` | Append-only round-trip closed trades. |
 
@@ -484,7 +493,7 @@ When performing rollouts or cold starts, state is seeded or verified while units
 
 * **Must** use the newest trusted segment for takeover state verification;
   `engine_wal::replay_chain` is an offline reader whose memory grows with the
-  retained family.
+  retained family, while `engine_wal::replay_chain_visit` streams it.
 * **Must** verify canonical checkpoints before restarting units. Deployment initializes
   only an empty WAL with no retained legacy source files; other unverified state
   requires recovery through the compatible retained release.
@@ -534,7 +543,7 @@ The live loop — `Engine::boot_as_exact`, the risk kernel, the strategy reducer
 | Dial | Default | Meaning |
 | :--- | :--- | :--- |
 | `--capital` | 10000 | Starting USDT |
-| `--taker-fee` / `--maker-fee` | Maximum observed rate from `configs/bybit_fee_rates.json` or `LIQUIDITY_MIGRATION_FEE_SNAPSHOT` | Decimal fee rates; explicit flags select a scenario. Report retains snapshot hash and observation time; unobserved symbols have no fee coverage claim |
+| `--taker-fee` / `--maker-fee` | Maximum observed rate from the snapshot compiled into the binary at build time from `configs/bybit_fee_rates.json`; `LIQUIDITY_MIGRATION_FEE_SNAPSHOT=PATH` overrides it | Decimal fee rates; explicit flags select a scenario. Report retains snapshot hash and observation time; unobserved symbols have no fee coverage claim |
 | `--rtt-ms` | 175 | Order command round trip; half each way, matched at arrival |
 | `--private-latency-ms` | 60 | Private-stream hop for fills, cancels, amends |
 | `--mmr` | 0.005 | Maintenance margin fraction; equity ≤ Σ maintenance liquidates |
