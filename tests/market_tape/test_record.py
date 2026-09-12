@@ -1143,6 +1143,16 @@ def test_the_status_file_carries_what_the_host_watchdog_reads(tmp_path: Path) ->
     assert payload["kind"] == "forward_capture_status"
     assert payload["schema_version"] == SCHEMA_VERSION
     assert payload["pid"] == os.getpid()
+    # The compressor's own state rides in the heartbeat, so a backlog or a
+    # failing zstd is visible while the recorder itself still looks alive.
+    assert payload["compressor"] == {
+        "pending": 0,
+        "compressed": 0,
+        "failed": 0,
+        "last_error": None,
+        "last_error_ns": None,
+        "alive": False,
+    }
     assert payload["venue"] == "bybit" and payload["market"] == "linear"
     assert payload["config"] == "deploy/capture/bybit-linear.toml"
     assert payload["last_receive_ns"] == BASE_NS

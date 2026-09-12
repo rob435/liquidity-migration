@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import logging
 import os
 import shutil
 import stat
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +17,8 @@ from typing import Iterator
 import polars as pl
 
 from liquidity_migration.core.symbol_codec import encode_symbol_partition
+
+logger = logging.getLogger(__name__)
 
 
 # Per-process thread-lock per dataset path. POSIX flock semantics are process
@@ -750,8 +754,31 @@ def replace_dataset(
             shutil.rmtree(staging, ignore_errors=True)
             raise
         _fsync_dataset_parent(path)
-        shutil.rmtree(retired, ignore_errors=True)
+        _remove_retired_generation(retired)
     return path
+
+
+def _remove_retired_generation(retired: Path) -> None:
+    """Delete the generation a swap replaced; what will not delete is named,
+    because a retired tree left behind is disk the next swap cannot use."""
+
+    failures: list[str] = []
+
+    def report(function: object, failed_path: object, excinfo: object) -> None:
+        error = excinfo[1] if isinstance(excinfo, tuple) else excinfo
+        failures.append(f"{failed_path}: {error}")
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(retired, onexc=report)
+    else:
+        shutil.rmtree(retired, onerror=report)
+    if failures:
+        logger.warning(
+            "retired dataset generation %s: %d path(s) could not be removed; first: %s",
+            retired,
+            len(failures),
+            failures[0],
+        )
 
 
 def _fsync_dataset_parent(path: Path) -> None:

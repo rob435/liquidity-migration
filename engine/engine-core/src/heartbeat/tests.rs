@@ -1,5 +1,3 @@
-#[path = "legacy.rs"]
-mod legacy;
 use super::*;
 use crate::testpath::temp_path;
 
@@ -809,8 +807,12 @@ fn a_write_that_cannot_land_does_not_start_retrying_every_tick() {
 }
 
 #[test]
-fn typed_output_matches_legacy_bytes_for_missing_extreme_and_escaped_values() {
-    let names = vec!["long\"\\\n雪".to_owned(), "carry".to_owned()];
+fn strings_are_escaped_and_come_back_whole() {
+    // Every string field the engine writes reaches the file JSON-escaped:
+    // quotes, backslashes, newlines and non-ASCII in a strategy name, a
+    // user id, a lease path, a symbol, a blocker reason and an error text.
+    let name = "long\"\\\n雪".to_owned();
+    let names = vec![name.clone(), "carry".to_owned()];
     let account = AccountIdentity {
         venue: "bybit".to_owned(),
         realm: "demo".to_owned(),
@@ -821,43 +823,140 @@ fn typed_output_matches_legacy_bytes_for_missing_extreme_and_escaped_values() {
         Some(account),
         Some("/a/\"b\\c".into()),
     );
-    for value in [
-        0.0,
-        -0.0,
-        1.0,
-        1.23456789012345,
-        1e-100,
-        1e100,
-        f64::NAN,
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-    ] {
-        let holdings = vec![(
-            "BTC\"USDT".to_owned(),
-            Side::Sell,
-            value,
-            value,
-            Some(names[0].clone()),
-        )];
-        let blockers = vec![(names[0].clone(), "BTCUSDT".into(), "missing\nprice".into())];
-        let errors = vec![(names[0].clone(), "rejected\n\\\"".into())];
-        let permissions = vec![(names[0].clone(), false)];
-        let flatten = vec![(names[0].clone(), "id-1".into())];
-        let entries = vec![(names[1].clone(), "ETHUSDT".into())];
+    let holdings = vec![(
+        "BTC\"USDT".to_owned(),
+        Side::Sell,
+        1.5,
+        100.25,
+        Some(name.clone()),
+    )];
+    let blockers = vec![(name.clone(), "BTCUSDT".into(), "missing\nprice".into())];
+    let errors = vec![(name.clone(), "rejected\n\\\"".into())];
+    let permissions = vec![(name.clone(), false)];
+    let flatten = vec![(name.clone(), "id-1".into())];
+    let entries = vec![("carry".to_owned(), "ETHUSDT".into())];
+    let mut facts = facts(&names, &holdings);
+    facts.entry_blockers = &blockers;
+    facts.strategy_errors = &errors;
+    facts.strategy_entries_enabled = &permissions;
+    facts.pending_flatten_requests = &flatten;
+    facts.working_entries = &entries;
+
+    let raw = heartbeat.render(&facts, 123456);
+    assert_eq!(
+        raw.lines().count(),
+        1,
+        "escaped newlines never break the line: {raw:?}"
+    );
+    let fields = parsed(&raw);
+    assert_eq!(fields["strategies"][0], name);
+    assert_eq!(fields["account_user_id"], "u\"\\\n雪");
+    assert_eq!(fields["lease_path"], "/a/\"b\\c");
+    assert_eq!(fields["positions"][0]["symbol"], "BTC\"USDT");
+    assert_eq!(fields["positions"][0]["side"], "short");
+    assert_eq!(fields["positions"][0]["strategy"], name);
+    assert_eq!(fields["entry_blockers"][0]["reason"], "missing\nprice");
+    assert_eq!(fields["strategy_errors"][0]["error"], "rejected\n\\\"");
+    assert_eq!(
+        fields["strategy_entries_enabled"][0]["entries_enabled"],
+        false
+    );
+    assert_eq!(fields["pending_flatten_requests"][0]["request_id"], "id-1");
+    assert_eq!(fields["working_entries"][0]["symbol"], "ETHUSDT");
+}
+
+#[test]
+fn amounts_keep_their_spelling_and_a_non_finite_amount_is_null() {
+    // The fleet reads these numbers as text as well as as numbers: an
+    // integer amount stays an integer, a tiny or huge one is a plain decimal
+    // with no exponent, and NaN or an infinity, which JSON
+    // cannot carry, becomes null rather than a panic or a string.
+    let names = vec!["long".to_owned()];
+    let cases: [(f64, Option<&str>); 9] = [
+        (0.0, Some("0")),
+        (-0.0, Some("-0")),
+        (1.0, Some("1")),
+        (1.23456789012345, Some("1.23456789012345")),
+        // Rust's Display spells extremes as plain decimals, never with an exponent.
+        (
+            1e-100,
+            Some(concat!(
+                "0.",
+                "0000000000000000000000000000000000000000000000000",
+                "00000000000000000000000000000000000000000000000000",
+                "1"
+            )),
+        ),
+        (
+            1e100,
+            Some(concat!(
+                "1",
+                "0000000000000000000000000000000000000000000000000",
+                "000000000000000000000000000000000000000000000000000"
+            )),
+        ),
+        (f64::NAN, None),
+        (f64::INFINITY, None),
+        (f64::NEG_INFINITY, None),
+    ];
+    for (value, spelling) in cases {
+        let holdings = vec![("BTCUSDT".to_owned(), Side::Buy, value, value, None)];
         let mut facts = facts(&names, &holdings);
         facts.available_usdt = value;
         facts.equity_usdt = value;
-        facts.entry_blockers = &blockers;
-        facts.strategy_errors = &errors;
-        facts.strategy_entries_enabled = &permissions;
-        facts.pending_flatten_requests = &flatten;
-        facts.working_entries = &entries;
-        for account_age in [None, Some(0), Some(123_000_000)] {
-            facts.account_age_ns = account_age;
-            assert_eq!(
-                heartbeat.render(&facts, 123456),
-                legacy::render(&heartbeat, &facts, 123456)
-            );
+        facts.account_age_ns = Some(0);
+        let raw = on_the_demo_account("unused.json".into()).render(&facts, 123456);
+        let fields = parsed(&raw);
+        match spelling {
+            Some(text) => {
+                assert!(
+                    raw.contains(&format!("\"account_equity_usdt\": {text},")),
+                    "{value} should be spelled {text}: {raw}"
+                );
+                assert_eq!(fields["positions"][0]["qty"].as_f64(), Some(value));
+                assert_eq!(fields["positions"][0]["entry_px"].as_f64(), Some(value));
+            }
+            None => {
+                assert!(fields["account_available_usdt"].is_null(), "{value}: {raw}");
+                assert!(fields["account_equity_usdt"].is_null(), "{value}: {raw}");
+                assert!(fields["positions"][0]["qty"].is_null(), "{value}: {raw}");
+                assert!(
+                    fields["positions"][0]["entry_px"].is_null(),
+                    "{value}: {raw}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_account_reading_is_dated_on_the_wall_clock_or_not_at_all() {
+    // `account_observed_wall_ts_ms` is `wall_ts_ms` less the reading's age,
+    // and an engine that has not read the account yet says null for the
+    // stamp and for both balances, never zero.
+    let names = vec!["long".to_owned()];
+    let held = one_holding();
+    let mut facts = facts(&names, &held);
+    facts.available_usdt = 10.0;
+    facts.equity_usdt = 20.0;
+    for (age, stamp) in [
+        (None, None),
+        (Some(0), Some(123456)),
+        (Some(123_000_000), Some(123456 - 123)),
+    ] {
+        facts.account_age_ns = age;
+        let fields = parsed(&on_the_demo_account("unused.json".into()).render(&facts, 123456));
+        match stamp {
+            Some(at) => {
+                assert_eq!(fields["account_observed_wall_ts_ms"], at);
+                assert_eq!(fields["account_available_usdt"].as_f64(), Some(10.0));
+                assert_eq!(fields["account_equity_usdt"].as_f64(), Some(20.0));
+            }
+            None => {
+                assert!(fields["account_observed_wall_ts_ms"].is_null());
+                assert!(fields["account_available_usdt"].is_null());
+                assert!(fields["account_equity_usdt"].is_null());
+            }
         }
     }
 }

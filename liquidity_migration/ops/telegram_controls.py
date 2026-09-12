@@ -30,6 +30,7 @@ import argparse
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 import time
@@ -521,6 +522,21 @@ def drain_backlog(api: TelegramApi, offset: int | None) -> int | None:
     return offset
 
 
+#: Retry pacing after a failed `getUpdates`: doubles from the base to the cap,
+#: with jitter so several daemons that lost Telegram together do not retry together.
+RETRY_BASE_SECONDS = 1.0
+RETRY_MAX_SECONDS = 60.0
+
+
+def retry_delay(failures: int, *, rng: random.Random | None = None) -> float:
+    """Seconds to wait after the `failures`th consecutive failure: capped
+    exponential backoff, jittered across [0.5, 1.5) of the step."""
+
+    step = min(RETRY_MAX_SECONDS, RETRY_BASE_SECONDS * 2 ** max(0, failures - 1))
+    jitter = (rng or random).uniform(0.5, 1.5)
+    return min(RETRY_MAX_SECONDS, step * jitter)
+
+
 def serve_forever(config: ControlsConfig, api: TelegramApi, panel: ControlPanel, *, max_batches: int | None = None) -> None:
     try:
         api.call(
@@ -539,14 +555,18 @@ def serve_forever(config: ControlsConfig, api: TelegramApi, panel: ControlPanel,
     if offset is not None:
         _save_offset(config.offset_path, offset)
     batches = 0
+    failures = 0
     while max_batches is None or batches < max_batches:
         batches += 1
         try:
             updates = api.get_updates(offset=offset, timeout_seconds=config.poll_timeout_seconds)
         except (ControlApiError, OSError, urllib.error.URLError) as exc:
-            logger.warning("getUpdates failed (%s); retrying", type(exc).__name__)
-            time.sleep(5.0)
+            failures += 1
+            delay = retry_delay(failures)
+            logger.warning("getUpdates failed (%s), %d in a row; retrying in %.1fs", type(exc).__name__, failures, delay)
+            time.sleep(delay)
             continue
+        failures = 0
         for update in updates:
             offset = int(update["update_id"]) + 1
             # Persist before acting so a crash mid-action cannot replay the press.

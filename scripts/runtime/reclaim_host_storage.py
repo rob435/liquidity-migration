@@ -54,6 +54,9 @@ from liquidity_migration.policy.realms import realms as _realm_rows  # noqa: E40
 from market_tape.config import StorageSettings as _TapeStorage  # noqa: E402
 
 GIB = 1024**3
+#: Deadline for one external command (`engine-tools wal-retention`, `apt-get clean`, rclone):
+#: a stuck filesystem or remote must fail the step, not hold the reclaimer.
+SUBPROCESS_TIMEOUT_SECONDS = 600.0
 DEFAULT_FILESYSTEM = "/var/lib/liquidity-migration"
 DEFAULT_STATE_DIR = "/var/lib/liquidity-migration/storage-reclaim"
 DEFAULT_STAMP_FILE = "/var/lib/liquidity-migration/receipts/storage-reclaim.last-success"
@@ -707,9 +710,16 @@ class Reclaimer:
 
     # -- subprocesses ----------------------------------------------------
 
-    def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+    def _run(self, args: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+        """Run one external command with a deadline; a hung tool is a failed
+        step with exit 124, never a reclaimer that stops relieving pressure."""
+
+        limit = SUBPROCESS_TIMEOUT_SECONDS if timeout is None else timeout
         try:
-            return subprocess.run(args, text=True, capture_output=True, check=False)
+            return subprocess.run(args, text=True, capture_output=True, check=False, timeout=limit)
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            return subprocess.CompletedProcess(args, 124, stdout, f"{args[0]}: no answer within {limit:g}s")
         except OSError as exc:
             # A binary this host does not have yet is a failed step, not a traceback.
             return subprocess.CompletedProcess(args, 127, "", f"{args[0]}: {exc}")

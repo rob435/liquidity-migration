@@ -607,12 +607,21 @@ mod tests {
     }
 
     #[test]
-    fn shipped_config_parses_and_hour_paths_cover_leap_days() {
+    fn shipped_config_runs_every_policy_once_and_hour_paths_cover_leap_days() {
         let config: Config = serde_json::from_str(include_str!(
             "../../../../configs/execution_study_mainnet_v1.json"
         ))
         .unwrap();
-        assert_eq!(config.policies.len(), 8);
+        // The study's contract is its policy inventory, not a count: every
+        // policy the simulator knows is in the shipped config exactly once.
+        let mut shipped: Vec<&str> = config.policies.iter().map(|policy| policy.name()).collect();
+        shipped.sort_unstable();
+        let mut known: Vec<&str> = Policy::ALL.iter().map(|policy| policy.name()).collect();
+        known.sort_unstable();
+        assert_eq!(
+            shipped, known,
+            "the shipped config and the simulator disagree on the policies"
+        );
         assert_eq!(civil_date(0), (1970, 1, 1));
         assert_eq!(civil_date(19782), (2024, 2, 29));
     }

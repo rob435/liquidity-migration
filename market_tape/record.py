@@ -35,6 +35,7 @@ watchdog's freshness limit.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -173,9 +174,7 @@ class SymbolLive:
     updated_ns: int = 0
 
     def copy(self) -> "SymbolLive":
-        return SymbolLive(
-            self.funding_rate, self.turnover_24h, self.price_change_24h, self.price, self.open_interest, self.updated_ns
-        )
+        return dataclasses.replace(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1401,6 +1400,7 @@ class Recorder:
     def _write_status(self) -> None:
         now_ns = time.time_ns()
         budget = self.budget.status()
+        compressor = self.compressor.status()
         payload = {
             "kind": "forward_capture_status",
             "schema_version": SCHEMA_VERSION,
@@ -1427,16 +1427,20 @@ class Recorder:
             "queue_capacity": self.config.storage.queue_frames,
             "disk_blocked": self.disk_blocked,
             "free_disk_bytes": shutil.disk_usage(self.root).free,
+            "compressor": compressor,
         }
         atomic_json(self.root / "status.json", payload)
         logging.info(
-            "capture status frames=%d rows=%d dropped=%d disk_dropped=%d queued=%d disk_blocked=%s projected_gb=%s tiers=%s",
+            "capture status frames=%d rows=%d dropped=%d disk_dropped=%d queued=%d disk_blocked=%s "
+            "compress_pending=%d compress_failed=%d projected_gb=%s tiers=%s",
             self.received_frames,
             self.written_rows,
             self.dropped_frames,
             self.disk_dropped_frames,
             self.frames.qsize(),
             self.disk_blocked,
+            compressor["pending"],
+            compressor["failed"],
             budget["projected_month_gb"],
             " ".join(f"{name}:{len(symbols)}" for name, symbols in self.tier_symbols.items()),
         )

@@ -44,8 +44,15 @@ class BinanceUSDMData:
     # on any Retry-After value so a huge one cannot stall a build.
     rate_limit_backoff_seconds: float = 30.0
     max_retry_after_seconds: float = 120.0
+    # Wall time one request may spend waiting between attempts. `retries` alone
+    # does not bound it: several attempts that each wait out a capped
+    # Retry-After spend many minutes, and the caller's snapshot goes stale
+    # while it waits. Room for two capped waits, and no more. Whichever runs
+    # out first, attempts or this, ends the request.
+    request_deadline_seconds: float = 300.0
     calls: int = field(init=False, default=0)
     retry_events: int = field(init=False, default=0)
+    deadline_events: int = field(init=False, default=0)
     error_events: int = field(init=False, default=0)
     last_error: str = field(init=False, default="")
 
@@ -229,6 +236,7 @@ class BinanceUSDMData:
     def _get(self, path: str, params: dict[str, Any]) -> Any:
         last_error: Exception | None = None
         url = f"{self.base_url}{path}?{urlencode(params)}"
+        deadline = time.monotonic() + self.request_deadline_seconds
         for attempt in range(self.retries):
             try:
                 self.calls += 1
@@ -260,13 +268,22 @@ class BinanceUSDMData:
                 last_error = exc
                 if attempt + 1 >= self.retries:
                     break
-                self.retry_events += 1
                 # On 429/418 honor the server's (capped) wait instead of
                 # burning the exponential backoff and dropping the symbol.
                 backoff = self.retry_sleep_seconds * (2**attempt)
                 if isinstance(exc, HTTPError) and exc.code in (418, 429):
                     backoff = max(backoff, self._retry_after_seconds(exc))
-                time.sleep(backoff)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.deadline_events += 1
+                    raise BinanceDataError(
+                        f"Binance {path} spent its {self.request_deadline_seconds:g}s retry budget "
+                        f"after {attempt + 1} attempt(s)"
+                    ) from last_error
+                self.retry_events += 1
+                # The last wait is clipped to what is left, so the budget is a
+                # ceiling on waiting rather than a reason to skip a final try.
+                time.sleep(min(backoff, remaining))
         raise BinanceDataError(f"Binance {path} failed after retries") from last_error
 
     def _retry_after_seconds(self, exc: HTTPError) -> float:
@@ -293,6 +310,7 @@ class BinanceUSDMData:
         return {
             "calls": self.calls,
             "retry_events": self.retry_events,
+            "deadline_events": self.deadline_events,
             "error_events": self.error_events,
             "last_error": self.last_error,
         }

@@ -10,6 +10,14 @@ from pathlib import Path
 from liquidity_migration.core.artifact_snapshot import rename_noreplace
 
 
+class ArtifactDurabilityError(OSError):
+    """The artifact is published and readable, but its directory entry is not
+    proven durable: a power loss before the filesystem flushes that entry could
+    take the name away again. The artifact is deliberately left in place —
+    deleting something a reader can already see is worse than an unproven name.
+    """
+
+
 def durable_atomic_replace(
     path: str | Path,
     data: bytes,
@@ -110,7 +118,15 @@ def durable_create(
             os.close(descriptor)
         rename_noreplace(temporary, target, label=label)
         published = True
-        if os.name != "nt":
+    except BaseException:
+        if created and not published:
+            temporary.unlink(missing_ok=True)
+        raise
+    # Published: the name is visible to every reader from here on, so nothing
+    # below may remove it. A directory that will not sync leaves the artifact
+    # in place and says the name is not proven durable.
+    if os.name != "nt":
+        try:
             directory_descriptor = os.open(
                 str(target.parent),
                 os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
@@ -119,25 +135,11 @@ def durable_create(
                 os.fsync(directory_descriptor)
             finally:
                 os.close(directory_descriptor)
-    except BaseException:
-        if created:
-            temporary.unlink(missing_ok=True)
-        if published:
-            target.unlink(missing_ok=True)
-            if os.name != "nt":
-                try:
-                    directory_descriptor = os.open(
-                        str(target.parent),
-                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-                    )
-                    try:
-                        os.fsync(directory_descriptor)
-                    finally:
-                        os.close(directory_descriptor)
-                except OSError:
-                    pass
-        raise
+        except OSError as exc:
+            raise ArtifactDurabilityError(
+                f"{label} {target} is published but its directory entry is not durable: {exc}"
+            ) from exc
     return target
 
 
-__all__ = ["durable_atomic_replace", "durable_create"]
+__all__ = ["ArtifactDurabilityError", "durable_atomic_replace", "durable_create"]

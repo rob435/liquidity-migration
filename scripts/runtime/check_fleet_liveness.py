@@ -189,30 +189,37 @@ def scope_units(scope: str, rows: list[FleetUnit]) -> list[FleetUnit]:
     return wanted
 
 
+#: One `systemctl is-active` over every unit; a systemd that does not answer in
+#: this long is itself the finding.
+_SYSTEMCTL_TIMEOUT_SEC = 15.0
+
+
 def unit_states(units: list[str]) -> dict[str, str]:
+    """One bounded `systemctl is-active` for every unit at once.
+
+    `is-active` prints one state per unit in argument order. An answer that
+    does not line up, a timeout, or a missing systemctl is a degraded systemd,
+    and every unit reads `unknown` from that one call: a loop of per-unit
+    calls would multiply load on the daemon exactly when it is struggling and
+    could not be trusted either.
+    """
+
     if not units:
         return {}
-    result = subprocess.run(
-        ["systemctl", "is-active", *units],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    states = result.stdout.splitlines()
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", *units],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_SYSTEMCTL_TIMEOUT_SEC,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return {unit: "unknown" for unit in units}
+    states = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     if len(states) != len(units):
-        states = result.stdout.split()
-    if len(states) != len(units):
-        resolved: dict[str, str] = {}
-        for unit in units:
-            unit_res = subprocess.run(
-                ["systemctl", "is-active", unit],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            resolved[unit] = unit_res.stdout.strip() or "unknown"
-        return resolved
-    return dict(zip(units, [s.strip() for s in states], strict=True))
+        return {unit: "unknown" for unit in units}
+    return dict(zip(units, states, strict=True))
 
 
 def evaluate_units(scope: str, rows: list[FleetUnit]) -> list[Alert]:

@@ -32,8 +32,9 @@ Non-operational developer commands:
                          engine's rustfmt, clippy, and tests in sequence;
                          prunes first when the target volume has under
                          LM_TARGET_FREE_GIB (30) GiB free. Supplies and prints a
-                         pytest --basetemp outside the repository unless the
-                         arguments already carry one
+                         pytest --basetemp outside the repository; one given in
+                         the arguments or PYTEST_BASETEMP is checked the same
+                         way, and one inside the repository is refused
   help                   show this help
 
 Environment:
@@ -41,7 +42,8 @@ Environment:
   CARGO_TARGET_DIR    the Cargo target directory prune measures and cleans
                       (default engine/target)
   LM_TARGET_FREE_GIB  free-space floor, in GiB, under which check prunes (30)
-  PYTEST_BASETEMP     explicit check basetemp; one inside the repository is refused
+  PYTEST_BASETEMP     explicit check basetemp; one inside the repository is
+                      refused, as is an explicit --basetemp argument there
 
 Operational and research commands intentionally live elsewhere:
   scripts/ops.sh --help
@@ -184,19 +186,31 @@ case "$command" in
     echo "[dev] cargo prune: $(engine_target_free_gib) GiB free after"
     ;;
   check)
-    pytest_args=("$@")
-    has_basetemp=0
+    # An explicit --basetemp is lifted out of the arguments and resolved like
+    # the default one, so the containment check cannot be bypassed by naming
+    # a path. Before any gate runs: a refused basetemp must not cost a full doctor.
+    pytest_args=()
+    explicit_basetemp=""
+    expect_basetemp=0
     for arg in "$@"; do
+      if [[ "$expect_basetemp" -eq 1 ]]; then
+        explicit_basetemp="$arg"
+        expect_basetemp=0
+        continue
+      fi
       case "$arg" in
-        --basetemp|--basetemp=*) has_basetemp=1 ;;
+        --basetemp) expect_basetemp=1 ;;
+        --basetemp=*) explicit_basetemp="${arg#--basetemp=}" ;;
+        *) pytest_args+=("$arg") ;;
       esac
     done
-    # Before any gate runs: a refused basetemp must not cost a full doctor.
-    if [[ "$has_basetemp" -eq 0 ]]; then
-      pytest_basetemp="$(resolve_pytest_basetemp)"
-      pytest_args+=(--basetemp "$pytest_basetemp")
-      echo "[dev] pytest basetemp: $pytest_basetemp"
+    if [[ "$expect_basetemp" -eq 1 ]]; then
+      echo "[dev] --basetemp needs a path" >&2
+      exit 2
     fi
+    pytest_basetemp="$(PYTEST_BASETEMP="${explicit_basetemp:-${PYTEST_BASETEMP:-}}" resolve_pytest_basetemp)"
+    pytest_args+=(--basetemp "$pytest_basetemp")
+    echo "[dev] pytest basetemp: $pytest_basetemp"
     ran=()
     skipped=()
     echo "[dev] repository doctor"

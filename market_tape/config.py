@@ -210,6 +210,12 @@ class VenueSettings:
 
 @dataclass(frozen=True, slots=True)
 class StorageSettings:
+    """The one declaration of the storage defaults; the TOML loader and the capture CLI read them from here.
+
+    `fsync_every_records` is the recovery point objective: a power loss loses at
+    most that many acknowledged rows of each symbol's open segment, less one.
+    """
+
     root: Path | None = None
     segment_max_mb: float = 64.0
     fsync_every_records: int = 1_000
@@ -444,15 +450,20 @@ def parse_config(data: Mapping[str, Any], *, base_dir: Path, source_path: Path |
     root_path = Path(str(root)) if root else None
     if root_path is not None and not root_path.is_absolute():
         root_path = base_dir / root_path
+    defaults = StorageSettings()
     storage = StorageSettings(
         root=root_path,
-        segment_max_mb=_positive(storage_table, "segment_max_mb", 64.0, section="storage"),
-        fsync_every_records=int(_positive(storage_table, "fsync_every_records", 1_000, section="storage")),
-        retention_days=int(_positive(storage_table, "retention_days", 30, section="storage")),
-        max_disk_gb=_positive(storage_table, "max_disk_gb", 60.0, section="storage"),
-        min_free_disk_gb=_positive(storage_table, "min_free_disk_gb", 12.0, section="storage"),
-        queue_frames=int(_positive(storage_table, "queue_frames", 32_768, section="storage")),
-        status_interval_seconds=_positive(storage_table, "status_interval_seconds", 30.0, section="storage"),
+        segment_max_mb=_positive(storage_table, "segment_max_mb", defaults.segment_max_mb, section="storage"),
+        fsync_every_records=int(
+            _positive(storage_table, "fsync_every_records", defaults.fsync_every_records, section="storage")
+        ),
+        retention_days=int(_positive(storage_table, "retention_days", defaults.retention_days, section="storage")),
+        max_disk_gb=_positive(storage_table, "max_disk_gb", defaults.max_disk_gb, section="storage"),
+        min_free_disk_gb=_positive(storage_table, "min_free_disk_gb", defaults.min_free_disk_gb, section="storage"),
+        queue_frames=int(_positive(storage_table, "queue_frames", defaults.queue_frames, section="storage")),
+        status_interval_seconds=_positive(
+            storage_table, "status_interval_seconds", defaults.status_interval_seconds, section="storage"
+        ),
     )
 
     connection = data.get("connection") or {}

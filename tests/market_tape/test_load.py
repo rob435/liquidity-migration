@@ -1,4 +1,4 @@
-"""Reading a tape back: hours, sources, filters, the older layout, and a bad line."""
+"""Reading a tape back: hours, sources, venues, the rclone cache, filters, the older layout, and bad lines."""
 
 from __future__ import annotations
 
@@ -12,8 +12,13 @@ import pytest
 from market_tape import load
 from market_tape.load import (
     ArchiveDir,
+    CacheError,
     HostRoot,
     RcloneRemote,
+    RemoteCommandError,
+    RemoteTimeout,
+    SourceError,
+    TapeRowError,
     hour_range,
     iter_rows,
     iter_snapshots,
@@ -28,12 +33,22 @@ DRIVE = FIXTURES / "drive" / "bybit-linear"
 HOUR = "2026-08-30T00"
 
 FAKE_RCLONE = '''#!/usr/bin/env python3
-"""A stand-in rclone: lsjson lists FAKE_REMOTE_DIR recursively, copyto copies out of it."""
-import json, os, shutil, sys
+"""A stand-in rclone: lsjson lists FAKE_REMOTE_DIR recursively, copyto copies out of it.
+
+FAKE_RCLONE_SLEEP holds every call that many seconds; FAKE_RCLONE_FAIL makes
+every call exit 3; FAKE_RCLONE_TRUNCATE makes copyto deliver half the bytes and
+still exit 0, the way an interrupted transfer that rclone did not notice would.
+"""
+import json, os, shutil, sys, time
 args = sys.argv[1:]
 root = os.environ["FAKE_REMOTE_DIR"]
 with open(os.environ["FAKE_RCLONE_LOG"], "a") as log:
     log.write(" ".join(args) + "\\n")
+if os.environ.get("FAKE_RCLONE_SLEEP"):
+    time.sleep(float(os.environ["FAKE_RCLONE_SLEEP"]))
+if os.environ.get("FAKE_RCLONE_FAIL"):
+    print("fake rclone: " + os.environ["FAKE_RCLONE_FAIL"], file=sys.stderr)
+    sys.exit(3)
 def local(remote):
     return os.path.join(root, remote.split(":", 1)[1])
 if args[0] == "lsjson":
@@ -46,7 +61,11 @@ if args[0] == "lsjson":
     print(json.dumps(sorted(rows, key=lambda row: row["Path"])))
 elif args[0] == "copyto":
     os.makedirs(os.path.dirname(args[2]), exist_ok=True)
-    shutil.copyfile(local(args[1]), args[2])
+    if os.environ.get("FAKE_RCLONE_TRUNCATE"):
+        data = open(local(args[1]), "rb").read()
+        open(args[2], "wb").write(data[: len(data) // 2])
+    else:
+        shutil.copyfile(local(args[1]), args[2])
 else:
     sys.exit(f"fake rclone got {args[0]}")
 '''
@@ -209,21 +228,126 @@ def test_a_malformed_line_is_counted_and_skipped(tmp_path: Path) -> None:
     zstd_compress(raw, path)
     raw.unlink()
 
-    source = HostRoot(root)
+    source = HostRoot(root, venue="bybit")
     rows = list(iter_rows(source, ["2026-09-01T07"]))
     assert [row.kind for row in rows] == ["orderbook_snapshot", "public_trade"]
     assert source.skipped_rows == 1
 
 
-def test_the_recorder_status_names_the_venue(tmp_path: Path) -> None:
+def test_the_recorder_status_names_the_venue_and_a_broken_one_is_refused(tmp_path: Path) -> None:
     root = tmp_path / "tape"
     root.mkdir()
     (root / "manifest.jsonl").touch()
-    assert HostRoot(root).venue == "bybit"
+    # No status, no venue in the name, nothing from the caller: refused, not guessed.
+    with pytest.raises(SourceError, match="names no venue"):
+        HostRoot(root)
+    assert HostRoot(root, venue="hyperliquid").venue == "hyperliquid"
     (root / "status.json").write_text(json.dumps({"venue": "binance", "market": "usdm"}), encoding="utf-8")
     assert HostRoot(root).venue == "binance"
+    # The caller's word wins over the file.
+    assert HostRoot(root, venue="bybit").venue == "bybit"
+    # A status file that exists but cannot be read is a broken root, whatever the name says.
     (root / "status.json").write_text("half a line", encoding="utf-8")
-    assert HostRoot(root).venue == "bybit"
+    with pytest.raises(SourceError, match="not readable JSON"):
+        HostRoot(root)
+    (root / "status.json").write_text(json.dumps({"venue": 7}), encoding="utf-8")
+    with pytest.raises(SourceError, match="not a venue"):
+        HostRoot(root)
+    named = tmp_path / "binance-usdm"
+    named.mkdir()
+    (named / "manifest.jsonl").touch()
+    assert HostRoot(named).venue == "binance"
+
+
+def test_a_directory_that_merely_holds_dated_folders_is_not_a_tape(tmp_path: Path) -> None:
+    stranger = tmp_path / "reports"
+    (stranger / "2026-09-01" / "notes").mkdir(parents=True)
+    (stranger / "2026-09-01" / "notes" / "summary.txt").touch()
+    assert not HostRoot.looks_like(stranger)
+    with pytest.raises(ValueError, match="neither a recorder root"):
+        open_source(str(stranger))
+    tape = tmp_path / "bybit-linear"
+    _write_segment(tape, "2026-09-01/07/BTCUSDT/segment-000000.jsonl.zst", [_bybit_book("BTCUSDT", 1_000, 5)])
+    assert HostRoot.looks_like(tape)
+    assert isinstance(open_source(str(tape)), HostRoot)
+    assert open_source(str(tape), venue="mexc").venue == "mexc"
+
+
+def test_a_finished_hour_is_listed_once_and_the_current_hour_every_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "bybit-linear"
+    _write_segment(root, "2026-09-01/07/AAAUSDT/segment-000000.jsonl.zst", [_bybit_trade("AAAUSDT", 100, 1.0)])
+    source = HostRoot(root)
+    assert len(source.hour_members("2026-09-01T07")) == 1
+    _write_segment(root, "2026-09-01/07/AAAUSDT/segment-000001.jsonl.zst", [_bybit_trade("AAAUSDT", 200, 2.0)])
+    assert len(source.hour_members("2026-09-01T07")) == 1, "a finished hour is remembered"
+    source.refresh()
+    assert len(source.hour_members("2026-09-01T07")) == 2
+
+    monkeypatch.setattr(load, "_current_hour", lambda: "2026-09-01T07")
+    fresh = HostRoot(root)
+    assert len(fresh.hour_members("2026-09-01T07")) == 2
+    _write_segment(root, "2026-09-01/07/AAAUSDT/segment-000002.jsonl.zst", [_bybit_trade("AAAUSDT", 300, 3.0)])
+    assert len(fresh.hour_members("2026-09-01T07")) == 3, "the hour being written is listed afresh"
+
+
+def test_a_strict_read_refuses_the_first_bad_line_and_a_lax_one_says_what_it_skipped(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = tmp_path / "bybit-linear"
+    path = root / "2026-09-01" / "07" / "BTCUSDT" / "segment-000000.jsonl.zst"
+    path.parent.mkdir(parents=True)
+    raw = path.with_suffix("")
+    good = _bybit_trade("BTCUSDT", 2_000, 100.0)
+    raw.write_bytes(b"\n".join([json.dumps(good).encode(), b"{not json", b"[1, 2]"]) + b"\n")
+    zstd_compress(raw, path)
+    raw.unlink()
+    meta = root / "2026-09-01" / "07" / "_meta" / "instruments-20260901T070000Z.json.zst"
+    meta.parent.mkdir(parents=True)
+    meta_raw = meta.with_suffix("")
+    meta_raw.write_bytes(json.dumps({"kind": "not_a_snapshot"}).encode() + b"\n")
+    zstd_compress(meta_raw, meta)
+    meta_raw.unlink()
+
+    with pytest.raises(TapeRowError, match=r"BTCUSDT/segment-000000.jsonl.zst line 2: JSONDecodeError"):
+        list(iter_rows(HostRoot(root), ["2026-09-01T07"], strict=True))
+    with pytest.raises(TapeRowError, match=r"_meta/instruments-.* line 1: SchemaError"):
+        list(iter_snapshots(HostRoot(root), ["2026-09-01T07"], strict=True))
+
+    source = HostRoot(root)
+    with caplog.at_level("WARNING", logger="market_tape.load"):
+        assert len(list(iter_rows(source, ["2026-09-01T07"]))) == 1
+        assert list(iter_snapshots(source, ["2026-09-01T07"])) == []
+    assert source.skipped_rows == 3
+    said = [record.getMessage() for record in caplog.records]
+    assert any("skipped 2 unreadable line(s); first at line 2: JSONDecodeError" in line for line in said), said
+    assert any("_meta/instruments" in line and "skipped 1" in line for line in said), said
+
+
+def test_a_source_read_that_fails_mid_stream_is_the_sources_error_not_a_clean_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Cut:
+        """A member stream that dies after the first bytes, as a bad disk or a torn tar would."""
+
+        def __init__(self, real: object) -> None:
+            self.real = real
+            self.reads = 0
+
+        def read(self, size: int = -1) -> bytes:
+            self.reads += 1
+            if self.reads > 1:
+                raise OSError(5, "Input/output error")
+            return self.real.read(4096)  # type: ignore[attr-defined]
+
+        def close(self) -> None:
+            self.real.close()  # type: ignore[attr-defined]
+
+    real_extract = tarfile.TarFile.extractfile
+    monkeypatch.setattr(tarfile.TarFile, "extractfile", lambda self, member: Cut(real_extract(self, member)))
+    with pytest.raises(SourceError, match=r"reading .*2026-08-30T00Z.tar:.* failed: .*Input/output error"):
+        list(iter_rows(ArchiveDir(DRIVE), [HOUR]))
 
 
 def test_stopping_early_says_nothing_and_a_corrupt_file_says_what_broke(
@@ -239,8 +363,8 @@ def test_stopping_early_says_nothing_and_a_corrupt_file_says_what_broke(
     path = root / "2026-09-01" / "07" / "BTCUSDT" / "segment-000000.jsonl.zst"
     path.parent.mkdir(parents=True)
     path.write_bytes(b"this is not a zstd frame")
-    with pytest.raises(RuntimeError, match="zstd exit"):
-        list(iter_rows(HostRoot(root), ["2026-09-01T07"]))
+    with pytest.raises(SourceError, match="zstd exit"):
+        list(iter_rows(HostRoot(root, venue="bybit"), ["2026-09-01T07"]))
 
 
 def test_the_older_daily_layout_still_reads(tmp_path: Path) -> None:
@@ -249,7 +373,7 @@ def test_the_older_daily_layout_still_reads(tmp_path: Path) -> None:
     _write_segment(root, "2026-09-01/ETHUSDT/segment-000000.jsonl.zst", [_bybit_book("ETHUSDT", 500, 6)])
     _write_segment(root, "2026-09-02/03/BTCUSDT/segment-000000.jsonl.zst", [_bybit_book("BTCUSDT", 2_000, 7)])
 
-    source = HostRoot(root)
+    source = HostRoot(root, venue="bybit")
     assert source.hours() == ["2026-09-01", "2026-09-02T03"]
     day = list(iter_rows(source, ["2026-09-01"]))
     assert [(row.symbol, row.local_receive_ts_ns) for row in day] == [("ETHUSDT", 500), ("BTCUSDT", 1_000)]
@@ -275,11 +399,33 @@ def test_archive_dir_filters_and_reads_meta_out_of_the_tar() -> None:
     assert kinds == {"instruments_snapshot", "tickers_snapshot"}
 
 
-def test_archive_dir_takes_the_venue_from_the_folder_name(tmp_path: Path) -> None:
-    for name, venue in (("binance-usdm", "binance"), ("bybit-linear", "bybit"), ("tapes", "bybit")):
+def test_archive_dir_takes_the_venue_from_the_folder_name_or_the_caller(tmp_path: Path) -> None:
+    for name, venue in (("binance-usdm", "binance"), ("bybit-linear", "bybit")):
         (tmp_path / name / "2026" / "08" / "30").mkdir(parents=True)
         assert ArchiveDir(tmp_path / name).venue == venue
+    (tmp_path / "tapes" / "2026" / "08" / "30").mkdir(parents=True)
+    with pytest.raises(SourceError, match="names no venue"):
+        ArchiveDir(tmp_path / "tapes")
     assert ArchiveDir(tmp_path / "tapes", "hyperliquid").venue == "hyperliquid"
+
+
+def test_an_archive_dir_lists_a_tar_once_until_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+    real = load._tar_members
+
+    def counted(archive: Path) -> list:  # type: ignore[type-arg]
+        calls["n"] += 1
+        return real(archive)
+
+    monkeypatch.setattr(load, "_tar_members", counted)
+    source = ArchiveDir(DRIVE)
+    for _ in range(5):
+        assert source.hour_members(HOUR)
+        assert list(iter_snapshots(source, [HOUR]))
+    assert calls["n"] == 1
+    source.refresh()
+    assert source.hour_members(HOUR)
+    assert calls["n"] == 2
 
 
 # ------------------------------------------------------------- open_source
@@ -291,6 +437,9 @@ def test_open_source_detects_what_it_was_handed(tmp_path: Path) -> None:
     remote = open_source("rclone:gdrive:tapes/bybit-linear", cache_dir=tmp_path / "cache")
     assert isinstance(remote, RcloneRemote)
     assert remote.venue == "bybit"
+    with pytest.raises(SourceError, match="names no venue"):
+        open_source("rclone:gdrive:tapes/everything", cache_dir=tmp_path / "cache")
+    assert open_source("rclone:gdrive:tapes/everything", cache_dir=tmp_path / "cache", venue="mexc").venue == "mexc"
     (tmp_path / "empty").mkdir()
     with pytest.raises(ValueError):
         open_source(str(tmp_path / "empty"))
@@ -369,20 +518,110 @@ def test_a_symbols_segments_are_read_one_after_another(tmp_path: Path, monkeypat
     live = {"open": 0, "peak": 0, "total": 0}
     real = load._zstd_lines
 
-    def counted(argv, source=None, owns=None):  # type: ignore[no-untyped-def]
+    def counted(argv, source=None, owns=None, label=""):  # type: ignore[no-untyped-def]
         live["total"] += 1
         live["open"] += 1
         live["peak"] = max(live["peak"], live["open"])
         try:
-            yield from real(argv, source, owns)
+            yield from real(argv, source, owns, label)
         finally:
             live["open"] -= 1
 
     monkeypatch.setattr(load, "_zstd_lines", counted)
-    rows = list(iter_rows(HostRoot(root), ["2026-09-01T07"]))
+    rows = list(iter_rows(HostRoot(root, venue="bybit"), ["2026-09-01T07"]))
     assert [(row.symbol, row.local_receive_ts_ns) for row in rows] == [
         ("AAAUSDT", 100), ("BBBUSDT", 100), ("AAAUSDT", 300), ("AAAUSDT", 400), ("BBBUSDT", 500)
     ]
     assert live["total"] == 3  # every segment is read
     assert live["peak"] == 2  # one open file per symbol, not per segment
     assert live["open"] == 0
+
+
+def test_an_interrupted_copy_never_becomes_the_cached_hour(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    log = _fake_rclone(tmp_path, monkeypatch)
+    hour_path = Path("2026") / "08" / "30" / "2026-08-30T00Z.tar"
+    _hour_archive(tmp_path / "remote" / "tapes" / "bybit-linear" / hour_path, tmp_path / "build",
+                  [_bybit_trade("BTCUSDT", 1_000, 100.0)])
+    source = RcloneRemote("gdrive:tapes/bybit-linear", tmp_path / "cache")
+
+    monkeypatch.setenv("FAKE_RCLONE_TRUNCATE", "1")
+    with pytest.raises(CacheError, match="arrived as .* bytes, the remote lists"):
+        source.hour_members(HOUR)
+    cached = source.root / hour_path
+    assert not cached.exists()
+    assert not cached.with_name(cached.name + ".partial").exists(), "no half a tar is left behind"
+
+    # Told the whole size but handed a file that is not a tar: refused the same way.
+    monkeypatch.delenv("FAKE_RCLONE_TRUNCATE")
+    (tmp_path / "remote" / "tapes" / "bybit-linear" / hour_path).write_bytes(b"x" * 10_240)
+    source.refresh()
+    with pytest.raises(CacheError, match="is not a tar archive"):
+        source.hour_members(HOUR)
+    assert not cached.exists()
+
+    # The real archive arrives whole and is read; two failed attempts cost two copies, no more.
+    _hour_archive(tmp_path / "remote" / "tapes" / "bybit-linear" / hour_path, tmp_path / "build-2",
+                  [_bybit_trade("BTCUSDT", 1_000, 100.0)])
+    source.refresh()
+    assert [row.price for row in iter_rows(source, [HOUR])] == [100.0]
+    assert cached.is_file()
+    assert _calls(log, "copyto") == 3
+
+
+def test_a_cached_archive_that_no_longer_matches_the_listing_is_fetched_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = _fake_rclone(tmp_path, monkeypatch)
+    hour_path = Path("2026") / "08" / "30" / "2026-08-30T00Z.tar"
+    remote = tmp_path / "remote" / "tapes" / "bybit-linear" / hour_path
+    _hour_archive(remote, tmp_path / "build", [_bybit_trade("BTCUSDT", 1_000, 100.0)])
+    source = RcloneRemote("gdrive:tapes/bybit-linear", tmp_path / "cache")
+    assert [row.price for row in iter_rows(source, [HOUR])] == [100.0]
+
+    # The hour was re-packed on the Drive with far more trades: a tar of a different size.
+    many = [_bybit_trade("BTCUSDT", 1_000 + i, 100.0 + i) for i in range(2_000)]
+    _hour_archive(remote, tmp_path / "build-2", many)
+    source.refresh()
+    assert len(list(iter_rows(source, [HOUR]))) == 2_000
+    assert _calls(log, "copyto") == 2
+
+
+def test_rclone_that_hangs_or_fails_is_a_typed_error_naming_the_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_rclone(tmp_path, monkeypatch)
+    _hour_archive(
+        tmp_path / "remote" / "tapes" / "bybit-linear" / "2026" / "08" / "30" / "2026-08-30T00Z.tar",
+        tmp_path / "build", [_bybit_trade("BTCUSDT", 1_000, 100.0)],
+    )
+    source = RcloneRemote("gdrive:tapes/bybit-linear", tmp_path / "cache", list_timeout=0.2, copy_timeout=0.2)
+
+    monkeypatch.setenv("FAKE_RCLONE_SLEEP", "5")
+    with pytest.raises(RemoteTimeout, match=r"rclone lsjson on gdrive:tapes/bybit-linear: no answer within 0.2s"):
+        source.hours()
+    monkeypatch.delenv("FAKE_RCLONE_SLEEP")
+
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "couldn't find remote")
+    with pytest.raises(RemoteCommandError, match=r"rclone lsjson on .*: exit 3: fake rclone: couldn't find remote") as failed:
+        source.hours()
+    assert failed.value.returncode == 3
+    monkeypatch.delenv("FAKE_RCLONE_FAIL")
+
+    assert source.hours() == [HOUR]
+    monkeypatch.setenv("FAKE_RCLONE_SLEEP", "5")
+    with pytest.raises(RemoteTimeout, match="rclone copyto"):
+        source.hour_members(HOUR)
+    assert not (source.root / "2026" / "08" / "30" / "2026-08-30T00Z.tar.partial").exists()
+
+    monkeypatch.setenv("RCLONE_BIN", str(tmp_path / "no-such-rclone"))
+    missing = RcloneRemote("gdrive:tapes/bybit-linear", tmp_path / "cache")
+    with pytest.raises(RemoteCommandError, match="exit 127"):
+        missing.hours()
+
+
+def test_cache_directories_are_told_apart_by_a_long_digest(tmp_path: Path) -> None:
+    prefix = "gdrive:" + "a" * 70
+    first = RcloneRemote(prefix + "/bybit-linear", tmp_path / "cache")
+    second = RcloneRemote(prefix + "/bybit-linear-2", tmp_path / "cache")
+    assert first.root != second.root
+    assert len(first.root.name.rsplit("-", 1)[1]) == 32

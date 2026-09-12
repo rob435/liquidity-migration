@@ -2264,3 +2264,51 @@ def test_wal_attribution_delta_survives_a_ledgered_reclaim(tmp_path: Path, disk_
     alerts = sample([row])
     assert len(alerts) == 1
     assert "demo=150 bytes (delta +50)" in alerts[0].message
+
+
+def test_unit_states_is_one_bounded_systemctl_call_and_a_broken_answer_is_unknown(monkeypatch) -> None:
+    import subprocess
+
+    calls: list[tuple[list[str], float | None]] = []
+
+    def run(args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append((list(args), kwargs.get("timeout")))
+        return SimpleNamespace(returncode=3, stdout="active\ninactive\n", stderr="")
+
+    monkeypatch.setattr(liveness.subprocess, "run", run)
+    assert liveness.unit_states(["a.service", "b.service"]) == {"a.service": "active", "b.service": "inactive"}
+    assert len(calls) == 1 and calls[0][0][:2] == ["systemctl", "is-active"]
+    assert calls[0][1] == liveness._SYSTEMCTL_TIMEOUT_SEC
+
+    # A short answer is not followed by one call per unit.
+    calls.clear()
+    monkeypatch.setattr(
+        liveness.subprocess, "run", lambda args, **k: (calls.append((list(args), None)), SimpleNamespace(returncode=0, stdout="active\n", stderr=""))[1]
+    )
+    assert liveness.unit_states(["a.service", "b.service"]) == {"a.service": "unknown", "b.service": "unknown"}
+    assert len(calls) == 1
+
+    def hang(args, **kwargs):  # type: ignore[no-untyped-def]
+        raise subprocess.TimeoutExpired(args, kwargs.get("timeout", 0))
+
+    monkeypatch.setattr(liveness.subprocess, "run", hang)
+    assert liveness.unit_states(["a.service"]) == {"a.service": "unknown"}
+    assert liveness.unit_states([]) == {}
+
+
+def test_the_disk_forecast_window_is_the_host_timers_own_cadence() -> None:
+    """The forecast window is the watchdog's own firing interval plus systemd's
+    accuracy slack. Change the timer and this must change with it, or the
+    watchdog silently starts judging a window the host never delivers."""
+
+    timer = (ROOT / "deploy" / "systemd" / "liquidity-migration-host-liveness.timer").read_text(encoding="utf-8")
+    units = {"s": 1, "sec": 1, "min": 60, "h": 3600}
+
+    def seconds(key: str) -> float:
+        line = next(line for line in timer.splitlines() if line.startswith(f"{key}="))
+        value = line.split("=", 1)[1].strip()
+        digits = "".join(c for c in value if c.isdigit())
+        suffix = value[len(digits) :].strip() or "s"
+        return float(digits) * units[suffix]
+
+    assert liveness._DISK_FORECAST_SEC == seconds("OnUnitActiveSec") + seconds("AccuracySec")

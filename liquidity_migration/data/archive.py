@@ -6,7 +6,6 @@ import io
 import logging
 import os
 import ssl
-import subprocess
 import tempfile
 import time
 import zipfile
@@ -30,7 +29,6 @@ DEFAULT_TIMEOUT_SECONDS = 300
 DEFAULT_RETRIES = 5
 ARCHIVE_RETRIES_ENV = "LIQMIG_ARCHIVE_DOWNLOAD_RETRIES"
 ARCHIVE_TIMEOUT_ENV = "LIQMIG_ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS"
-ARCHIVE_BACKEND_ENV = "LIQMIG_ARCHIVE_DOWNLOAD_BACKEND"
 ARCHIVE_VECTORIZE_1H_ENV = "LIQMIG_ARCHIVE_VECTORIZE_1H"
 
 
@@ -445,39 +443,6 @@ def download_public_trade_archive(
 
 
 def _download_archive_to_path(url: str, output: Path, *, timeout_seconds: int) -> None:
-    backend = os.environ.get(ARCHIVE_BACKEND_ENV, "").strip().lower()
-    if backend == "curl":
-        result = subprocess.run(
-            [
-                "curl",
-                "-L",
-                "--fail",
-                "--silent",
-                "--show-error",
-                "--connect-timeout",
-                str(min(int(timeout_seconds), 15)),
-                "--max-time",
-                str(int(timeout_seconds)),
-                "--write-out",
-                "%{http_code}",
-                "--output",
-                str(output),
-                url,
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            http_code = (result.stdout or "").strip()[-3:]
-            # Match urllib's permanent-404 behavior; curl 22 means HTTP failure.
-            if result.returncode == 22 and http_code == "404":
-                raise ArchiveFileNotFoundError(url)
-            raise RuntimeError(
-                f"curl download failed rc={result.returncode} http={http_code or 'unknown'}: "
-                f"{(result.stderr or '').strip()[:300]} url={url}"
-            )
-        return
     output.write_bytes(download_archive_bytes(url, timeout_seconds=timeout_seconds))
 
 

@@ -8,7 +8,8 @@
 | Date | 2026-09-12 |
 | Scope | Python research/ops; Rust engine; market tape; shell deploy/runtime; configs; tests; docs; workflows; dependency/toolchain metadata |
 | Static passes | Inventory pass; per-file targeted source pass; cross-file symbol/config/env pass; verification re-pass; final duplicate/legacy sweep |
-| Runtime execution | **Not available in the GitHub connector session.** No local shell, Python, Cargo, pytest, coverage, or mutation runner was available. Claims requiring execution are marked as such rather than fabricated. Historical CI/test evidence is used only as historical evidence, not as a current run. |
+| Runtime execution | **Not available in the GitHub connector session** that produced the ledger below. No local shell, Python, Cargo, pytest, coverage, or mutation runner was available. Claims requiring execution are marked as such rather than fabricated. Historical CI/test evidence is used only as historical evidence, not as a current run. |
+| Resolution pass | Executed 2026-09-12 with the full toolchain (Python 3.11.15, cargo 1.90.0, zstd, ShellCheck). Every verdict in [Resolution](#resolution) is from source read on the branch plus a run of the gate, not from the static ledger. |
 | Historical execution evidence | PR #18 records `pytest tests/scripts/test_runtime_scripts.py` = 20 passed, `scripts/dev.sh check` green, full `pytest -q` = 1384 passed in a prior environment; this is not a current-main execution result. |
 | Line-number limitation | The GitHub source connector returns source text but does not expose source line numbers. Locations therefore use exact path + symbol/function; where a fetched source chunk had a stable requested range, that range is included. No fabricated line numbers are used. |
 | Decision rule | Delete when reachability proof is complete; otherwise consolidate/rewrite. Legacy paths that are still on live accounting/recovery paths are not falsely classified as dead. |
@@ -117,15 +118,121 @@
 
 ## Deletion list
 
-| Item | Proof / condition | Action |
+| Item | Verdict | What happened |
 |---|---|---|
-| `engine/engine-core/src/heartbeat/legacy.rs` | Exact repository search shows it is imported by `engine/engine-core/src/heartbeat/tests.rs` via `#[path = "legacy.rs"]`; no production `legacy::render` call exists. | Delete after replacing LM-026 with contract fixtures. |
-| `configs/long_native_v11a.json` | Exact filename search returned no repository code/document/test reference; current signal-worker test configuration uses v12. | Delete after external published-result/replay inventory confirms no artifact depends on it. |
-| Historical `lane2_carry_hold_v1`/`v2`/`v3` fixtures/tests | Source still references them in tests; therefore **not currently proven deletable**. | Do not delete until external research-artifact retention is decided. |
-| Legacy daily tape reader branch | Source and tests prove it is reachable for old layouts. | Not deletable until retained tape inventory is empty or migrated. |
-| `engine/engine-core/src/legacy_quantity.rs` | Multiple live callers: boot recovery, reconciliation, execution, attribution, clear/quarantine paths. | **Do not delete.** It is active recovery/accounting code, despite the name. |
-| `engine/engine-core/src/legacy_signals.rs` | CLI `retire-legacy-signal-sources` calls it directly. | **Do not delete.** Retirement tooling is live. |
-| `deploy/realm_fields.tsv` | Shell deployment consumes it directly; it is generated from `deploy/realms.tsv`. | Do not delete until deployment is changed to render/ship it atomically. |
+| `engine/engine-core/src/heartbeat/legacy.rs` | **Deleted** | Gone with the byte-equality test that was its only caller. Three field-level contract tests replace it: escaping, number spelling and the non-finite-to-null rule, and the account-reading stamp. |
+| `configs/long_native_v11a.json` | **Kept — the claim is wrong** | `liquidity_migration/rules/long_native.py` builds its path with an f-string (`long_native_{name}.json` over `("v11a", "v12")`), which is why a filename search missed it. `long_v11a_profile()` loads it, `_registered_long_profiles()` checks its strategy identity at import, and `scripts/research/equity_curves.py --long-profile v11a` renders it. Deleting it breaks LONG at import. |
+| Historical `lane2_carry_hold_v1`/`v2`/`v3` fixtures/tests | Kept | Unchanged: live test references, and the retention question (OQ-01) is the owner's. |
+| Legacy daily tape reader branch | Kept | Unchanged: reachable for old layouts, and the retained-tape inventory (OQ-02) is the owner's. |
+| `engine/engine-core/src/legacy_quantity.rs` | Kept | Confirmed: live boot-recovery, reconciliation, execution, attribution and quarantine callers. |
+| `engine/engine-core/src/legacy_signals.rs` | Kept | Confirmed: `retire-legacy-signal-sources` is its caller. |
+| `deploy/realm_fields.tsv` | Kept | Drift is already a test failure, not a hazard: see LM-034. |
+| `liquidity_migration/data/archive.py` curl backend | **Deleted** | The second HTTP stack and its `LIQMIG_ARCHIVE_DOWNLOAD_BACKEND` switch are gone, from the module and from `.env.example`. One transport, one timeout and retry semantics. |
+
+## Resolution
+
+Verdicts: **fixed** — changed, with a test that fails without the change;
+**refuted** — the claim does not hold against source; **declined** — the
+observation is real and the change is not worth its cost, reason given;
+**owner** — real, and the decision is the owner's (strategy numbers, safety
+machinery, or a redesign).
+
+| ID | Verdict | Resolution |
+|---|---|---|
+| LM-001 | fixed | `HostRoot` takes its venue from `status.json`, the source's name, or the caller. A status file that is unreadable, not an object, or names a non-string venue raises `SourceError`; a source that names no venue at all is refused. No Bybit default anywhere. |
+| LM-002 | fixed | `looks_like` accepts a directory only on a recorder file (`manifest.jsonl`, `status.json`) or a day directory holding an hour directory or a `segment-NNNNNN.jsonl*` file. A tree of dated folders is no longer a tape. |
+| LM-003 | fixed | `hour_members` walks the hour's symbol directories instead of `rglob` over the whole hour, and remembers a finished hour's member list. The hour the wall clock is in is listed afresh every call, because the recorder is still writing it; `refresh()` forgets everything. |
+| LM-004 | fixed | An archive lands as `<name>.partial`, is checked against the size the listing carries, is opened as a tar, and is fsynced before the rename. Any failure removes the partial. A cached archive whose size no longer matches the listing is fetched again. |
+| LM-005 | fixed | 128 bits of SHA-256 (32 hex characters) in the cache key. |
+| LM-006 | fixed | `lsjson` and `copyto` carry deadlines (300 s and 3,600 s, both settable); a timeout is `RemoteTimeout` naming the operation and the remote. |
+| LM-007 | declined | `hours()` is an inventory question: it must see every archive the remote holds, so the recursive listing is the answer, not an overshoot. It is already one call per source until `refresh()`. Narrowing it would help only `hour_members`, at one extra remote call per hour. |
+| LM-008 | fixed | The feeder records its error and `_zstd_lines` raises `SourceError` naming the member, checked after zstd's exit status so a clean EOF on a frame boundary cannot pass as success. A broken pipe from a reader that stopped early stays silent. |
+| LM-009 | declined | The merge reads one stream per symbol concurrently, so one decompressor per open member is what the ordering requires, not an accident; a test already pins peak concurrency to one per symbol rather than one per segment. There is no zstd Python module on the recording host. |
+| LM-010 | fixed | `iter_rows(..., strict=True)` raises `TapeRowError` naming the member and the line number. The lax path still counts on `skipped_rows` and now logs once per member with its first cause, so a caller that never reads the counter is not silent. `market_tape rows\|bars\|book --strict` exposes it. |
+| LM-011 | fixed | `iter_snapshots(..., strict=True)`, same contract; a `_meta` line that is not a snapshot payload is a counted, logged skip rather than a silent drop. |
+| LM-012 | fixed | `SourceError` with `RemoteError`, `RemoteTimeout`, `RemoteCommandError` (carrying `returncode`) and `CacheError`. A missing binary is exit 127, not a traceback. |
+| LM-013 | fixed | `_TarIndex` keys member lists by (path, size, mtime_ns), so repeated reads of one hour parse the tar header table once; `refresh()` clears it. |
+| LM-014 | declined | `hours()` answers "what do you hold": the CLI prints it and `hour_range` is already a list. An iterator would move the same work behind a lazier interface without removing it. |
+| LM-015 | owner | Backpressure is a policy: bounding the queue means either blocking the venue socket or shedding frames, and the recorder's shedding policy is the owner's. What is done: `Compressor.depth()` and `status()` ride in `status.json` and the log line, so a growing backlog is visible to the watchdog while the recorder's heartbeat is still fresh. |
+| LM-016 | fixed | The compressor counts `failed`, keeps `last_error` and its stamp, publishes them in `status.json`, and goes on to the next segment; a failed segment stays raw for the next start's recovery. `close()` names the count and the last failure. |
+| LM-017 | fixed | Each zstd call has a 600 s deadline and is killed on it; `close(timeout=900)` reports how many segments it left raw instead of joining forever. |
+| LM-018 | fixed | The compressed bytes are hashed as zstd produces them. One write and one verification read, not a third pass over the archive. |
+| LM-019 | declined | `-T1` is deliberate: the compressor runs beside a live capture socket on the same box, and extra zstd threads compete with the thing the tape exists to record. A change here needs a measurement on the host, not on a developer machine. |
+| LM-020 | declined | The pass already stats each file once and reads free space once, and carries free space forward by the bytes it unlinks. A manifest-backed index would be a second source of truth about the same files, and the manifest is a receipt log, not an inventory. |
+| LM-021 | fixed | Stat failures are counted on `Retention.last_unstatable` and logged with the first path. A file another process took between the walk and the stat is still the silent, expected case. |
+| LM-022 | fixed | `ENOTEMPTY`/`ENOENT`/`EEXIST` stay silent; anything else is counted and logged with the first path. |
+| LM-023 | declined | The glob is over one symbol-hour directory, which holds only that hour's segments for that symbol. It is bounded by the hour, not by the tape. |
+| LM-024 | fixed | Recovery is one `os.walk` that collects temporaries, partials and raw segments together, replacing three `rglob` passes over the whole tape. |
+| LM-025 | fixed | `atomic_json` uses `tempfile.mkstemp` in the target directory, so two writers can never share a temporary; a failure removes it. A test drives four threads through 200 writes and asserts 200 distinct temporaries and nothing left behind. |
+| LM-026 | fixed | `heartbeat/legacy.rs` deleted; see the deletion list. |
+| LM-027 | owner | Pinning the venue's own lists as a fixture needs a captured `instruments-info` payload. The repository holds none and this session cannot reach the venue; the capture is the owner's to supply. |
+| LM-028 | declined | `candidate_clone_cost` asserts nothing: it prints clone and serialization timings. A threshold would be a property of the machine that ran it. It is a measurement tool, correctly kept out of the suite. |
+| LM-029 | refuted | The whole file runs in 0.93 s for three siblings. Merging the children would destroy the property under test: each sibling must import alone, cold, so one sibling's imports cannot satisfy the next one's. |
+| LM-030 | refuted | Those tests wait on `threading.Event` with a 5 s ceiling that never fires; one 10 ms poll remains. Measured: `tests/market_tape/test_record.py` and `tests/data/test_storage.py` together, 117 tests, 4.18 s. |
+| LM-031 | refuted | The 0.5 ms sleep is inside the lock and widens the window in which a broken lock would be *caught*. The assertion is `overlaps == 0`, which scheduling cannot make fail; removing the hold would weaken the test. |
+| LM-032 | owner | OQ-02: needs a retained-tape inventory the repository does not hold. |
+| LM-033 | owner | Same inventory as LM-032. |
+| LM-034 | refuted | Drift is already a test failure, not an operational risk: `tests/policy/test_realms.py::test_every_generated_file_matches_the_checked_in_bytes` compares every generated file against the checked-in bytes, and `python -m liquidity_migration.policy.realms check` is the same comparison for CI. |
+| LM-035 | declined | The table is four realms. The remote deploy body must read realm facts *before its checkout exists*, which is why `LM_REALM_FIELDS_TEXT` carries the file itself; a JSON artifact plus a parser would not survive that constraint any better. |
+| LM-036 | owner | A fast changed-file gate is a change to what `check` promises. The gate's contract is the owner's. |
+| LM-037 | fixed | An explicit `--basetemp` (both spellings) is lifted out of the arguments and resolved through the same containment check as the default; one inside the repository is refused before the first gate. A bare `--basetemp` with no path exits 2. |
+| LM-038 | owner | With LM-036. |
+| LM-039 | fixed | The recovery point objective is stated where it is set and where it is read: `StorageSettings` docstring, `market_tape/storage.py` module docstring, `market_tape/README.md` §Host Storage Layout, and `--fsync-every-records` help. A power loss takes at most `fsync_every_records - 1` acknowledged rows from each symbol's open segment; a closed segment is fsynced whole. |
+| LM-040 | declined | `add()` prunes on every write, so the deque holds at most 1,440 minute buckets per key; `last_day` is at most 1,440 additions, on a status tick every 30 s. |
+| LM-041 | fixed | `dataclasses.replace(self)`. |
+| LM-042 | declined | The history is one sample a minute bounded by `history_ns`, so a lookback scans at most that window's samples, not an unbounded history. |
+| LM-043 | declined | The lock is held for field assignments and one deque append. Splitting it needs host profiling that says the contention is real. |
+| LM-044 | owner | The float wire path is part of the exact-numeric migration the repository is already running; sequencing it is the owner's. |
+| LM-045 | owner | `QTY_EPS` is a strategy-visible boundary: changing it changes which cover records are treated as exposure. |
+| LM-046 | owner | `BookLevel` to exact types is an engine-wide numeric change with a declared numerical difference; part of the same migration. |
+| LM-047 | owner | With LM-046. |
+| LM-048 | owner | With LM-046. |
+| LM-049 | fixed | The test asserts the shipped config's policy inventory equals `Policy::ALL`, not a count. Adding a policy to the simulator without shipping it, or shipping one twice, now fails; adding both together passes. |
+| LM-050 | owner | OQ-01: whether historical carry configs stay is a research-retention decision. |
+| LM-051 | refuted | The file is live. See the deletion list. |
+| LM-052 | fixed | `retry_delay()` is capped exponential backoff (1 s to 60 s) jittered across [0.5, 1.5) of the step; a success resets the climb. Two tests: the shape of the curve, and an outage that climbs 1, 2, 3 then starts over after a good poll. |
+| LM-053 | fixed | `request_deadline_seconds` (300 s) bounds the wall time one request spends waiting across every attempt, independent of `retries`; the last wait is clipped to what is left, and a spent budget raises `BinanceDataError` counted on `deadline_events` and published in `stats()`. Nine attempts each waiting a capped Retry-After used to be eleven minutes. |
+| LM-054 | fixed | The curl backend is deleted. See the deletion list. |
+| LM-055 | declined | Resuming needs range support and a verified partial to resume onto; a discarded partial is the safe outcome, and the retry budget is bounded. |
+| LM-056 | fixed | The retired generation's removal reports every path it could not delete, with the first named, instead of `ignore_errors=True`. A test refuses `rmdir` on the retired tree and asserts the swap still held and the failure was said once. |
+| LM-057 | owner | Consolidating two durability implementations is a refactor across the data layer, with crash semantics to re-prove on both sides. |
+| LM-058 | fixed | Once the rename lands, the artifact is never deleted. A directory that will not sync raises `ArtifactDurabilityError` (an `OSError`) saying the artifact is published but its name is not proven durable. Before publication, a failure still removes the temporary and publishes nothing. Both paths have a test. |
+| LM-059 | fixed | The contract was already fail-closed; it had no test. Two now: an existing file is refused with both files untouched, and a platform with neither `renameat2` nor `renamex_np` raises rather than falling back to a replacing rename. |
+| LM-060 | fixed | One bounded `systemctl is-active` for every unit. An answer that does not line up, a timeout, or a missing systemctl reads `unknown` for every unit from that one call; there is no per-unit fallback loop to amplify load on a struggling daemon. |
+| LM-061 | owner | A clock-jump alert is safety machinery, and the host clock already has its own check (`evaluate_host_clock`). Proposed, not built. |
+| LM-062 | fixed (partial) | `_DISK_FORECAST_SEC` is now pinned by test to `OnUnitActiveSec + AccuracySec` read from `deploy/systemd/liquidity-migration-host-liveness.timer`, so changing the watchdog's cadence fails the suite. The others (`_PRIVATE_STREAM_STUCK_MS`, `_PROTECTIVE_BACKLOG_STUCK_MS`, `_CANARY_EXPIRY_WARN_SEC`) are documented judgements with no repository source to derive from; where they should live is the owner's. |
+| LM-063 | fixed | Deleted with LM-026. |
+| LM-064 | fixed | With LM-049. |
+| LM-065 | fixed | The stand-in rclone now covers the remote-specific failures end to end: an interrupted copy, a file that is not a tar, a cached archive the listing no longer matches, a hang, a non-zero exit, and a missing binary. |
+| LM-066 | declined | The shell boundary is what that test exists to check. |
+| LM-067 | fixed | `tests/repo/test_dependency_lock.py` walks the installed metadata and fails on a pinned package that is neither declared in `pyproject.toml` nor required by one that is, on a declared dependency that is not pinned, and on a duplicate pin. Today every entry is owned: `requests` and `pycryptodome` come from `pybit`, `ast_serialize` from `mypy`. |
+| LM-068 | refuted | `.github/workflows/vps-deploy.yml` is the repository-local CI. On every push to `main` and every pull request it runs `scripts/dev.sh lint`, `shellcheck`, `types` and `test`, plus `cargo fmt --check`, `cargo clippy -D warnings` and `cargo test --workspace --all-targets --locked` on the pinned toolchain. The file's name describes its other job, not its only one. |
+| LM-069 | owner | Artifact-based deploy is an operational redesign with a rollback story to match. |
+| LM-070 | owner | With LM-069. |
+| LM-071 | fixed | Every external command the reclaimer runs has a 600 s deadline; a hang is exit 124 with a message naming the wait, so the step fails and the reclaim cycle keeps going instead of stalling under disk pressure. |
+| LM-072 | fixed | With LM-054. |
+| LM-073 | owner | Generating the operator examples from the schema is an owner call. The code-side duplication is gone (LM-074). |
+| LM-074 | fixed | `StorageSettings` is the one declaration of the storage defaults. The TOML loader and `capture_bybit_forward.py` both read them from it; a test asserts every CLI default equals its field. |
+| LM-075 | fixed | With LM-001: venue comes from status, name, or caller, and ambiguity is refused. `open_source(..., venue=)` and `--venue` are how a caller says it. |
+| LM-076 | owner | With LM-046. |
+| LM-077 | fixed | A leverage the venue left out is `None`; one it sent malformed refuses the whole contract row rather than reading as absent and defaulting to 1.0. A test drives all three cases through `Contracts::parse`. |
+| LM-078 | owner | With LM-046. |
+| LM-079 | owner | With LM-046. |
+| LM-080 | declined | With the parallel encoder gone, the 73-key list is the one place the published heartbeat schema is written down, and `scripts/runtime/check_fleet_liveness.py` reads those names. Generating it from the struct would assert the code against itself. |
+
+### What the resolution pass ran
+
+| Gate | Result |
+|---|---|
+| `.venv/bin/python -m pytest -q` | 1,986 passed, 1 skipped |
+| `ruff check liquidity_migration market_tape scripts tests deploy` | pass |
+| `mypy` (the `scripts/dev.sh types` target list) | pass |
+| `shellcheck -S warning` over every tracked shell file | pass |
+| `scripts/devtools/repo_doctor.py` | `ready` |
+| `cargo fmt --all -- --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass |
+| `cargo test --workspace` | 2,711 passed, 0 failed, 9 ignored across 36 suites |
+
 
 ## Consolidation map
 
@@ -191,16 +298,18 @@
 
 ## Open questions for owner
 
-| ID | Question | Option A | Option B | Consequence A | Consequence B | Recommendation |
-|---|---|---|---|---|---|---|
-| OQ-01 | Are any external research/replay artifacts still dependent on `configs/long_native_v11a.json`? | Yes | No | Preserve as compatibility fixture | Delete it | **No** after repository + artifact inventory; then delete LM-051 |
-| OQ-02 | Must the loader continue reading the legacy daily tape layout? | Yes | No | Keep adapter but isolate/test it | Migrate archives and delete branch | **No** unless an explicit retained-data inventory proves otherwise |
-| OQ-03 | What is the accepted tape crash RPO? | 0 records | ≤1,000 records | Higher fsync cost | Higher capture throughput | **State the contract first; then tune** |
-| OQ-04 | Should generated realm fields remain committed? | Yes | No | CI must enforce generator drift | Generate during deploy/release and ship atomically | **No** long-term; prefer generated release artifact |
-| OQ-05 | Are legacy float venue inputs still accepted by external callers? | Yes | No | Keep compatibility adapter | Delete public legacy API | **No** for new callers; retain private migration parser until external inventory is clean |
-| OQ-06 | Is live venue schema probing required on every merge or on a schedule? | Merge gate | Scheduled integration | Slower CI and external dependency | Possible drift window | **Scheduled + pinned fixture on every merge** |
-| OQ-07 | Should CI be repository-local? | Yes | External checks only | Reproducible required gates | Installation-dependent protection | **Yes**; commit an authoritative CI workflow |
-| OQ-08 | Should deployment fetch source from Git on the VPS? | Yes | No | Host credential dependency remains | Immutable runner-built release artifact | **No**; use digest-verified artifacts |
+Answered where the repository itself settles it; the rest still need the owner.
+
+| ID | Question | Answer |
+|---|---|---|
+| OQ-01 | Are any external research/replay artifacts still dependent on `configs/long_native_v11a.json`? | **Moot — it is not a dead config.** `rules/long_native.py` loads it at import and checks its strategy identity; `equity_curves.py --long-profile v11a` renders it. It stays whatever the artifact inventory says. Whether the historical *carry* configs (LM-050) stay is still open. |
+| OQ-02 | Must the loader continue reading the legacy daily tape layout? | Open. Needs a retained-tape inventory the repository does not hold. Until then the branch stays and is tested. |
+| OQ-03 | What is the accepted tape crash RPO? | **Stated, not yet tuned.** The contract is now written where it is set and where it is read: at most `fsync_every_records - 1` (999 by default) acknowledged rows of each symbol's open segment. Change the number when the owner has a target. |
+| OQ-04 | Should generated realm fields remain committed? | Open, but not urgent: drift is already a test failure (LM-034), and the remote deploy body reads the file before its checkout exists. |
+| OQ-05 | Are legacy float venue inputs still accepted by external callers? | Open; part of the exact-numeric migration's sequencing (LM-044–048, LM-076, LM-078, LM-079). |
+| OQ-06 | Is live venue schema probing required on every merge or on a schedule? | Open. The pinned-fixture half needs a captured `instruments-info` payload the repository does not hold (LM-027). |
+| OQ-07 | Should CI be repository-local? | **It already is.** `.github/workflows/vps-deploy.yml` runs the whole gate on every push to `main` and every pull request (LM-068). |
+| OQ-08 | Should deployment fetch source from Git on the VPS? | Open; an operational redesign (LM-069, LM-070). |
 
 ## Verification notes
 

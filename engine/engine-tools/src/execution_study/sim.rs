@@ -23,6 +23,18 @@ pub enum Policy {
 }
 
 impl Policy {
+    /// Every policy the simulator can run, the inventory the shipped config is held to.
+    pub const ALL: [Policy; 8] = [
+        Self::Cross,
+        Self::Current,
+        Self::PassiveEntry30s,
+        Self::PostOnly5s,
+        Self::PostOnly30s,
+        Self::PostOnly120s,
+        Self::Adaptive120s,
+        Self::PassiveSkip120s,
+    ];
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Cross => "cross",

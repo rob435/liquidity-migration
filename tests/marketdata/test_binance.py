@@ -325,3 +325,51 @@ def test_permanent_flag_marks_client_rejections_only(monkeypatch) -> None:
             "AUSDT", "5m", 1_700_000_100_000, 1_700_000_700_000
         )
     assert excinfo.value.permanent is False
+
+
+def test_a_request_stops_at_its_total_deadline_not_just_its_attempt_count(monkeypatch) -> None:
+    """Three attempts that each wait out a capped Retry-After spend minutes,
+    and the caller's snapshot goes stale while it waits. The budget ends the
+    request even when attempts remain."""
+
+    slept: list[float] = []
+    clock = {"now": 0.0}
+
+    def fake_urlopen(request, timeout):
+        raise HTTPError(request.full_url, 429, "Too Many Requests", {"Retry-After": "90"}, None)
+
+    monkeypatch.setattr(binance, "urlopen", fake_urlopen)
+    monkeypatch.setattr(binance.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(binance.time, "sleep", lambda seconds: (slept.append(seconds), clock.__setitem__("now", clock["now"] + seconds)))
+
+    client = binance.BinanceUSDMData(retries=9, retry_sleep_seconds=1.0, request_deadline_seconds=120.0)
+    with pytest.raises(binance.BinanceDataError, match=r"spent its 120s retry budget after 3 attempt\(s\)"):
+        client._get("/fapi/v1/klines", {"symbol": "BTCUSDT"})
+
+    # 90 s, then the 30 s that is left, then the budget is gone: nine attempts
+    # would otherwise have waited more than eleven minutes.
+    assert slept == [90.0, 30.0]
+    assert client.deadline_events == 1
+    assert client.stats()["deadline_events"] == 1
+    assert client.calls == 3, "attempts stopped at the budget, not at retries=9"
+
+
+def test_a_request_inside_its_budget_still_uses_every_attempt(monkeypatch) -> None:
+    slept: list[float] = []
+    clock = {"now": 0.0}
+    attempts = {"n": 0}
+
+    def fake_urlopen(request, timeout):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise HTTPError(request.full_url, 503, "Service Unavailable", {}, None)
+        return contextlib.closing(io.BytesIO(json.dumps([[1, "2"]]).encode()))
+
+    monkeypatch.setattr(binance, "urlopen", fake_urlopen)
+    monkeypatch.setattr(binance.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(binance.time, "sleep", lambda seconds: (slept.append(seconds), clock.__setitem__("now", clock["now"] + seconds)))
+
+    client = binance.BinanceUSDMData(retries=3, retry_sleep_seconds=1.0, request_deadline_seconds=300.0)
+    assert client._get("/fapi/v1/klines", {"symbol": "BTCUSDT"}) == [[1, "2"]]
+    assert slept == [1.0, 2.0]
+    assert client.deadline_events == 0

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -14,16 +15,20 @@ from typing import Any
 import pytest
 
 from market_tape.schema import SCHEMA_VERSION
+from market_tape import storage
 from market_tape.storage import (
     Compressor,
     Manifest,
     Retention,
     SegmentWriter,
     Snapshots,
+    atomic_json,
     discard_file_cache,
+    remove_empty_directories,
     segment_identity,
     utc_day,
     utc_day_hour,
+    zstd_compress,
 )
 
 needs_zstd = pytest.mark.skipif(shutil.which("zstd") is None, reason="zstd is not installed")
@@ -122,7 +127,163 @@ def test_closed_segment_is_verified_before_raw_bytes_are_removed(tmp_path: Path)
     assert receipt["kind"] == "segment_compressed"
     assert receipt["records"] == 3
     assert receipt["symbol"] == "AGIUSDT"
-    assert len(receipt["sha256"]) == 64
+    # Hashed as zstd produced it, and it is the file's digest.
+    assert receipt["sha256"] == hashlib.sha256(compressed[0].read_bytes()).hexdigest()
+    assert compressor.status() == {
+        "pending": 0,
+        "compressed": 1,
+        "failed": 0,
+        "last_error": None,
+        "last_error_ns": None,
+        "alive": False,
+    }
+
+
+def _fake_zstd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> None:
+    binary = tmp_path / "bin" / "zstd"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
+    binary.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{binary.parent}{os.pathsep}{os.environ['PATH']}")
+
+
+def test_a_zstd_that_hangs_is_killed_and_leaves_no_temporary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_zstd(tmp_path, monkeypatch, "sleep 30")
+    source = tmp_path / "segment-000000.jsonl"
+    source.write_bytes(b'{"a":1}\n')
+    output = source.with_suffix(".jsonl.zst")
+    with pytest.raises(RuntimeError, match="did not finish within 0.2s"):
+        zstd_compress(source, output, timeout=0.2)
+    assert not output.exists()
+    assert not output.with_suffix(".zst.tmp").exists()
+    assert source.exists(), "the raw segment is kept for the next attempt"
+
+
+def test_a_zstd_that_fails_says_what_it_said(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_zstd(tmp_path, monkeypatch, 'echo "disk on fire" >&2; exit 7')
+    source = tmp_path / "segment-000000.jsonl"
+    source.write_bytes(b'{"a":1}\n')
+    with pytest.raises(RuntimeError, match=r"compression failed .* \(exit 7\): disk on fire"):
+        zstd_compress(source, source.with_suffix(".jsonl.zst"))
+    assert not source.with_suffix(".jsonl.zst.tmp").exists()
+
+
+@needs_zstd
+def test_a_segment_that_will_not_compress_is_counted_and_the_next_one_still_ships(tmp_path: Path) -> None:
+    manifest = Manifest(tmp_path)
+    compressor = Compressor(tmp_path, manifest)
+    compressor.start()
+    writer = SegmentWriter(tmp_path, max_bytes=1024 * 1024, fsync_every=1)
+    writer.append(trade(1_800_000_000_000_000_000, "AAAUSDT"))
+    writer.append(trade(1_800_000_000_000_000_000, "BBBUSDT"))
+    closed = {segment.symbol: segment for segment in writer.close()}
+    # The raw file vanished under the compressor: zstd cannot read it.
+    closed["AAAUSDT"].path.unlink()
+    compressor.submit(closed["AAAUSDT"])
+    compressor.submit(closed["BBBUSDT"])
+    with pytest.raises(RuntimeError, match=r"1 tape segment\(s\) did not compress; last: .*AAAUSDT/segment-000000.jsonl"):
+        compressor.close()
+
+    status = compressor.status()
+    assert status["failed"] == 1 and status["compressed"] == 1 and status["pending"] == 0
+    assert "AAAUSDT/segment-000000.jsonl" in status["last_error"]
+    assert status["last_error_ns"] is not None
+    assert (closed["BBBUSDT"].path.with_suffix(".jsonl.zst")).exists(), "the failure did not stop the queue"
+
+
+def test_a_compressor_that_will_not_stop_says_how_much_it_left(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    compressor = Compressor(tmp_path, Manifest(tmp_path))
+    hold = __import__("threading").Event()
+    monkeypatch.setattr(compressor, "_compress", lambda segment: hold.wait(10))
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/zstd")
+    compressor.start()
+    for index in range(3):
+        path = tmp_path / "2027-01-15" / "13" / "AGIUSDT" / f"segment-00000{index}.jsonl"
+        compressor.submit(storage.ClosedSegment(path, "AGIUSDT", "2027-01-15", 1, 1, 1, "13"))
+    try:
+        assert compressor.depth() == 3
+        with pytest.raises(RuntimeError, match=r"did not stop within 0.2s; 3 segment\(s\) left raw"):
+            compressor.close(timeout=0.2)
+    finally:
+        hold.set()
+
+
+def test_atomic_json_never_shares_a_temporary_and_leaves_none_behind(tmp_path: Path) -> None:
+    import threading
+
+    path = tmp_path / "status.json"
+    seen: list[str] = []
+    real_mkstemp = storage.tempfile.mkstemp
+
+    def recorded(*args: Any, **kwargs: Any) -> tuple[int, str]:
+        descriptor, name = real_mkstemp(*args, **kwargs)
+        seen.append(name)
+        return descriptor, name
+
+    storage.tempfile.mkstemp = recorded  # type: ignore[assignment]
+    try:
+        workers = [threading.Thread(target=lambda i=i: [atomic_json(path, {"n": i, "k": j}) for j in range(50)]) for i in range(4)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+    finally:
+        storage.tempfile.mkstemp = real_mkstemp  # type: ignore[assignment]
+    assert len(seen) == 200 and len(set(seen)) == 200, "every write had its own temporary"
+    assert json.loads(path.read_text(encoding="utf-8"))["k"] == 49
+    assert [p.name for p in tmp_path.iterdir()] == ["status.json"]
+    assert oct(path.stat().st_mode & 0o777) == "0o644"
+
+
+def test_retention_names_the_files_it_could_not_stat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    manifest = Manifest(tmp_path)
+    directory = tmp_path / "2026-08-01" / "10" / "AGIUSDT"
+    directory.mkdir(parents=True)
+    good = directory / "segment-000000.jsonl.zst"
+    bad = directory / "segment-000001.jsonl.zst"
+    good.write_bytes(b"x" * 10)
+    bad.write_bytes(b"x" * 10)
+    old = time.time() - 400 * 86_400
+    os.utime(good, (old, old))
+    os.utime(bad, (old, old))
+    real_stat = Path.stat
+
+    def stat(self: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+        if self == bad:
+            raise PermissionError(13, "Permission denied")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    retention = Retention(tmp_path, manifest, retention_days=30, max_bytes=10**12, min_free_bytes=1)
+    with caplog.at_level("WARNING"):
+        deleted = retention.prune()
+    assert deleted == [good.relative_to(tmp_path)]
+    assert retention.last_unstatable == 1
+    assert any("could not stat 1 file(s)" in record.getMessage() and str(bad) in record.getMessage() for record in caplog.records)
+
+
+def test_directory_cleanup_reports_a_refusal_but_not_an_occupied_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    (tmp_path / "2026-08-01" / "10" / "AGIUSDT").mkdir(parents=True)
+    (tmp_path / "2026-08-01" / "11" / "BTCUSDT").mkdir(parents=True)
+    (tmp_path / "2026-08-01" / "11" / "BTCUSDT" / "segment-000000.jsonl.zst").write_bytes(b"x")
+    stubborn = tmp_path / "2026-08-01" / "10" / "AGIUSDT"
+    real_rmdir = Path.rmdir
+
+    def rmdir(self: Path) -> None:
+        if self == stubborn:
+            raise PermissionError(13, "Permission denied")
+        real_rmdir(self)
+
+    monkeypatch.setattr(Path, "rmdir", rmdir)
+    with caplog.at_level("WARNING"):
+        remove_empty_directories(tmp_path)
+    assert stubborn.exists() and (tmp_path / "2026-08-01" / "11" / "BTCUSDT").exists()
+    said = [record.getMessage() for record in caplog.records]
+    assert len(said) == 1 and "could not remove 1 empty tape directory" in said[0] and str(stubborn) in said[0]
 
 
 @needs_zstd

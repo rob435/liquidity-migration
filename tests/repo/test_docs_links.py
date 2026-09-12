@@ -49,14 +49,16 @@ def test_every_markdown_link_resolves() -> None:
 
 
 # Docs name repo paths in backticks far more often than they link them, and a
-# moved module leaves the claim behind. CHANGELOG.md is exempt: history names
-# what a change replaced, and those paths are meant to be gone.
+# moved module leaves the claim behind. CHANGELOG.md and AUDIT.md are exempt
+# for the same reason: both name what a change replaced or removed, and those
+# paths are meant to be gone.
 _INLINE_CODE = re.compile(r"`([^`\n]+)`")
 _REPO_PATH = re.compile(
     r"^(?:configs|data|deploy|docs|engine|liquidity_migration|market_tape|scripts|tests)"
     r"/[A-Za-z0-9_./@-]+$"
 )
 _PATH_CLAIM_EXEMPT = frozenset({
+    "AUDIT.md",
     "CHANGELOG.md",
 })
 

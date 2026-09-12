@@ -425,6 +425,17 @@ fn read_row(raw: &str, metadata_version: u8) -> Option<(Symbol, Contract)> {
         }
     }
     let max_vol = row.max_vol.legacy("maxVol").unwrap_or(f64::MAX);
+    // A leverage the venue did not send is a fact about the row; one it sent
+    // malformed is a row this table cannot vouch for, so the row is refused
+    // rather than read as absent and defaulted.
+    let optional_f64 = |field: &DecimalField, name: &str| -> Option<Option<f64>> {
+        match field.optional(name).ok()? {
+            None => Some(None),
+            Some(number) => Some(Some(number.value.to_f64().ok()?)),
+        }
+    };
+    let min_leverage = optional_f64(&row.min_leverage, "minLeverage")?;
+    let max_leverage = optional_f64(&row.max_leverage, "maxLeverage")?;
     use engine_types::numeric::{AssetId, ExactInstrumentSpec, PricePrecision};
     let multiplier = row.contract_size.required("contractSize").ok()?.value;
     let volume_unit = row.vol_unit.optional("volUnit").ok().flatten();
@@ -475,7 +486,7 @@ fn read_row(raw: &str, metadata_version: u8) -> Option<(Symbol, Contract)> {
             min_vol: row.min_vol.legacy("minVol").unwrap_or(1.0),
             max_vol,
             limit_max_vol: row.limit_max_vol.legacy("limitMaxVol").unwrap_or(max_vol),
-            max_leverage: row.max_leverage.legacy("maxLeverage").unwrap_or(1.0),
+            max_leverage: max_leverage.unwrap_or(1.0),
             api_allowed: row.api_allowed.unwrap_or(false),
             execution: ExecutionCapabilities {
                 volume_unit,
@@ -483,8 +494,8 @@ fn read_row(raw: &str, metadata_version: u8) -> Option<(Symbol, Contract)> {
                 position_open_type: row.position_open_type.as_i64(),
                 stop_only_fair: row.stop_only_fair.as_bool(),
                 future_type: row.future_type.as_i64(),
-                min_leverage: row.min_leverage.legacy("minLeverage").ok(),
-                max_leverage: row.max_leverage.legacy("maxLeverage").ok(),
+                min_leverage,
+                max_leverage,
                 retained: row.retained,
                 metadata_version,
             },
@@ -779,5 +790,40 @@ mod tests {
         // like a delisting rather than like a failed read.
         assert!(Contracts::parse(&serde_json::json!({"data": []})).is_err());
         assert!(Contracts::parse(&serde_json::json!({"success": true})).is_err());
+    }
+
+    #[test]
+    fn a_leverage_the_venue_left_out_is_absent_and_one_it_garbled_refuses_the_row() {
+        let mut page: Value = serde_json::from_str(DETAIL).unwrap();
+        let rows = page["data"].as_array_mut().unwrap();
+        for row in rows.iter_mut() {
+            row["volUnit"] = serde_json::json!(1);
+            row["positionOpenType"] = serde_json::json!(3);
+            row["stopOnlyFair"] = serde_json::json!(false);
+            row["futureType"] = serde_json::json!(1);
+        }
+        // BTC_USDT: no leverage fields at all.
+        rows[0].as_object_mut().unwrap().remove("maxLeverage");
+        // ETH_USDT: a maxLeverage that is not a number.
+        rows[1]["maxLeverage"] = serde_json::json!("plenty");
+        // XRP_USDT: a minLeverage that is not a number.
+        rows[2]["minLeverage"] = serde_json::json!("1x");
+        let table = Contracts::parse(&page).unwrap();
+
+        let btc = table.tradable("BTCUSDT").unwrap();
+        assert_eq!(
+            btc.max_leverage, 1.0,
+            "absent falls back to the venue's floor"
+        );
+        assert_eq!(btc.execution.max_leverage, None);
+        assert_eq!(btc.execution.min_leverage, None);
+        assert!(
+            table.tradable("ETHUSDT").is_err(),
+            "a malformed maxLeverage is not read as absent"
+        );
+        assert!(
+            table.tradable("XRPUSDT").is_err(),
+            "a malformed minLeverage is not read as absent"
+        );
     }
 }

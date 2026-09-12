@@ -368,3 +368,40 @@ def test_control_action_allowlist_cannot_forward_paths_units_or_environment(flee
     }
     for action, command in tc.CONTROL_COMMANDS.items():
         assert command == ("/usr/bin/sudo", "-n", tc.CONTROL_HELPER, action)
+
+
+def test_retry_delay_doubles_to_a_cap_with_jitter() -> None:
+    import random
+
+    steady = random.Random(7)
+    delays = [tc.retry_delay(n, rng=steady) for n in range(1, 12)]
+    for n, delay in enumerate(delays, start=1):
+        step = min(tc.RETRY_MAX_SECONDS, tc.RETRY_BASE_SECONDS * 2 ** (n - 1))
+        assert 0.5 * step <= delay <= min(tc.RETRY_MAX_SECONDS, 1.5 * step), (n, delay)
+    assert max(delays) <= tc.RETRY_MAX_SECONDS
+    assert delays[0] < delays[3] < delays[6], "the wait grows while Telegram stays down"
+
+
+def test_a_telegram_outage_backs_off_and_a_success_resets_the_wait(tmp_path: Path, monkeypatch) -> None:
+    class Outage:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def call(self, method: str, payload: dict) -> None:
+            return None
+
+        def get_updates(self, *, offset: int | None, timeout_seconds: int) -> list[dict]:
+            self.calls += 1
+            if self.calls in (2, 3, 4, 6):
+                raise tc.ControlApiError("telegram is down")
+            return []
+
+    slept: list[float] = []
+    monkeypatch.setattr(tc.time, "sleep", slept.append)
+    monkeypatch.setattr(tc, "retry_delay", lambda failures: float(failures))
+    config = make_config(tmp_path)
+    api = Outage()
+    panel = tc.ControlPanel(config, api, FakeFleet())  # type: ignore[arg-type]
+    # Call 1 drains the backlog; batches 1..6 poll, four of which fail.
+    tc.serve_forever(config, api, panel, max_batches=6)  # type: ignore[arg-type]
+    assert slept == [1.0, 2.0, 3.0, 1.0], "three failures in a row climb; a success starts the climb over"

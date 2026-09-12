@@ -1138,6 +1138,30 @@ def test_replace_dataset_swaps_atomically_and_holds_the_reader_lock(tmp_path: Pa
     assert leftovers == []
 
 
+def test_a_retired_generation_that_will_not_delete_is_named_not_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    old = pl.DataFrame({"date": ["2026-07-01"], "symbol": ["A"], "value": [1]})
+    write_dataset(old, tmp_path, "archive_trade_manifest", partition_by=("date",))
+    real_rmdir = os.rmdir
+
+    def refuse(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if ".retired-" in os.fspath(path):
+            raise PermissionError(13, "Permission denied", os.fspath(path))
+        return real_rmdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "rmdir", refuse)
+    new = pl.DataFrame({"date": ["2026-07-03"], "symbol": ["C"], "value": [3]})
+    with caplog.at_level("WARNING", logger="liquidity_migration.data.storage"):
+        storage.replace_dataset(new, tmp_path, "archive_trade_manifest", partition_by=("date",))
+
+    assert sorted(read_dataset(tmp_path, "archive_trade_manifest")["symbol"].to_list()) == ["C"], "the swap itself held"
+    retired = [p for p in tmp_path.iterdir() if ".retired-" in p.name]
+    assert len(retired) == 1
+    said = [record.getMessage() for record in caplog.records]
+    assert len(said) == 1 and "could not be removed" in said[0] and retired[0].name in said[0], said
+
+
 def test_replace_dataset_leaves_the_previous_generation_intact_on_failure(tmp_path: Path) -> None:
     old = pl.DataFrame({"date": ["2026-07-01"], "symbol": ["A"], "value": [1]})
     write_dataset(old, tmp_path, "archive_trade_manifest", partition_by=("date",))

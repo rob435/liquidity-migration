@@ -89,3 +89,46 @@ def test_rename_noreplace_preserves_an_existing_evidence_directory(
     assert (destination / "preserved.txt").read_text(encoding="utf-8") == (
         "preserved\n"
     )
+
+
+def test_rename_noreplace_refuses_an_existing_file_and_leaves_both_alone(tmp_path: Path) -> None:
+    source = tmp_path / "new.json"
+    destination = tmp_path / "published.json"
+    source.write_bytes(b"new")
+    destination.write_bytes(b"published")
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        rename_noreplace(source, destination, label="evidence output")
+
+    assert destination.read_bytes() == b"published", "the evidence that was there is untouched"
+    assert source.read_bytes() == b"new", "and the candidate is still where the caller left it"
+
+
+def test_rename_noreplace_fails_closed_where_the_platform_has_no_primitive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No kernel no-replace rename means no atomic create. The contract is to
+    say so, never to fall back to a plain rename that would overwrite."""
+
+    import ctypes
+
+    from liquidity_migration.core import artifact_snapshot
+
+    source = tmp_path / "new.json"
+    destination = tmp_path / "published.json"
+    source.write_bytes(b"new")
+    destination.write_bytes(b"published")
+
+    class NoSymbols:
+        def __getattr__(self, name: str):
+            raise AttributeError(name)
+
+    monkeypatch.setattr(artifact_snapshot.ctypes, "CDLL", lambda *a, **k: NoSymbols())
+    monkeypatch.setattr(artifact_snapshot.sys, "platform", "sunos5")
+
+    with pytest.raises(RuntimeError, match="atomic no-replace rename is unavailable"):
+        rename_noreplace(source, destination, label="evidence output")
+
+    assert destination.read_bytes() == b"published"
+    assert source.exists()
+    assert isinstance(ctypes.CDLL, type(ctypes.CDLL))

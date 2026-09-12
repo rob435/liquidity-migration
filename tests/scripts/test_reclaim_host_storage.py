@@ -949,3 +949,23 @@ def test_a_family_with_no_log_yet_is_nothing_to_reclaim(host: Host) -> None:
     assert rows[str(family)]["candidates"] == 0
     assert rows[str(mainnet)]["reclaimed"] > 0
     assert host.stamp.exists()
+
+
+def test_every_external_command_has_a_deadline_and_a_hang_is_a_failed_step(host: Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    seen: list[float | None] = []
+
+    def run(args, **kwargs):  # type: ignore[no-untyped-def]
+        seen.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(args, kwargs.get("timeout"), output=b"partial")
+
+    monkeypatch.setattr(MODULE.subprocess, "run", run)
+    reclaimer = MODULE.Reclaimer(MODULE.parse_settings(host.argv()), lambda _: statvfs_for(GIB, MIB), lambda: NOW)
+    result = reclaimer._run(["/usr/bin/rclone", "lsjson", "gdrive:x"])
+    assert seen == [MODULE.SUBPROCESS_TIMEOUT_SECONDS]
+    assert result.returncode == 124
+    assert result.stdout == "partial"
+    assert "no answer within" in result.stderr
+    assert reclaimer.retention_floor(Path("/var/lib/liquidity-migration-engine/engine.wal")) is None
+    assert any("exit 124" in error and "no answer within" in error for error in reclaimer.errors), reclaimer.errors

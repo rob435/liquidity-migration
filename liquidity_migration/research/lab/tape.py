@@ -37,10 +37,14 @@ def tape_bars(
     interval_seconds: float,
     symbols: Sequence[str] | None = None,
     cache_dir: Path | None = None,
+    venue: str | None = None,
 ) -> pl.DataFrame:
-    """Fixed-interval bars for `[start_hour, end_hour)` from a tape source."""
+    """Fixed-interval bars for `[start_hour, end_hour)` from a tape source.
 
-    opened = open_source(source, cache_dir=cache_dir)
+    `venue` names the rows' venue when neither the recorder's `status.json`
+    nor the source's name does."""
+
+    opened = open_source(source, cache_dir=cache_dir, venue=venue)
     rows = iter_rows(opened, hour_range(start_hour, end_hour), symbols=list(symbols) if symbols else None)
     return build_bars(rows, interval_seconds=interval_seconds)
 

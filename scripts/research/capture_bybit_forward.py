@@ -34,14 +34,20 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--wide-universe", choices=("linear-usdt",), default=None)
     result.add_argument("--deep-funding-bp", type=float, default=10.0)
     result.add_argument("--depth", type=int, default=50)
-    result.add_argument("--segment-max-mb", type=float, default=64.0)
-    result.add_argument("--fsync-every-records", type=int, default=1_000)
-    result.add_argument("--retention-days", type=int, default=30)
-    result.add_argument("--max-disk-gb", type=float, default=60.0)
-    result.add_argument("--min-free-disk-gb", type=float, default=25.0)
-    result.add_argument("--queue-frames", type=int, default=32_768)
+    storage = StorageSettings()
+    result.add_argument("--segment-max-mb", type=float, default=storage.segment_max_mb)
+    result.add_argument(
+        "--fsync-every-records",
+        type=int,
+        default=storage.fsync_every_records,
+        help="rows between fsyncs per open segment: the most a power loss can take from each symbol",
+    )
+    result.add_argument("--retention-days", type=int, default=storage.retention_days)
+    result.add_argument("--max-disk-gb", type=float, default=storage.max_disk_gb)
+    result.add_argument("--min-free-disk-gb", type=float, default=storage.min_free_disk_gb)
+    result.add_argument("--queue-frames", type=int, default=storage.queue_frames)
     result.add_argument("--topics-per-connection", type=int, default=150)
-    result.add_argument("--status-interval-seconds", type=float, default=30.0)
+    result.add_argument("--status-interval-seconds", type=float, default=storage.status_interval_seconds)
     result.add_argument("--ws-url", default=None)
     result.add_argument("--rest-base", default=None)
     return result
@@ -67,7 +73,7 @@ def config_from_args(args: argparse.Namespace) -> CaptureConfig:
                     Universe(
                         "funding_below",
                         threshold_bp=args.deep_funding_bp,
-                        sticky_days=2,
+                        sticky_hours=48.0,
                         quote="USDT",
                         exclude_tiers=("deep",),
                     ),

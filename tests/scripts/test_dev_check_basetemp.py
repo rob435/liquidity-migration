@@ -11,18 +11,26 @@ DEV = ROOT / "scripts" / "dev.sh"
 PRE_PUSH = ROOT / "scripts" / "git-hooks" / "pre-push"
 
 
-def _check(basetemp: str, *, cwd: Path, python: Path | None = None) -> subprocess.CompletedProcess[str]:
-    """Run `dev.sh check` with a chosen basetemp.
+def _check(
+    basetemp: str, *, cwd: Path, python: Path | None = None, argument: bool = False
+) -> subprocess.CompletedProcess[str]:
+    """Run `dev.sh check` with a chosen basetemp, through the environment or,
+    with `argument`, as an explicit `--basetemp` argument.
 
     `python` points PYTHON at a stub so the run stops at the first gate: the
     basetemp is resolved before any gate, which is all these tests assert.
     """
     environment = dict(os.environ)
-    environment["PYTEST_BASETEMP"] = basetemp
+    environment.pop("PYTEST_BASETEMP", None)
+    command = ["bash", str(DEV), "check"]
+    if argument:
+        command += ["--basetemp", basetemp]
+    else:
+        environment["PYTEST_BASETEMP"] = basetemp
     if python is not None:
         environment["PYTHON"] = str(python)
     return subprocess.run(
-        ["bash", str(DEV), "check"],
+        command,
         cwd=cwd,
         env=environment,
         text=True,
@@ -48,6 +56,32 @@ def test_check_refuses_a_basetemp_inside_the_repository_before_any_gate(tmp_path
     assert "repository doctor" not in completed.stdout
     assert "[dev] ruff" not in completed.stdout
     assert not inside.exists()
+
+
+def test_an_explicit_basetemp_argument_inside_the_repository_is_refused_too(tmp_path: Path) -> None:
+    inside = ROOT / "pytest-basetemp-argument-refusal-fixture"
+    for spelling in (["--basetemp", str(inside)], [f"--basetemp={inside}"]):
+        completed = subprocess.run(
+            ["bash", str(DEV), "check", *spelling],
+            cwd=tmp_path,
+            env={k: v for k, v in os.environ.items() if k != "PYTEST_BASETEMP"},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert completed.returncode != 0, spelling
+        assert "refusing pytest basetemp inside repository" in completed.stderr, spelling
+        assert "repository doctor" not in completed.stdout
+        assert not inside.exists()
+
+
+def test_an_explicit_basetemp_argument_outside_the_repository_is_the_one_used(tmp_path: Path) -> None:
+    chosen = tmp_path / "given"
+    completed = _check(str(chosen), cwd=tmp_path, python=_failing_python(tmp_path), argument=True)
+
+    assert f"[dev] pytest basetemp: {chosen.resolve()}" in completed.stdout, completed.stdout[:2000]
+    assert chosen.is_dir()
+    assert completed.returncode == 41
 
 
 def test_check_prints_and_passes_the_basetemp_it_supplies(tmp_path: Path) -> None:

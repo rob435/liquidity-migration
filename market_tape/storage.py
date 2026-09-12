@@ -15,10 +15,18 @@ closes, and compressed to `.jsonl.zst` by a background thread that verifies the
 archive before deleting the raw file. A restart finishes whatever was open.
 The older daily layout `<day>/<SYMBOL>/segment-*.jsonl.zst` is still recognised
 on read and on restart recovery.
+
+Durability of the open segment (the recovery point objective): rows are fsynced
+every `fsync_every` records per symbol, so a power loss can lose up to
+`fsync_every - 1` acknowledged rows of each symbol's open segment. A process
+crash loses only what is still in that segment's 64 KiB write buffer, since
+the kernel keeps what was written through it. A closed segment is fsynced
+whole before it is renamed.
 """
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -26,6 +34,7 @@ import os
 import queue
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -45,6 +54,13 @@ META_DIRECTORY = "_meta"
 #: and every frame in between is discarded. The gap between the two thresholds
 #: is what makes a crossing resolve instead of repeat.
 FREE_HEADROOM_FRACTION = 0.05
+
+#: Seconds one zstd call (compress or verify) may take on one segment before it
+#: is a failure: a stuck disk must not hold the compressor, or a stop, forever.
+ZSTD_TIMEOUT_SECONDS = 600.0
+#: Seconds `Compressor.close()` waits for the queue to drain before reporting
+#: what it left behind.
+COMPRESSOR_STOP_TIMEOUT_SECONDS = 900.0
 
 
 def discard_file_cache(handle: Any) -> None:
@@ -237,43 +253,91 @@ def inspect_jsonl(path: Path, root: Path | None = None) -> ClosedSegment | None:
     return ClosedSegment(path, symbol, day, records, first, last, hour)
 
 
-def zstd_compress(source: Path, output: Path) -> str:
-    """Compress source to output atomically, verify, and return the output's SHA-256."""
+def zstd_compress(source: Path, output: Path, *, timeout: float = ZSTD_TIMEOUT_SECONDS) -> str:
+    """Compress source to output atomically, verify, and return the output's SHA-256.
+
+    The compressed bytes are hashed as zstd produces them, so the archive is
+    written once and read once (by the verification), never a third time.
+    """
 
     temporary = output.with_suffix(output.suffix + ".tmp")
     hasher = hashlib.sha256()
-    with temporary.open("xb") as handle:
-        process = subprocess.run(["zstd", "-q", "-3", "-T1", "-c", "--", str(source)], stdout=handle, check=False)
-        handle.flush()
-        os.fsync(handle.fileno())
-    if process.returncode != 0:
+    try:
+        with temporary.open("xb") as handle:
+            process = subprocess.Popen(
+                ["zstd", "-q", "-3", "-T1", "-c", "--", str(source)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            assert process.stdout is not None and process.stderr is not None
+            deadline = time.monotonic() + timeout
+            try:
+                for block in iter(lambda: process.stdout.read(1024 * 1024), b""):  # type: ignore[union-attr]
+                    hasher.update(block)
+                    handle.write(block)
+                    if time.monotonic() > deadline:
+                        raise subprocess.TimeoutExpired(process.args, timeout)
+                returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+                raise RuntimeError(f"zstd compression of {source} did not finish within {timeout:g}s") from None
+            finally:
+                said = process.stderr.read().decode(errors="replace").strip()
+                process.stdout.close()
+                process.stderr.close()
+            if returncode != 0:
+                raise RuntimeError(f"zstd compression failed for {source} (exit {returncode}): {said}")
+            handle.flush()
+            os.fsync(handle.fileno())
+            # Durable, and nothing on this host reads it again: replay reads
+            # archived files, not the pages compression just dirtied.
+            discard_file_cache(handle)
+        try:
+            verified = subprocess.run(
+                ["zstd", "-q", "-t", "--", str(temporary)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"zstd verification of {source} did not finish within {timeout:g}s") from None
+        if verified.returncode != 0:
+            said = verified.stderr.decode(errors="replace").strip()
+            raise RuntimeError(f"zstd verification failed for {source} (exit {verified.returncode}): {said}")
+    except BaseException:
         temporary.unlink(missing_ok=True)
-        raise RuntimeError(f"zstd compression failed for {source}")
-    verified = subprocess.run(
-        ["zstd", "-q", "-t", "--", str(temporary)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    if verified.returncode != 0:
-        temporary.unlink(missing_ok=True)
-        raise RuntimeError(f"zstd verification failed for {source}")
-    with temporary.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            hasher.update(block)
-        discard_file_cache(handle)
+        raise
     os.replace(temporary, output)
     sync_directory(output.parent)
     return hasher.hexdigest()
 
 
 class Compressor:
+    """Compresses closed segments on its own thread and says how it is doing.
+
+    A segment that fails to compress is left as `.jsonl` for the next start's
+    recovery, counted on `failed`, and named in `last_error`; the thread goes
+    on to the next segment, because one bad file must not stop the tape. The
+    recorder publishes `status()` so the watchdog sees a compressor that is
+    failing or falling behind while the recorder's heartbeat is still fresh.
+    """
+
     def __init__(self, root: Path, manifest: Manifest) -> None:
         self.root = root
         self.manifest = manifest
         self.pending: queue.Queue[ClosedSegment | None] = queue.Queue()
         self.thread = threading.Thread(target=self._run, name="tape-compressor", daemon=True)
         self.error: BaseException | None = None
+        self.failed = 0
+        self.compressed = 0
+        self.last_error: str | None = None
+        self.last_error_ns = 0
+        self.current: ClosedSegment | None = None
+        self.current_since_ns = 0
+        self._submitted = 0
+        self._taken = 0
 
     def start(self) -> None:
         if shutil.which("zstd") is None:
@@ -282,19 +346,50 @@ class Compressor:
         self.thread.start()
 
     def submit(self, segment: ClosedSegment) -> None:
+        self._submitted += 1
         self.pending.put(segment)
 
+    def depth(self) -> int:
+        """Segments waiting, the one being compressed included."""
+
+        return self._submitted - self._taken
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "pending": self.depth(),
+            "compressed": self.compressed,
+            "failed": self.failed,
+            "last_error": self.last_error,
+            "last_error_ns": self.last_error_ns or None,
+            "alive": self.thread.is_alive(),
+        }
+
     def _recover(self) -> None:
-        for temporary in self.root.rglob("*.zst.tmp"):
+        """One walk of the tape: drop torn compressions, close partials, queue every raw segment."""
+
+        temporaries: list[Path] = []
+        partials: list[Path] = []
+        raw: list[Path] = []
+        for directory, _, names in os.walk(self.root):
+            for name in names:
+                path = Path(directory) / name
+                if name.endswith(".zst.tmp"):
+                    temporaries.append(path)
+                elif name.endswith(".jsonl.partial"):
+                    partials.append(path)
+                elif name.startswith("segment-") and name.endswith(".jsonl"):
+                    raw.append(path)
+        for temporary in temporaries:
             temporary.unlink(missing_ok=True)
-        for partial in self.root.rglob("*.jsonl.partial"):
+        for partial in partials:
             truncate_partial_line(partial)
             if partial.stat().st_size == 0:
                 partial.unlink()
                 continue
             final = partial.with_suffix("")
             os.replace(partial, final)
-        for path in sorted(self.root.rglob("segment-*.jsonl")):
+            raw.append(final)
+        for path in sorted(set(raw)):
             try:
                 segment = inspect_jsonl(path, self.root)
             except ValueError:
@@ -310,11 +405,20 @@ class Compressor:
             segment = self.pending.get()
             if segment is None:
                 return
+            self.current = segment
+            self.current_since_ns = time.time_ns()
             try:
                 self._compress(segment)
-            except BaseException as exc:  # noqa: BLE001 - surfaced to the owner loop
+                self.compressed += 1
+            except BaseException as exc:  # noqa: BLE001 - surfaced through status() and close()
                 self.error = exc
-                logging.exception("tape segment compression failed")
+                self.failed += 1
+                self.last_error = f"{segment.path.relative_to(self.root)}: {exc}"
+                self.last_error_ns = time.time_ns()
+                logging.exception("tape segment compression failed: %s", segment.path)
+            finally:
+                self.current = None
+                self._taken += 1
 
     def _compress(self, segment: ClosedSegment) -> None:
         output = segment.path.with_suffix(segment.path.suffix + ".zst")
@@ -337,11 +441,18 @@ class Compressor:
             }
         )
 
-    def close(self) -> None:
+    def close(self, timeout: float = COMPRESSOR_STOP_TIMEOUT_SECONDS) -> None:
+        """Drain the queue and stop. Raw segments a failure or the deadline left
+        behind stay on disk for the next start's recovery; the error says so."""
+
         self.pending.put(None)
-        self.thread.join()
+        self.thread.join(timeout)
+        if self.thread.is_alive():
+            raise RuntimeError(
+                f"tape compressor did not stop within {timeout:g}s; {self.depth()} segment(s) left raw for recovery"
+            )
         if self.error is not None:
-            raise RuntimeError("one or more tape segments did not compress") from self.error
+            raise RuntimeError(f"{self.failed} tape segment(s) did not compress; last: {self.last_error}") from self.error
 
 
 class Retention:
@@ -354,6 +465,8 @@ class Retention:
         #: Bytes the last pass unlinked. A successor pass credits them: the
         #: kernel's statvfs need not show a deleted file's blocks yet.
         self.last_freed_bytes = 0
+        #: Files the last pass could not stat and so could not consider.
+        self.last_unstatable = 0
 
     def prune(self, now: float | None = None, *, free_credit: int = 0) -> list[Path]:
         """Delete what is expired, then what the disk has no room for.
@@ -382,15 +495,29 @@ class Retention:
         # The floor is what `writable()` blocks on; this is what a pass frees to.
         free_target = self.min_free_bytes + int(self.min_free_bytes * FREE_HEADROOM_FRACTION)
         self.last_freed_bytes = 0
+        self.last_unstatable = 0
         found: list[tuple[int, str, Path, int, float]] = []
+        first_unstatable: str | None = None
         for path in self.root.rglob("*.zst"):
             if path.name.endswith(".tmp"):
                 continue
             try:
                 stat = path.stat()
-            except OSError:
+            except FileNotFoundError:
+                # `market_tape pack` shipped it between the walk and the stat.
+                continue
+            except OSError as exc:
+                self.last_unstatable += 1
+                if first_unstatable is None:
+                    first_unstatable = f"{path}: {exc}"
                 continue
             found.append((stat.st_mtime_ns, str(path), path, stat.st_size, stat.st_mtime))
+        if self.last_unstatable:
+            logging.warning(
+                "tape retention could not stat %d file(s) and cannot retain them; first: %s",
+                self.last_unstatable,
+                first_unstatable,
+            )
         files = sorted(found, key=lambda item: (item[0], item[1]))
         total = sum(item[3] for item in files)
         free = shutil.disk_usage(self.root).free + free_credit
@@ -511,13 +638,21 @@ def truncate_partial_line(path: Path) -> None:
 
 
 def atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    """Publish `payload` at `path` in one rename; a second writer can never share the temporary."""
+
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
     sync_directory(path.parent)
 
 
@@ -530,10 +665,22 @@ def sync_directory(path: Path) -> None:
 
 
 def remove_empty_directories(root: Path) -> None:
+    """Drop the empty hour and symbol directories a prune leaves; a directory
+    that is not empty or is already gone is the expected case and says nothing."""
+
+    failures = 0
+    first: str | None = None
     for directory, _, _ in os.walk(root, topdown=False):
         path = Path(directory)
-        if path != root:
-            try:
-                path.rmdir()
-            except OSError:
-                pass
+        if path == root:
+            continue
+        try:
+            path.rmdir()
+        except OSError as exc:
+            if exc.errno in (errno.ENOTEMPTY, errno.ENOENT, errno.EEXIST):
+                continue
+            failures += 1
+            if first is None:
+                first = f"{path}: {exc}"
+    if failures:
+        logging.warning("could not remove %d empty tape directory(ies); first: %s", failures, first)

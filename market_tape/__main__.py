@@ -12,7 +12,9 @@ book        SOURCE --hour H --symbol S [--at NS] the rebuilt book at a moment
 
 SOURCE is a recorder root on a host, a directory of hour archives laid out
 like the Drive (`YYYY/MM/DD/<day>T<HH>Z.tar`), or `rclone:<remote:path>` to
-read the Drive itself through a local cache.
+read the Drive itself through a local cache. The rows' venue comes from the
+recorder's `status.json` or the source's name (`bybit-linear`); `--venue`
+says it when neither does. `--strict` refuses a line that does not parse.
 """
 
 from __future__ import annotations
@@ -41,34 +43,43 @@ def main(argv: list[str] | None = None) -> int:
 
     commands.add_parser("pack", help="pack finished hours and upload them", add_help=False)
 
+    def source_arguments(command: argparse.ArgumentParser) -> None:
+        command.add_argument("source")
+        command.add_argument("--cache", type=Path, default=None, help="local cache for archives read from rclone")
+        command.add_argument(
+            "--venue", default=None, help="the venue the rows belong to, when neither status.json nor the source name says"
+        )
+
+    def read_arguments(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--strict", action="store_true", help="refuse a line that does not parse instead of skipping it")
+
     hours = commands.add_parser("hours", help="list the hours a source holds")
-    hours.add_argument("source")
-    hours.add_argument("--cache", type=Path, default=None, help="local cache for archives read from rclone")
+    source_arguments(hours)
 
     rows = commands.add_parser("rows", help="print rows as JSON lines")
-    rows.add_argument("source")
+    source_arguments(rows)
+    read_arguments(rows)
     rows.add_argument("--hours", required=True, help="FROM[..TO], hours as YYYY-MM-DDTHH, TO exclusive")
     rows.add_argument("--symbols", nargs="*", default=None)
     rows.add_argument("--kinds", nargs="*", default=None)
     rows.add_argument("--limit", type=int, default=None)
-    rows.add_argument("--cache", type=Path, default=None)
 
     bars = commands.add_parser("bars", help="fixed-interval bars from trades, books, tickers, liquidations")
-    bars.add_argument("source")
+    source_arguments(bars)
+    read_arguments(bars)
     bars.add_argument("--hours", required=True)
     bars.add_argument("--interval", type=float, default=60.0, help="bar length in seconds")
     bars.add_argument("--symbols", nargs="*", default=None)
     bars.add_argument("--out", type=Path, required=True, help=".parquet or .csv")
-    bars.add_argument("--cache", type=Path, default=None)
 
     book = commands.add_parser("book", help="the rebuilt book at one moment")
-    book.add_argument("source")
+    source_arguments(book)
+    read_arguments(book)
     book.add_argument("--hour", required=True)
     book.add_argument("--symbol", required=True)
     book.add_argument("--at", type=int, default=None, help="local receive nanoseconds; default: end of the hour")
     book.add_argument("--depth", type=int, default=None, help="which book to rebuild (1, 50, 1000...); default: the first depth seen")
     book.add_argument("--levels", type=int, default=5)
-    book.add_argument("--cache", type=Path, default=None)
 
     if argv is None:
         argv = sys.argv[1:]
@@ -99,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from market_tape.load import hour_range, iter_rows, open_source
 
-    source = open_source(args.source, cache_dir=args.cache)
+    source = open_source(args.source, cache_dir=args.cache, venue=args.venue)
     if args.command == "hours":
         for hour in source.hours():
             print(hour)
@@ -108,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "rows":
         start, end = _hours_argument(args.hours)
         count = 0
-        for row in iter_rows(source, hour_range(start, end), symbols=args.symbols, kinds=args.kinds, typed=False):
+        for row in iter_rows(source, hour_range(start, end), symbols=args.symbols, kinds=args.kinds, typed=False, strict=args.strict):
             sys.stdout.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
             count += 1
             if args.limit is not None and count >= args.limit:
@@ -119,7 +130,9 @@ def main(argv: list[str] | None = None) -> int:
         from market_tape.bars import build_bars
 
         start, end = _hours_argument(args.hours)
-        frame = build_bars(iter_rows(source, hour_range(start, end), symbols=args.symbols), interval_seconds=args.interval)
+        frame = build_bars(
+            iter_rows(source, hour_range(start, end), symbols=args.symbols, strict=args.strict), interval_seconds=args.interval
+        )
         if args.out.suffix == ".csv":
             frame.write_csv(args.out)
         else:
@@ -132,7 +145,9 @@ def main(argv: list[str] | None = None) -> int:
 
         state = Book()
         depth = args.depth
-        for row in iter_rows(source, [args.hour], symbols=[args.symbol], kinds=["orderbook_snapshot", "orderbook_delta"]):
+        for row in iter_rows(
+            source, [args.hour], symbols=[args.symbol], kinds=["orderbook_snapshot", "orderbook_delta"], strict=args.strict
+        ):
             if args.at is not None and row.local_receive_ts_ns > args.at:
                 break
             if depth is None:
