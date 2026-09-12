@@ -92,6 +92,41 @@ def test_the_float_compatibility_surface_is_exactly_what_is_written_down() -> No
         )
 
 
+def test_the_engine_cannot_build_an_order_without_the_terms_it_quantized_from() -> None:
+    """The venue adapters still encode an order with no exact terms; the engine cannot produce one.
+
+    Both halves matter. The adapters' own wire-contract suite (``request_shape``,
+    ``conformance``, ``venue_registry``) is built on requests without exact
+    terms, and ``engine-wal`` has a record shape for an amendment without them,
+    so the float formatter at the venue boundary is live code with live tests.
+    What makes it unreachable from the engine is this: a symbol whose exact
+    instrument metadata the engine does not hold is refused, and the one
+    remaining path that builds an order without terms is compiled only into a
+    test binary. If that ``#[cfg(test)]`` ever comes off, a float-priced order
+    becomes reachable in a release build, and this says so.
+    """
+
+    source = (ROOT / "engine/engine-core/src/engine/intent_admission.rs").read_text(encoding="utf-8")
+
+    marker = "fn quantize_legacy_order_fixture("
+    assert marker in source, "the legacy order fixture was renamed; re-derive this contract"
+
+    # The refusal a symbol without exact metadata gets.
+    assert "EXACT_INSTRUMENT_METADATA_UNAVAILABLE" in source
+
+    # Every mention of the fixture — its definition and its one call — sits
+    # under a #[cfg(test)] on the line above it.
+    lines = source.splitlines()
+    sites = [index for index, line in enumerate(lines) if "quantize_legacy_order_fixture" in line]
+    assert len(sites) == 2, f"expected a definition and one call, found {len(sites)}"
+    for index in sites:
+        preceding = [line.strip() for line in lines[max(0, index - 3) : index]]
+        assert "#[cfg(test)]" in preceding, (
+            f"line {index + 1} builds an order without exact terms outside a test build: "
+            f"{lines[index].strip()}"
+        )
+
+
 def test_nothing_outside_the_compatibility_accessor_reaches_for_a_wire_float() -> None:
     # `legacy` was the old name and said nothing about its cost. Nothing should
     # bring it back, under that name or as a second accessor beside it.

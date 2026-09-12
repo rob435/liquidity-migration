@@ -649,10 +649,9 @@ impl VenueName {
     /// make the review happen, not to make the verdict.
     ///
     /// Five of these moved for the exact-numeric pass and the receipts stand:
-    /// `DecimalField::legacy` was renamed `compat_f64` with the same body,
-    /// and the gateways stopped binding the float an order-term helper no
-    /// longer takes. No request encoding, order type, quantity conversion or
-    /// fill interpretation changed.
+    /// `DecimalField::legacy` was renamed `compat_f64` with the same body.
+    /// No request encoding, order type, quantity conversion or fill
+    /// interpretation changed.
     pub const fn adapter_semantics_fingerprint(self) -> &'static str {
         match self {
             Self::BybitDemo | Self::BybitMainnet => Self::BYBIT_SEMANTICS,
@@ -669,10 +668,10 @@ impl VenueName {
     /// the qty=0 whole-position close, and the execution stream both funded
     /// Bybit realms' receipts were read off.
     const BYBIT_SEMANTICS: &'static str =
-        "0aefa64224df7988ba7b8a6c694f7e4f6024972a4a45d239ad7dee41fc277aab";
+        "5d738f04643f33bee300716c728251c78e55a3c0d48aae20921a0743818fe781";
     /// The USDT-M futures REST and user-stream encoding.
     const BINANCE_SEMANTICS: &'static str =
-        "ec66c82469f063ff85732e28c25b489208ce42f50c2d008751f57a4ded0671cc";
+        "cb0b8616d632676abc5fd106ff639b4e69f1328607beaf8777a701378e973556";
     /// The signed exchange actions (`order`, `batchModify`, `cancel`), the
     /// EIP-712 digest, the `cloid` scheme, and the fill and open-order reads
     /// the funded address's canary receipt was taken against.
@@ -687,7 +686,7 @@ impl VenueName {
     /// `personal.filter` frames the funded account's canary receipt was taken
     /// against.
     const MEXC_SEMANTICS: &'static str =
-        "aa1fb60f8f33fe792f8fbb2c77d567958bfe76a13f3d56ea2cb6d12bd55229a0";
+        "edfe8840b181887b9b4b89699767637c611e3d740a865b0db9ca5c2afad0d25c";
     /// The public market reads, and the refusal every write returns.
     const VARIATIONAL_SEMANTICS: &'static str =
         "a79c459e38b6768d387978c3cbb5d85af56ab5674193ca5577352a473924ac2c";

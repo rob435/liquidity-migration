@@ -515,8 +515,8 @@ impl MexcGateway {
         // The venue's field table marks `price` required, and that is wrong for
         // a market order: a client exercised against the live venue omits it
         // for the market types, and there is no price to quantize anyway.
-        if matches!(req.kind, OrderKind::Limit { .. }) {
-            body["price"] = json!(crate::order_wire::price(req)?);
+        if let OrderKind::Limit { px, .. } = req.kind {
+            body["price"] = json!(crate::order_wire::price(req, px)?);
         }
         if req.reduce_only {
             body["reduceOnly"] = json!(true);
@@ -525,8 +525,8 @@ impl MexcGateway {
         // never unprotected while a second round trip is in flight. This is an
         // order-bound stop — `set_stop` is what puts the position-level record
         // on, and its size is what tracks a position that later changes.
-        if req.stop.is_some() {
-            body["stopLossPrice"] = json!(crate::order_wire::stop(req)?);
+        if let Some(stop) = req.stop {
+            body["stopLossPrice"] = json!(crate::order_wire::stop(req, stop.trigger_px)?);
             body["lossTrend"] = json!(loss_trend.ok_or_else(|| {
                 VenueError::BadRequest("stop trigger capability is unavailable".into())
             })?);

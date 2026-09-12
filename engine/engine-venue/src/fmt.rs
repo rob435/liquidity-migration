@@ -1,15 +1,19 @@
-//! Decimal formatting for the venue scalars that are not order terms.
+//! Historical decimal formatting for requests without exact order terms.
+//! Prepared orders use `order_wire` and preserve their retained decimals.
 //!
-//! Order terms do not come through here: `order_wire` renders them from the
-//! exact decimals they were quantized from and refuses a term that has none.
-//! What is left is the handful of numbers that were never a quantized order
-//! quantity or price — a leverage setting, a position-level stop trigger on a
-//! venue whose exact terms are absent, and the price and quantity Binance
-//! reads back off its own resting order to re-send in an amendment.
+//! The engine does not send an order without them: it refuses a symbol whose
+//! exact instrument metadata it does not hold, and attaches the terms it
+//! quantized against to every request it admits
+//! (`tests/repo/test_engine_numeric_boundary.py` and
+//! `an_admitted_order_always_carries_the_terms_it_was_quantized_from`). The
+//! adapters still encode one, because their own wire-contract suite is built
+//! on requests without terms and the log has a record shape for an amendment
+//! without them — so this is the venue boundary's compatibility, not a path
+//! the engine can reach.
 
 use engine_types::VenueError;
 
-/// The fixed decimal ceiling these scalars are rendered to.
+/// The legacy request formatter's fixed decimal ceiling.
 const MAX_DECIMALS: usize = 10;
 
 /// Render a positive, finite number as a plain decimal string.

@@ -65,6 +65,11 @@ async fn queued_repricings_reach_bybit_before_any_ack_and_keep_their_results() {
                 .dispatch_amend(
                     SymbolId(0),
                     format!("reprice-{index}"),
+                    // No exact terms: the log has a record shape for an
+                    // amendment without them (`amend_sent_v2`), so this is a
+                    // state the wire still has to encode. What this test is
+                    // about is the order ten queued reprices reach the venue
+                    // in, not how their prices are spelled.
                     AmendSpec {
                         px: Some(100.0 + index as f64),
                         qty: None,
