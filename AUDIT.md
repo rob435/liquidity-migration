@@ -232,14 +232,14 @@ Both passes ran `scripts/dev.sh check` whole. The second pass's numbers:
 
 | Gate | Result |
 |---|---|
-| `.venv/bin/python -m pytest -q` | 1,999 passed, 1 skipped |
+| `.venv/bin/python -m pytest -q` | 2,000 passed, 1 skipped |
 | `ruff check liquidity_migration market_tape scripts tests deploy` | pass |
 | `mypy` (the `scripts/dev.sh types` target list) | pass |
 | `shellcheck -S warning` over every tracked shell file | pass |
 | `scripts/devtools/repo_doctor.py` | `ready` |
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --workspace --all-targets -- -D warnings` | pass |
-| `cargo test --workspace` | PENDING |
+| `cargo test --workspace --all-targets` | 2,717 passed, 0 failed, 9 ignored across 36 suites |
 
 Each new test was proved to fail with its fix reverted, and the two claims
 that rest on a number were measured rather than argued: the cover residual an
