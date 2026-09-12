@@ -836,3 +836,41 @@ class TestV6DepthExponent:
         out = score_carry_hold(panel, cfg)
         assert out["config_id"] == "lane2_carry_hold_v7"
         assert out["days"] > 0
+
+
+def test_the_deployed_carry_rule_can_be_traced_back_to_its_first_registered_ancestor() -> None:
+    """Every `descends_from` link from the deployed config resolves to a file.
+
+    The older configs are not compatibility cases kept in case something still
+    reads them. They are the registered lineage of the rule that trades: each
+    one states its own evidence against the one before it, and `v7`'s note only
+    means anything while the configs it compares itself to are still here.
+    Deleting one severs the chain at that point, which this names.
+    """
+
+    import json
+    import re
+
+    deployed = set()
+    for unit in sorted((CONFIG_DIR.parent / "deploy" / "systemd").glob("*signal-worker*.service")):
+        deployed.update(re.findall(r"lane2_carry_hold_v\d+", unit.read_text(encoding="utf-8")))
+    assert deployed, "no deployed unit names a carry config"
+
+    def config(name: str) -> dict:
+        path = CONFIG_DIR / f"{name}.json"
+        assert path.is_file(), f"{name} is named by the lineage but is not in configs/"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    for start in sorted(deployed):
+        seen: list[str] = []
+        name: str | None = start
+        while name is not None:
+            assert name not in seen, f"carry lineage loops at {name}: {' -> '.join(seen)}"
+            seen.append(name)
+            payload = config(name)
+            assert payload["config_id"] == name, f"{name}.json calls itself {payload['config_id']!r}"
+            name = payload.get("descends_from")
+        assert seen[-1] == "lane2_carry_hold_v1", (
+            f"the lineage from {start} ends at {seen[-1]}, not at the first registered rule"
+        )
+        assert len(seen) >= 2, f"{start} claims no ancestry at all"

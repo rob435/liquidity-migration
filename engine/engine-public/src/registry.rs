@@ -647,6 +647,12 @@ impl VenueName {
     /// derived from this pin: a comment edit under `venues/bybit/` would
     /// otherwise demote `bybit_mainnet` to `live-canary`. The pin's job is to
     /// make the review happen, not to make the verdict.
+    ///
+    /// Five of these moved for the exact-numeric pass and the receipts stand:
+    /// `DecimalField::legacy` was renamed `compat_f64` with the same body,
+    /// and the gateways stopped binding the float an order-term helper no
+    /// longer takes. No request encoding, order type, quantity conversion or
+    /// fill interpretation changed.
     pub const fn adapter_semantics_fingerprint(self) -> &'static str {
         match self {
             Self::BybitDemo | Self::BybitMainnet => Self::BYBIT_SEMANTICS,
@@ -663,25 +669,25 @@ impl VenueName {
     /// the qty=0 whole-position close, and the execution stream both funded
     /// Bybit realms' receipts were read off.
     const BYBIT_SEMANTICS: &'static str =
-        "4fa5f63f502924cddbf5f94ddddd1d37c6c9d69321fcf9a32cc82c3358f47988";
+        "0aefa64224df7988ba7b8a6c694f7e4f6024972a4a45d239ad7dee41fc277aab";
     /// The USDT-M futures REST and user-stream encoding.
     const BINANCE_SEMANTICS: &'static str =
-        "2cc4bc87617eb2bee1ed2d185402552510304d75ecd7024de0e1ba6584044b02";
+        "ec66c82469f063ff85732e28c25b489208ce42f50c2d008751f57a4ded0671cc";
     /// The signed exchange actions (`order`, `batchModify`, `cancel`), the
     /// EIP-712 digest, the `cloid` scheme, and the fill and open-order reads
     /// the funded address's canary receipt was taken against.
     const HYPERLIQUID_SEMANTICS: &'static str =
-        "1639dd4e14b45214db68450998e3f29460b63d80d738f8ff08fb752372c08929";
+        "bd11739c0af3907f53c2d8e789e5597bb7c2832a76f06f4db88c862725012714";
     /// The transaction encoding and the account/history resync, `crypto/`
     /// included.
     const LIGHTER_SEMANTICS: &'static str =
-        "7c94f6fc2582c7620dfc7c21b7144db568be0818be9d6613f0f6fbd6b51633e1";
+        "f62688177bedae64248aa02151485c83ffe39d19fc83af340cd1b0cdb398483b";
     /// The contract-API order encoding, the contract-count quantity
     /// conversion, the position-bound stop record, and the private login and
     /// `personal.filter` frames the funded account's canary receipt was taken
     /// against.
     const MEXC_SEMANTICS: &'static str =
-        "4a74c2f60dfaba4f2872fcaf8349c75bba3cb7ec612f73f8e295c8c2cc441454";
+        "aa1fb60f8f33fe792f8fbb2c77d567958bfe76a13f3d56ea2cb6d12bd55229a0";
     /// The public market reads, and the refusal every write returns.
     const VARIATIONAL_SEMANTICS: &'static str =
         "a79c459e38b6768d387978c3cbb5d85af56ab5674193ca5577352a473924ac2c";

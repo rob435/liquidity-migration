@@ -1948,7 +1948,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
                                 _ => None,
                             });
                     if let Some((symbol, qty)) = released {
-                        self.books.covers.release_newest(sid, symbol, qty);
+                        let steps = crate::covers::steps_of(&self.instrument_specs);
+                        self.books.covers.release_newest(sid, symbol, qty, &steps);
                     }
                 }
                 // Charged to nobody on purpose. `reconcile` is what notices

@@ -701,6 +701,43 @@ mod tests {
         }
     }
     #[test]
+    fn a_book_float_recovers_the_decimal_the_venue_sent() {
+        // What a float-shaped market book costs the exact domain, measured
+        // rather than assumed. `strategy_decimal` parses `f64::to_string()`,
+        // which is Rust's shortest round-trip form, so a venue decimal that
+        // fits binary64's fifteen significant digits comes back as itself —
+        // the reason `BookLevel` staying `f64` leaks no rounding into an
+        // order term. `Exact::from_legacy_f64` is the other job: what a past
+        // binary64 computation actually held, dust and all.
+        for text in [
+            "95900.1",
+            "0.001",
+            "0.00000123",
+            "1.0000000000001",
+            "123456.789",
+            "0.1",
+            "2.675",
+        ] {
+            let venue = Exact::parse_decimal(text).unwrap();
+            let through_a_float = strategy_decimal(venue.to_f64().unwrap()).unwrap();
+            assert_eq!(
+                through_a_float, venue,
+                "{text} did not survive the book's float"
+            );
+        }
+
+        // And the contrast, so the two are not confused: the binary value of
+        // 0.1 is not the decimal 0.1, which is why one of these is the bridge
+        // from a book and the other is not.
+        let binary = Exact::from_legacy_f64(0.1).unwrap();
+        assert_ne!(binary, Exact::parse_decimal("0.1").unwrap());
+        assert_eq!(
+            strategy_decimal(0.1).unwrap(),
+            Exact::parse_decimal("0.1").unwrap()
+        );
+    }
+
+    #[test]
     fn canonical_order_and_amend_prices_keep_sub_projection_ticks() {
         let mut instrument = spec();
         instrument.tick_size = Some(d("0.000000000000000001"));

@@ -2197,6 +2197,58 @@ fn a_snapshot_of_perpetuals_with_zero_delivery_clocks_passes_source_validation()
         .expect("the venue's own list is valid input");
 }
 
+/// The venue's own rows, as the recorder captured them from Bybit, through the
+/// same wire parse and normalisation the lane uses.
+///
+/// The fixture is `tests/fixtures/bybit_instruments_info.json`, the four rows
+/// of `tests/market_tape/fixtures/host/bybit-linear/2026-08-30/00/_meta/`
+/// re-wrapped in the `instruments-info` envelope the lane reads; the row
+/// objects are the venue's own, field for field, nothing hand-written. That is
+/// what makes this a schema check: a field the venue renames or re-types
+/// breaks the parse here, in ordinary CI, rather than only in the whole-
+/// catalogue run below that needs a live capture nobody takes on a schedule.
+#[test]
+fn the_venues_captured_instrument_rows_normalize() {
+    let raw = include_str!("../../tests/fixtures/bybit_instruments_info.json");
+    let payload: Value = serde_json::from_str(raw).expect("the captured envelope is JSON");
+    let rows = payload["result"]["list"]
+        .as_array()
+        .expect("result.list")
+        .iter()
+        .map(|value| crate::venue::bybit::instrument_wire(value).expect("wire row"))
+        .collect::<Vec<_>>();
+    assert!(!rows.is_empty(), "the capture holds no rows");
+
+    let observed = 1_788_436_000_000;
+    let (kept, rejected) =
+        crate::normalize::normalize_instruments_reporting(observed, observed + 1, &rows)
+            .expect("whole list");
+    assert!(
+        rejected.rows.is_empty(),
+        "the venue's own rows were refused: {:?}",
+        rejected.summary("instrument")
+    );
+    assert_eq!(kept.len(), rows.len(), "a captured row normalised away");
+
+    // The grids come off the venue's own filters rather than a default, which
+    // is the half of the parse a renamed field would silently empty.
+    let btc = kept
+        .iter()
+        .find(|row| row.symbol == "BTCUSDT")
+        .expect("the capture holds BTCUSDT");
+    for (name, value) in [
+        ("tick_size", btc.tick_size),
+        ("qty_step", btc.qty_step),
+        ("min_order_qty", btc.min_order_qty),
+    ] {
+        assert!(
+            value.is_some_and(|value| value > 0.0),
+            "{name} came back as {value:?}, so the venue's filter was not read"
+        );
+    }
+    assert!(btc.funding_interval_min.is_some_and(|minutes| minutes > 0));
+}
+
 /// The venue's own lists, when `LM_BYBIT_INSTRUMENTS_JSON` names them
 /// (colon-separated `instruments-info` responses), through the same wire
 /// parse and normalisation the lane uses. Run by hand:

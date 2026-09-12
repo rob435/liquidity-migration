@@ -36,8 +36,8 @@ pub(crate) fn decode(raw: &str) -> Result<(f64, f64, Option<f64>, ExecutionAmoun
         None
     };
     Ok((
-        row.l.legacy("l")?,
-        row.price.legacy("L")?,
+        row.l.compat_f64("l")?,
+        row.price.compat_f64("L")?,
         legacy_fee,
         ExecutionAmounts {
             // This adapter accepts only the USDT single-asset account mode.

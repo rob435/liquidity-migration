@@ -16,6 +16,7 @@ from typing import Iterator
 
 import polars as pl
 
+from liquidity_migration.core.durable_file import durable_atomic_write, fsync_directory
 from liquidity_migration.core.symbol_codec import encode_symbol_partition
 
 logger = logging.getLogger(__name__)
@@ -782,13 +783,9 @@ def _remove_retired_generation(retired: Path) -> None:
 
 
 def _fsync_dataset_parent(path: Path) -> None:
-    descriptor = os.open(
-        str(path.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
-    )
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    """The generation swap's new name, made durable by the shared primitive."""
+
+    fsync_directory(path.parent, target=path, label="dataset generation")
 
 
 def _write_dataset_unlocked(
@@ -1037,28 +1034,9 @@ def _write_part(df: pl.DataFrame, path: Path, *, dataset: str, append: bool) -> 
     sort_cols = [col for col in ("symbol", "ts_ms") if col in output.columns]
     if sort_cols:
         output = output.sort(sort_cols)
-    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-    try:
-        output.write_parquet(temp_path)
-        # fsync before the rename: the rename is atomic against a process crash,
-        # but a power loss in the page-cache window can surface a truncated part
-        # file, and this read-modify-rewrite file is the bucket's only copy.
-        fd = os.open(temp_path, os.O_RDWR)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        temp_path.replace(path)
-        # The file fsync makes the contents durable; on POSIX the rename itself
-        # is only durable after an fsync of the parent directory. Failures are
-        # swallowed since content durability is already established.
-        try:
-            dir_fd = os.open(str(path.parent), os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except OSError:
-            pass
-    finally:
-        temp_path.unlink(missing_ok=True)
+    # One durability implementation for the whole repository: the temporary
+    # name, the fsync before the rename, the rename, and the parent-directory
+    # fsync that makes the new name survive a power loss. This read-modify-
+    # rewrite file is the bucket's only copy, so a truncated part file
+    # surfacing in the page-cache window would be the loss of the bucket.
+    durable_atomic_write(path, output.write_parquet, label="dataset part")

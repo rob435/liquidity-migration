@@ -97,7 +97,7 @@ impl HistoryReply {
                 .value
                 .to_f64()
                 .map_err(|e| VenueError::BadReply(e.to_string()))?;
-            let px = row.price.legacy("price")?;
+            let px = row.price.compat_f64("price")?;
             let fee = row.fee.optional("fee")?;
             let legacy_fee = fee
                 .as_ref()

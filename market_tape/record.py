@@ -635,7 +635,9 @@ class Recorder:
         self.writer = SegmentWriter(
             self.root, max_bytes=int(storage.segment_max_mb * 1024**2), fsync_every=storage.fsync_every_records
         )
-        self.compressor = Compressor(self.root, self.manifest)
+        self.compressor = Compressor(
+            self.root, self.manifest, backlog_max_bytes=int(storage.compress_backlog_max_mb * 1024**2)
+        )
         self.retention = Retention(
             self.root,
             self.manifest,
@@ -1432,7 +1434,7 @@ class Recorder:
         atomic_json(self.root / "status.json", payload)
         logging.info(
             "capture status frames=%d rows=%d dropped=%d disk_dropped=%d queued=%d disk_blocked=%s "
-            "compress_pending=%d compress_failed=%d projected_gb=%s tiers=%s",
+            "compress_pending=%d compress_failed=%d compress_deferred=%d projected_gb=%s tiers=%s",
             self.received_frames,
             self.written_rows,
             self.dropped_frames,
@@ -1441,6 +1443,7 @@ class Recorder:
             self.disk_blocked,
             compressor["pending"],
             compressor["failed"],
+            compressor["deferred"],
             budget["projected_month_gb"],
             " ".join(f"{name}:{len(symbols)}" for name, symbols in self.tier_symbols.items()),
         )

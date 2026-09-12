@@ -113,8 +113,8 @@ struct FundingRow {
 /// and there is no venue-wide cycle a guess could come from.
 fn read_funding_row(raw: &str) -> Option<(String, FundingSchedule)> {
     let row: FundingRow = crate::numeric_wire::decode_object(raw).ok()?;
-    let hours = row.collect_cycle.legacy("collectCycle").ok()?;
-    let next_settle = row.next_settle_time.legacy("nextSettleTime").ok()?;
+    let hours = row.collect_cycle.compat_f64("collectCycle").ok()?;
+    let next_settle = row.next_settle_time.compat_f64("nextSettleTime").ok()?;
     if !hours.is_finite() || hours <= 0.0 || !next_settle.is_finite() || next_settle <= 0.0 {
         return None;
     }

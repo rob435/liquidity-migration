@@ -322,22 +322,37 @@ class Compressor:
     on to the next segment, because one bad file must not stop the tape. The
     recorder publishes `status()` so the watchdog sees a compressor that is
     failing or falling behind while the recorder's heartbeat is still fresh.
+
+    The work list is bounded by `backlog_max_bytes` of raw segment, not by a
+    count of segments: what a backlog costs is disk, and segments differ in
+    size. Above the ceiling a closed segment is **deferred** — left as
+    `.jsonl` exactly where it is, counted on `deferred`, and picked up by the
+    next start's recovery. Deferring rather than blocking is what keeps the
+    ceiling honest: `submit` is called from the frame loop, so a blocking put
+    would stall the socket read and lose rows the venue is still sending,
+    whereas a deferred segment has already been written and fsynced and loses
+    nothing at all.
     """
 
-    def __init__(self, root: Path, manifest: Manifest) -> None:
+    def __init__(self, root: Path, manifest: Manifest, backlog_max_bytes: int = 0) -> None:
         self.root = root
         self.manifest = manifest
+        self.backlog_max_bytes = max(0, int(backlog_max_bytes))
         self.pending: queue.Queue[ClosedSegment | None] = queue.Queue()
         self.thread = threading.Thread(target=self._run, name="tape-compressor", daemon=True)
         self.error: BaseException | None = None
         self.failed = 0
         self.compressed = 0
+        self.deferred = 0
         self.last_error: str | None = None
         self.last_error_ns = 0
+        self.last_deferred_ns = 0
         self.current: ClosedSegment | None = None
         self.current_since_ns = 0
         self._submitted = 0
         self._taken = 0
+        self._queued_bytes = 0
+        self._done_bytes = 0
 
     def start(self) -> None:
         if shutil.which("zstd") is None:
@@ -345,22 +360,56 @@ class Compressor:
         self._recover()
         self.thread.start()
 
-    def submit(self, segment: ClosedSegment) -> None:
+    def submit(self, segment: ClosedSegment) -> bool:
+        """Queue a closed segment, or defer it when the backlog is at its ceiling.
+
+        `False` means deferred: the segment stays raw on disk and the next
+        start's recovery compresses it. Nothing is lost either way, so the
+        caller has no failure to handle — the return value is for tests and
+        for the recorder's own accounting.
+        """
+
+        try:
+            size = segment.path.stat().st_size
+        except OSError:
+            # Gone or unreadable between closing and queueing. The worker
+            # reports what it finds; the ceiling just cannot count this one.
+            size = 0
+        if self.backlog_max_bytes and self.backlog_bytes() + size > self.backlog_max_bytes:
+            self.deferred += 1
+            self.last_deferred_ns = time.time_ns()
+            logging.warning(
+                "compression backlog is at its %.1f MiB ceiling: leaving %s raw for recovery",
+                self.backlog_max_bytes / 1024 / 1024,
+                segment.path,
+            )
+            return False
         self._submitted += 1
+        self._queued_bytes += size
         self.pending.put(segment)
+        return True
 
     def depth(self) -> int:
         """Segments waiting, the one being compressed included."""
 
         return self._submitted - self._taken
 
+    def backlog_bytes(self) -> int:
+        """Raw bytes waiting, the segment being compressed included."""
+
+        return max(0, self._queued_bytes - self._done_bytes)
+
     def status(self) -> dict[str, Any]:
         return {
             "pending": self.depth(),
+            "pending_bytes": self.backlog_bytes(),
+            "backlog_max_bytes": self.backlog_max_bytes or None,
             "compressed": self.compressed,
             "failed": self.failed,
+            "deferred": self.deferred,
             "last_error": self.last_error,
             "last_error_ns": self.last_error_ns or None,
+            "last_deferred_ns": self.last_deferred_ns or None,
             "alive": self.thread.is_alive(),
         }
 
@@ -408,6 +457,10 @@ class Compressor:
             self.current = segment
             self.current_since_ns = time.time_ns()
             try:
+                size = segment.path.stat().st_size
+            except OSError:
+                size = 0
+            try:
                 self._compress(segment)
                 self.compressed += 1
             except BaseException as exc:  # noqa: BLE001 - surfaced through status() and close()
@@ -419,6 +472,9 @@ class Compressor:
             finally:
                 self.current = None
                 self._taken += 1
+                # Off the backlog either way: a failed segment is left raw for
+                # recovery, so it is no longer work this process will do.
+                self._done_bytes += size
 
     def _compress(self, segment: ClosedSegment) -> None:
         output = segment.path.with_suffix(segment.path.suffix + ".zst")

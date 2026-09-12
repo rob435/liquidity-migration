@@ -61,8 +61,8 @@ impl ExecutionRow {
         }
         let quantity = self.exec_qty.required("execQty")?;
         let price = self.exec_price.required("execPrice")?;
-        let qty = self.exec_qty.legacy("execQty")?;
-        let px = self.exec_price.legacy("execPrice")?;
+        let qty = self.exec_qty.compat_f64("execQty")?;
+        let px = self.exec_price.compat_f64("execPrice")?;
         let venue_ts_ms = self.exec_time.required("execTime")?;
         if qty <= 0.0 || px <= 0.0 || venue_ts_ms <= 0 {
             return Err(VenueError::BadReply(format!(

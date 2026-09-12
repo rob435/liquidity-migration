@@ -422,10 +422,10 @@ impl BinanceGateway {
         ];
         match req.kind {
             OrderKind::Market => params.push(("type", "MARKET".to_string())),
-            OrderKind::Limit { px, tif } => {
+            OrderKind::Limit { tif, .. } => {
                 params.push(("type", "LIMIT".to_string()));
                 params.push(("timeInForce", Self::venue_tif(tif).to_string()));
-                params.push(("price", crate::order_wire::price(req, px)?));
+                params.push(("price", crate::order_wire::price(req)?));
             }
         }
         params.push(("quantity", crate::order_wire::quantity(req)?));
@@ -782,12 +782,12 @@ impl VenueGateway for BinanceGateway {
             Self::validate_market_qty(&name, req.qty, qty_rule)?;
         }
         let stop_plan = match req.stop.filter(|_| !req.reduce_only) {
-            Some(stop) => {
+            Some(_) => {
                 let stop_id = Self::attached_stop_id(&req.client_order_id);
                 let params = Self::stop_params_text(
                     &name,
                     req.side,
-                    crate::order_wire::stop(req, stop.trigger_px)?,
+                    crate::order_wire::stop(req)?,
                     stop_id.clone(),
                 )?;
                 Some((stop_id, params))
@@ -1282,7 +1282,9 @@ mod tests {
     }
 
     fn request(kind: OrderKind, reduce_only: bool) -> OrderRequest {
-        OrderRequest {
+        use engine_types::numeric::Exact;
+        use engine_types::order_terms::{ExactOrderTerms, OrderInputPolicy};
+        let mut request = OrderRequest {
             client_order_id: "eng-1700000000000-1".to_string(),
             strategy: StrategyId(0),
             symbol: SymbolId(0),
@@ -1296,7 +1298,26 @@ mod tests {
             exact_terms: None,
             sleeve_effect: None,
             close_position: false,
-        }
+        };
+        // The terms the engine quantized against ride with every request it
+        // admits, so a fixture that leaves them off is not a request this
+        // adapter can be asked to encode.
+        let terms = ExactOrderTerms {
+            quantity: Exact::parse_decimal("0.004").unwrap(),
+            limit_price: match kind {
+                OrderKind::Limit { px, .. } => Some(Exact::parse_decimal(&px.to_string()).unwrap()),
+                OrderKind::Market => None,
+            },
+            // With no sleeve effect `sleeve_stop()` reads the request's own
+            // stop, so both terms name it or the projection does not check out.
+            stop_trigger_price: Some(Exact::parse_decimal("75000.5").unwrap()),
+            physical_stop_trigger_price: Some(Exact::parse_decimal("75000.5").unwrap()),
+            input_policy: OrderInputPolicy::StrategyShortestDecimal,
+        };
+        terms
+            .apply_projection(&mut request)
+            .expect("the fixture's terms project onto the fixture");
+        request
     }
 
     fn value_of<'a>(params: &'a [(&'static str, String)], key: &str) -> Option<&'a str> {

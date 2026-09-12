@@ -26,6 +26,11 @@ Non-operational developer commands:
                          shell script
   types [MYPY_ARGS...]   run package and supported developer-script mypy
   test [PYTEST_ARGS...]  run pytest (-q by default)
+  quick [--staged]       run only the static gates the changed files need:
+                         Ruff, ShellCheck and mypy over the changed Python and
+                         shell, rustfmt and Clippy over the touched crates, and
+                         any changed test files. NOT the gate: it names every
+                         suite it did not run, and `check` is what a push needs
   prune                  delete the workspace crates' debug build artifacts
                          (cargo clean -p per member; dependency builds stay)
   check [PYTEST_ARGS...] run doctor, Ruff, ShellCheck, mypy, pytest, and the
@@ -151,6 +156,32 @@ resolve_pytest_basetemp() {
   printf '%s\n' "$candidate"
 }
 
+# Files this working tree changes against HEAD, tracked and untracked alike.
+# `quick` reads them; nothing else does, because every other gate is whole-tree
+# on purpose.
+changed_files() {
+  {
+    git diff --name-only --diff-filter=ACMR HEAD -- 2>/dev/null || true
+    if [[ "${1:-}" != "--staged" ]]; then
+      git ls-files --others --exclude-standard
+    fi
+  } | sort -u
+}
+
+# The workspace crates a set of paths touches, as -p arguments.
+crates_touched() {
+  local path member
+  local -a names=()
+  while IFS= read -r path; do
+    [[ "$path" == engine/* ]] || continue
+    member="${path#engine/}"
+    member="${member%%/*}"
+    [[ -f "$ROOT_DIR/engine/$member/Cargo.toml" ]] || continue
+    names+=("$member")
+  done
+  printf '%s\n' "${names[@]+"${names[@]}"}" | sort -u
+}
+
 command="${1:-help}"
 if [[ "$#" -gt 0 ]]; then
   shift
@@ -174,6 +205,93 @@ case "$command" in
     ;;
   test)
     exec "$PYTHON_BIN" -m pytest -q "$@"
+    ;;
+  quick)
+    # Deliberately not `check`. `check` promises that everything passed; this
+    # promises only that what changed passed the static gates, and says so in
+    # its own last line. A push still needs `check`.
+    mapfile -t changed < <(changed_files "${1:-}")
+    if [[ "${#changed[@]}" -eq 0 ]]; then
+      echo "[dev] quick: nothing changed against HEAD"
+      exit 0
+    fi
+    python_files=()
+    shell_files=()
+    rust_files=()
+    test_files=()
+    for path in "${changed[@]}"; do
+      [[ -f "$path" ]] || continue
+      case "$path" in
+        tests/*.py) test_files+=("$path"); python_files+=("$path") ;;
+        *.py) python_files+=("$path") ;;
+        *.sh|*.command|scripts/git-hooks/*) shell_files+=("$path") ;;
+        engine/*.rs|engine/*/Cargo.toml) rust_files+=("$path") ;;
+      esac
+    done
+    ran=()
+    not_run=(pytest)
+    if [[ "${#python_files[@]}" -gt 0 ]]; then
+      echo "[dev] ruff (${#python_files[@]} changed)"
+      "$PYTHON_BIN" -m ruff check "${python_files[@]}"
+      ran+=(ruff)
+      # mypy is configured per target root, so the changed file is checked in
+      # the module it belongs to rather than as a loose script.
+      mypy_files=()
+      for path in "${python_files[@]}"; do
+        case "$path" in
+          liquidity_migration/*|market_tape/*) mypy_files+=("$path") ;;
+        esac
+      done
+      if [[ "${#mypy_files[@]}" -gt 0 ]]; then
+        echo "[dev] mypy (${#mypy_files[@]} changed)"
+        "$PYTHON_BIN" -m mypy "${mypy_files[@]}"
+        ran+=(mypy)
+      fi
+    fi
+    if [[ "${#shell_files[@]}" -gt 0 ]]; then
+      if command -v shellcheck >/dev/null 2>&1; then
+        echo "[dev] shellcheck (${#shell_files[@]} changed)"
+        shellcheck -S warning "${shell_files[@]}"
+        ran+=(shellcheck)
+      else
+        not_run+=("shellcheck (not installed)")
+      fi
+    fi
+    if [[ "${#test_files[@]}" -gt 0 ]]; then
+      echo "[dev] pytest (${#test_files[@]} changed test files)"
+      "$PYTHON_BIN" -m pytest -q "${test_files[@]}"
+      ran+=("pytest (changed files only)")
+      not_run=("pytest (every test file this change did not touch)")
+    fi
+    if [[ "${#rust_files[@]}" -gt 0 ]]; then
+      if ! command -v cargo >/dev/null 2>&1; then
+        not_run+=("cargo (no toolchain)")
+      else
+        use_rustup_cargo
+        mapfile -t crates < <(printf '%s\n' "${rust_files[@]}" | crates_touched)
+        crate_args=()
+        for member in "${crates[@]}"; do
+          [[ -n "$member" ]] && crate_args+=(-p "$member")
+        done
+        echo "[dev] cargo fmt"
+        (cd "$ROOT_DIR/engine" && cargo fmt --all -- --check)
+        ran+=("cargo fmt")
+        if [[ "${#crate_args[@]}" -gt 0 ]]; then
+          echo "[dev] cargo clippy ${crates[*]}"
+          (cd "$ROOT_DIR/engine" && cargo clippy "${crate_args[@]}" --all-targets --quiet -- -D warnings)
+          echo "[dev] cargo test ${crates[*]}"
+          (cd "$ROOT_DIR/engine" && cargo test "${crate_args[@]}" --quiet)
+          ran+=("cargo clippy ${crates[*]}" "cargo test ${crates[*]}")
+          not_run+=("cargo test for every other crate")
+        fi
+      fi
+    fi
+    if [[ "${#ran[@]}" -eq 0 ]]; then
+      echo "[dev] quick: nothing changed that these gates cover"
+      exit 0
+    fi
+    echo "[dev] quick complete; ran: $(join_comma "${ran[@]}")"
+    echo "[dev] quick is NOT the gate. Not run: $(join_comma "${not_run[@]}"). Run scripts/dev.sh check before a push."
     ;;
   prune)
     if ! command -v cargo >/dev/null 2>&1; then

@@ -402,8 +402,8 @@ fn read_row(raw: &str, metadata_version: u8) -> Option<(Symbol, Contract)> {
     if row.settle_coin != row.quote_coin {
         return None;
     }
-    let contract_size = row.contract_size.legacy("contractSize").ok()?;
-    let price_unit = row.price_unit.legacy("priceUnit").ok()?;
+    let contract_size = row.contract_size.compat_f64("contractSize").ok()?;
+    let price_unit = row.price_unit.compat_f64("priceUnit").ok()?;
     if contract_size <= 0.0 || price_unit <= 0.0 {
         return None;
     }
@@ -424,7 +424,7 @@ fn read_row(raw: &str, metadata_version: u8) -> Option<(Symbol, Contract)> {
             number.value.to_f64().ok()?;
         }
     }
-    let max_vol = row.max_vol.legacy("maxVol").unwrap_or(f64::MAX);
+    let max_vol = row.max_vol.compat_f64("maxVol").unwrap_or(f64::MAX);
     // A leverage the venue did not send is a fact about the row; one it sent
     // malformed is a row this table cannot vouch for, so the row is refused
     // rather than read as absent and defaulted.
@@ -483,9 +483,12 @@ fn read_row(raw: &str, metadata_version: u8) -> Option<(Symbol, Contract)> {
             exact_spec,
             settlement_asset: engine_types::numeric::AssetId::Named(row.settle_coin),
             price_unit,
-            min_vol: row.min_vol.legacy("minVol").unwrap_or(1.0),
+            min_vol: row.min_vol.compat_f64("minVol").unwrap_or(1.0),
             max_vol,
-            limit_max_vol: row.limit_max_vol.legacy("limitMaxVol").unwrap_or(max_vol),
+            limit_max_vol: row
+                .limit_max_vol
+                .compat_f64("limitMaxVol")
+                .unwrap_or(max_vol),
             max_leverage: max_leverage.unwrap_or(1.0),
             api_allowed: row.api_allowed.unwrap_or(false),
             execution: ExecutionCapabilities {

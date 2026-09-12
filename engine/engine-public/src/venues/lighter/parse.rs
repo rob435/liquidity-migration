@@ -130,8 +130,6 @@ pub fn parse_markets_raw(raw: &str) -> Result<Vec<Market>, VenueError> {
             })?,
             size_decimals,
             price_decimals,
-            min_base_amount: row.min_base_amount.legacy("min_base_amount")?,
-            min_quote_amount: row.min_quote_amount.legacy("min_quote_amount")?,
             exact_spec: Some(spec),
         });
     }

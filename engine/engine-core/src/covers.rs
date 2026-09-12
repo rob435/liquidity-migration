@@ -32,6 +32,9 @@
 //!   Covers are booked at the send and a refusal happens before it, so the
 //!   refused intent has no cover — and releasing "the newest" here would free
 //!   a live cover still bridging an earlier fill.
+//! - **A remainder under the symbol's own dust floor is dropped**, because
+//!   the venue cannot hold an order that small and float subtraction leaves
+//!   dust in proportion to the numbers it worked on. See [`dust_floor`].
 //!
 //! Covers are deliberately not rebuilt from the log at boot: boot compares
 //! the log against the venue directly, which is a better answer than a memory
@@ -39,8 +42,61 @@
 
 use engine_types::{AccountView, Side, StrategyId, SymbolId};
 
-/// Below this a cover record is bookkeeping noise, not exposure.
-const QTY_EPS: f64 = 1e-12;
+/// How many ULPs of the size a cover was **booked at** may be subtraction
+/// dust. `sent - eaten` is one float subtraction per absorbed reading, each
+/// costing at most half an ULP of the size it works on, so a budget of 64
+/// covers a cover paid down over more than a hundred readings — far more than
+/// one lives for at a reading every few seconds.
+///
+/// The booked size, not the current remainder: the error a record carries was
+/// made at the magnitudes it has already been, and a threshold that shrinks
+/// with the remainder would fall below the dust that produced it.
+const DUST_ULPS: f64 = 64.0;
+
+/// The quantity below which a leftover cover is arithmetic, not exposure.
+///
+/// Two scales decide it and neither is a constant. The venue refuses any
+/// quantity finer than the instrument's step, so nothing under half a step
+/// can be an order that exists; and float subtraction leaves dust in
+/// proportion to the numbers it worked on, so a residual under a few ULPs of
+/// the size the cover was booked at is indistinguishable from zero. The
+/// threshold is whichever is larger.
+///
+/// An absolute epsilon is neither. At a quantity of 1e6 — an ordinary
+/// contract count on a venue that prices in whole contracts — the
+/// subtraction's own dust is already about 1e-10, so a fully absorbed cover
+/// kept a residual above any fixed 1e-12 floor, never cleared, and left
+/// `in_flight` reporting a position that had long since been shown.
+fn dust_floor(step: Option<f64>, booked: f64) -> f64 {
+    let resolution = DUST_ULPS * booked.abs().max(f64::MIN_POSITIVE) * f64::EPSILON;
+    match step.filter(|step| step.is_finite() && *step > 0.0) {
+        Some(step) => (step / 2.0).max(resolution),
+        None => resolution,
+    }
+}
+
+/// What one symbol's quantity step is, for the book's dust rule. `None` for
+/// a symbol whose instrument metadata has not arrived: the reading is still
+/// the fact, so the cover is judged on float resolution alone.
+pub type QuantitySteps<'a> = &'a dyn Fn(SymbolId) -> Option<f64>;
+
+/// The lookup [`CoverBook::absorb`] and [`CoverBook::release_newest`] take,
+/// over the engine's instrument table. A symbol whose limit and market grids
+/// differ yields the finer of the two, so the threshold never erases a
+/// quantity that is a legal order on either.
+pub fn steps_of(
+    specs: &std::collections::BTreeMap<SymbolId, engine_types::numeric::ExactInstrumentSpec>,
+) -> impl Fn(SymbolId) -> Option<f64> + '_ {
+    move |symbol| {
+        let spec = specs.get(&symbol)?;
+        [&spec.qty_step, &spec.market_qty_step]
+            .into_iter()
+            .flatten()
+            .filter_map(|step| step.to_f64().ok())
+            .filter(|step| step.is_finite() && *step > 0.0)
+            .min_by(f64::total_cmp)
+    }
+}
 
 /// One send the reading has not caught up with, and the reading it went out
 /// against. When the reading moves off `view_at_send` it has taken that much
@@ -52,6 +108,10 @@ struct Cover {
     view_at_send: f64,
     /// Signed quantity still covered. Positive is long.
     sent: f64,
+    /// What `sent` started at, unsigned. Only the dust rule reads it: the
+    /// arithmetic error a shrinking record carries was made at the sizes it
+    /// has already been, not at the size that is left.
+    booked: f64,
     reduce_only: bool,
 }
 
@@ -121,6 +181,7 @@ impl CoverBook {
             symbol,
             view_at_send: view_signed(account, symbol),
             sent,
+            booked: sent.abs(),
             reduce_only,
         });
     }
@@ -157,7 +218,13 @@ impl CoverBook {
     /// a reject, the unfilled remainder on a cancel. It comes off the newest
     /// cover, because that is the send the news is about — an older record
     /// may still be bridging a fill the reading has not caught up with.
-    pub fn release_newest(&mut self, strategy: StrategyId, symbol: SymbolId, qty: f64) {
+    pub fn release_newest(
+        &mut self,
+        strategy: StrategyId,
+        symbol: SymbolId,
+        qty: f64,
+        steps: QuantitySteps<'_>,
+    ) {
         let Some(at) = self
             .records
             .iter()
@@ -168,7 +235,7 @@ impl CoverBook {
         let record = &mut self.records[at];
         let eaten = qty.min(record.sent.abs());
         record.sent -= eaten * record.sent.signum();
-        if record.sent.abs() <= QTY_EPS {
+        if record.sent.abs() <= dust_floor(steps(symbol), record.booked) {
             self.records.remove(at);
         }
     }
@@ -190,7 +257,7 @@ impl CoverBook {
     /// taken that much of the send into account: each cover shrinks by
     /// exactly what the reading absorbed, and only what it has not yet shown
     /// stays covered.
-    pub fn absorb(&mut self, account: &AccountView) {
+    pub fn absorb(&mut self, account: &AccountView, steps: QuantitySteps<'_>) {
         // One reading is one fact, so its movement is spent ONCE across a
         // symbol's covers, oldest first. Measuring every record against its own
         // baseline independently lets two sends on one symbol both claim the
@@ -219,7 +286,7 @@ impl CoverBook {
                 // for, and re-measuring against the old baseline next time
                 // would let the same movement pay for this record too.
                 record.view_at_send = now;
-                record.sent.abs() > QTY_EPS
+                record.sent.abs() > dust_floor(steps(record.symbol), record.booked)
             } else {
                 // The reading moved AGAINST the send: it is describing
                 // something newer than this record, so it has manifestly
@@ -235,6 +302,17 @@ impl CoverBook {
 mod tests {
     use super::*;
     use engine_types::PositionView;
+
+    /// Most cases here name no grid: the instrument table has not been
+    /// consulted, so the book judges a residual on float resolution alone.
+    fn no_steps(_: SymbolId) -> Option<f64> {
+        None
+    }
+
+    /// One grid for every symbol, for the cases that are about the grid.
+    fn grid(step: f64) -> impl Fn(SymbolId) -> Option<f64> {
+        move |_| Some(step)
+    }
 
     const CARRY: StrategyId = StrategyId(0);
     const LONG: StrategyId = StrategyId(1);
@@ -288,9 +366,9 @@ mod tests {
         // left the unseen remainder uncovered, and the plug bought it again.
         let mut book = CoverBook::default();
         book.register(CARRY, KAITO, Side::Buy, 10.0, &flat());
-        book.absorb(&reading(&[(KAITO, 5.0)]));
+        book.absorb(&reading(&[(KAITO, 5.0)]), &no_steps);
         assert_eq!(book.in_flight(CARRY, KAITO), 5.0);
-        book.absorb(&reading(&[(KAITO, 10.0)]));
+        book.absorb(&reading(&[(KAITO, 10.0)]), &no_steps);
         assert_eq!(
             book.in_flight(CARRY, KAITO),
             0.0,
@@ -304,7 +382,7 @@ mod tests {
         // something newer than the send, so it has manifestly caught up.
         let mut book = CoverBook::default();
         book.register(CARRY, KAITO, Side::Buy, 10.0, &reading(&[(KAITO, 2.0)]));
-        book.absorb(&reading(&[(KAITO, 1.0)]));
+        book.absorb(&reading(&[(KAITO, 1.0)]), &no_steps);
         assert_eq!(book.in_flight(CARRY, KAITO), 0.0);
     }
 
@@ -312,7 +390,7 @@ mod tests {
     fn an_unmoved_reading_keeps_the_cover_whole() {
         let mut book = CoverBook::default();
         book.register(CARRY, KAITO, Side::Buy, 10.0, &reading(&[(KAITO, 2.0)]));
-        book.absorb(&reading(&[(KAITO, 2.0)]));
+        book.absorb(&reading(&[(KAITO, 2.0)]), &no_steps);
         assert_eq!(book.in_flight(CARRY, KAITO), 10.0);
     }
 
@@ -320,7 +398,7 @@ mod tests {
     fn a_reject_releases_the_whole_send() {
         let mut book = CoverBook::default();
         book.register(CARRY, KAITO, Side::Buy, 10.0, &flat());
-        book.release_newest(CARRY, KAITO, 10.0);
+        book.release_newest(CARRY, KAITO, 10.0, &no_steps);
         assert_eq!(book.in_flight(CARRY, KAITO), 0.0);
     }
 
@@ -330,7 +408,7 @@ mod tests {
         // freed, the filled 4 stay covered until the reading shows them.
         let mut book = CoverBook::default();
         book.register(CARRY, KAITO, Side::Buy, 10.0, &flat());
-        book.release_newest(CARRY, KAITO, 6.0);
+        book.release_newest(CARRY, KAITO, 6.0, &no_steps);
         assert_eq!(book.in_flight(CARRY, KAITO), 4.0);
     }
 
@@ -341,7 +419,7 @@ mod tests {
         let mut book = CoverBook::default();
         book.register(CARRY, KAITO, Side::Buy, 10.0, &flat());
         book.register(CARRY, KAITO, Side::Buy, 5.0, &flat());
-        book.release_newest(CARRY, KAITO, 5.0);
+        book.release_newest(CARRY, KAITO, 5.0, &no_steps);
         assert_eq!(
             book.in_flight(CARRY, KAITO),
             10.0,
@@ -390,7 +468,7 @@ mod tests {
         let mut book = CoverBook::default();
         book.register(CARRY, KAITO, Side::Buy, 10.0, &flat());
         book.register(CARRY, KAITO, Side::Buy, 5.0, &flat());
-        book.absorb(&reading(&[(KAITO, 10.0)]));
+        book.absorb(&reading(&[(KAITO, 10.0)]), &no_steps);
         assert_eq!(
             book.in_flight(CARRY, KAITO),
             5.0,
@@ -398,7 +476,7 @@ mod tests {
         );
 
         // And the next reading absorbs it, once.
-        book.absorb(&reading(&[(KAITO, 15.0)]));
+        book.absorb(&reading(&[(KAITO, 15.0)]), &no_steps);
         assert_eq!(book.in_flight(CARRY, KAITO), 0.0);
     }
 
@@ -409,7 +487,7 @@ mod tests {
         let mut book = CoverBook::default();
         book.register(CARRY, KAITO, Side::Buy, 10.0, &flat());
         book.register(CARRY, KAITO, Side::Buy, 5.0, &flat());
-        book.absorb(&reading(&[(KAITO, 12.0)]));
+        book.absorb(&reading(&[(KAITO, 12.0)]), &no_steps);
         assert_eq!(book.in_flight(CARRY, KAITO), 3.0);
     }
 
@@ -420,7 +498,7 @@ mod tests {
         let mut book = CoverBook::default();
         book.register(CARRY, KAITO, Side::Buy, 10.0, &flat());
         book.register(LONG, COTI, Side::Buy, 8.0, &flat());
-        book.absorb(&reading(&[(KAITO, 10.0)]));
+        book.absorb(&reading(&[(KAITO, 10.0)]), &no_steps);
         assert_eq!(book.in_flight(CARRY, KAITO), 0.0);
         assert_eq!(
             book.in_flight(LONG, COTI),
@@ -436,5 +514,98 @@ mod tests {
         book.register_reduce(CARRY, COTI, Side::Buy, 4.0, &flat());
 
         assert_eq!(book.opening_symbols(), vec![(CARRY, KAITO)]);
+    }
+
+    #[test]
+    fn a_fully_shown_send_clears_at_any_contract_count() {
+        // A whole-contract venue quotes size in the hundreds of thousands.
+        // Paid down one reading at a time, the subtraction leaves dust of a
+        // few ULPs — about 1e-10 at this magnitude, far above any fixed
+        // 1e-12 floor — so a cover judged against an absolute epsilon never
+        // cleared and in_flight kept reporting a position the reading had
+        // already shown, on every quote, for the life of the process.
+        let sends = [400_000.1, 250_000.3, 350_000.7];
+        let total: f64 = sends.iter().sum();
+        let mut book = CoverBook::default();
+        let mut shown = 0.0;
+        for send in sends {
+            book.register(CARRY, KAITO, Side::Buy, send, &reading(&[(KAITO, shown)]));
+            shown += send;
+            book.absorb(&reading(&[(KAITO, shown)]), &grid(1.0));
+        }
+        assert_eq!(
+            book.in_flight(CARRY, KAITO),
+            0.0,
+            "the reading has shown all {total} and nothing is still covered"
+        );
+        assert!(
+            book.opening_symbols().is_empty(),
+            "a phantom cover survived"
+        );
+    }
+
+    #[test]
+    fn a_cover_paid_down_over_many_readings_still_clears() {
+        // The error a shrinking record carries was made at the sizes it has
+        // already been. A threshold measured against what is *left* falls away
+        // as the record shrinks, so the last reading leaves dust the rule can
+        // no longer see — and the cover survives its own settlement forever.
+        let total = 2_000_000.0;
+        let mut book = CoverBook::default();
+        book.register(CARRY, KAITO, Side::Buy, total, &flat());
+        let mut shown = 0.0;
+        for _ in 0..500 {
+            shown += total / 500.0;
+            book.absorb(&reading(&[(KAITO, shown)]), &grid(1.0));
+        }
+        assert_eq!(
+            book.in_flight(CARRY, KAITO),
+            0.0,
+            "the reading has shown all {total} and nothing is still covered"
+        );
+        assert!(
+            book.opening_symbols().is_empty(),
+            "a phantom cover survived"
+        );
+    }
+
+    #[test]
+    fn a_residual_the_venue_would_still_accept_is_never_dust() {
+        // One step of a fine grid is a real order. The threshold is half a
+        // step, so a residual at a full step stays covered however small the
+        // number is in absolute terms.
+        let step = 1e-8;
+        let mut book = CoverBook::default();
+        book.register(CARRY, KAITO, Side::Buy, 5.0, &flat());
+        book.release_newest(CARRY, KAITO, 5.0 - step, &grid(step));
+        let left = book.in_flight(CARRY, KAITO);
+        assert!(
+            (left - step).abs() < step / 2.0,
+            "a legal one-step remainder was erased as dust: {left}"
+        );
+
+        // Half of that step is not an order the venue can hold.
+        book.release_newest(CARRY, KAITO, step / 2.0, &grid(step));
+        assert_eq!(book.in_flight(CARRY, KAITO), 0.0);
+    }
+
+    #[test]
+    fn the_dust_floor_tracks_the_scale_it_is_asked_about() {
+        // Neither input alone decides it: the grid rules when the numbers are
+        // small, the numbers rule when the grid is fine.
+        assert_eq!(dust_floor(Some(1.0), 10.0), 0.5);
+        assert!(dust_floor(Some(1e-18), 1e6) > 1e-11, "float dust ignored");
+        assert!(
+            dust_floor(None, 1e6) > 1e-11,
+            "float dust ignored with no grid"
+        );
+        assert!(
+            dust_floor(None, 1.0) < 1e-13,
+            "a small send judged too coarsely"
+        );
+        // A grid the venue never sent, or sent as nonsense, is not a grid.
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(dust_floor(Some(bad), 1.0), dust_floor(None, 1.0));
+        }
     }
 }

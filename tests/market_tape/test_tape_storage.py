@@ -108,6 +108,60 @@ def test_segment_identity_reads_both_layouts(tmp_path: Path) -> None:
 
 
 @needs_zstd
+def test_a_backlog_at_its_ceiling_defers_a_segment_to_recovery_instead_of_growing(tmp_path: Path) -> None:
+    # A ceiling of one byte: every closed segment is over it.
+    manifest = Manifest(tmp_path)
+    compressor = Compressor(tmp_path, manifest, backlog_max_bytes=1)
+    writer = SegmentWriter(tmp_path, max_bytes=1024, fsync_every=1)
+    for _ in range(3):
+        writer.append(trade(1_800_000_000_000_000_000))
+    closed = writer.close()
+    assert closed, "the writer closed a segment to defer"
+
+    assert [compressor.submit(segment) for segment in closed] == [False] * len(closed)
+    assert compressor.depth() == 0, "a deferred segment is not queued"
+    assert compressor.backlog_bytes() == 0
+    status = compressor.status()
+    assert status["deferred"] == len(closed) and status["last_deferred_ns"] > 0
+
+    # Nothing was lost: the rows are on disk as raw segments, and the next
+    # start's recovery is what compresses them.
+    raw = list(tmp_path.rglob("segment-*.jsonl"))
+    assert len(raw) == len(closed)
+    assert sum(len(path.read_bytes().splitlines()) for path in raw) == 3
+
+    recovered = Compressor(tmp_path, manifest)
+    recovered.start()
+    recovered.close()
+    assert not list(tmp_path.rglob("segment-*.jsonl"))
+    assert len(list(tmp_path.rglob("segment-*.jsonl.zst"))) == len(closed)
+
+
+@needs_zstd
+def test_a_backlog_under_its_ceiling_is_queued_and_measured_in_bytes(tmp_path: Path) -> None:
+    manifest = Manifest(tmp_path)
+    compressor = Compressor(tmp_path, manifest, backlog_max_bytes=1024**3)
+    writer = SegmentWriter(tmp_path, max_bytes=1024 * 1024, fsync_every=1)
+    for _ in range(3):
+        writer.append(trade(1_800_000_000_000_000_000))
+    closed = writer.close()
+
+    raw_bytes = sum(segment.path.stat().st_size for segment in closed)
+    # Measured before the worker starts, so the numbers stand still: the
+    # backlog is the raw bytes on disk, not a count of segments.
+    assert all(compressor.submit(segment) for segment in closed)
+    assert compressor.depth() == len(closed)
+    assert compressor.backlog_bytes() == raw_bytes > 0
+    assert compressor.status()["deferred"] == 0
+
+    # Draining returns the backlog to zero, in bytes as well as in count.
+    compressor.thread.start()
+    compressor.close()
+    assert compressor.depth() == 0 and compressor.backlog_bytes() == 0
+    assert compressor.status()["compressed"] == len(closed)
+
+
+@needs_zstd
 def test_closed_segment_is_verified_before_raw_bytes_are_removed(tmp_path: Path) -> None:
     manifest = Manifest(tmp_path)
     compressor = Compressor(tmp_path, manifest)
@@ -131,10 +185,14 @@ def test_closed_segment_is_verified_before_raw_bytes_are_removed(tmp_path: Path)
     assert receipt["sha256"] == hashlib.sha256(compressed[0].read_bytes()).hexdigest()
     assert compressor.status() == {
         "pending": 0,
+        "pending_bytes": 0,
+        "backlog_max_bytes": None,
         "compressed": 1,
         "failed": 0,
+        "deferred": 0,
         "last_error": None,
         "last_error_ns": None,
+        "last_deferred_ns": None,
         "alive": False,
     }
 

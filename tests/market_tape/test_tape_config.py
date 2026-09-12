@@ -345,3 +345,67 @@ def test_a_ranked_tier_takes_an_optional_time_floor_and_defaults_to_none() -> No
     funding = _universe({"kind": "funding_below", "threshold_bp": 3, "quote": "USDT"}, tier="crowded", base_dir=here)
     assert funding.sticky_hours == 48.0
     assert Universe("funding_below", threshold_bp=3.0).sticky_hours is None
+
+
+def test_a_mistyped_setting_is_refused_rather_than_silently_defaulted() -> None:
+    # A key nobody reads leaves the recorder on a default nobody chose, and
+    # says nothing. `deploy/capture/*.toml` states in its own comments that the
+    # two recorders' disk caps must sum under the filesystem; one wrong letter
+    # in `max_disk_gb` used to give that recorder the 60 GB default instead.
+    good = MINIMAL + "\n[storage]\nmax_disk_gb = 18\n"
+    assert parse(good).storage.max_disk_gb == 18
+
+    with pytest.raises(ConfigError, match=r"\[storage\] has no key 'max_disk_bg'; did you mean 'max_disk_gb'"):
+        parse(MINIMAL + "\n[storage]\nmax_disk_bg = 18\n")
+    with pytest.raises(ConfigError, match=r"\[storage\] has no key 'nonsense'; keys are "):
+        parse(MINIMAL + "\n[storage]\nnonsense = 1\n")
+
+
+def test_every_table_refuses_a_key_it_does_not_have() -> None:
+    # Not only [storage]: a typo anywhere is a setting that does nothing.
+    cases = {
+        "venue": (MINIMAL.replace('market = "linear"', 'market = "linear"\nmarkett = "x"'), "markett"),
+        "connection": (MINIMAL + "\n[connection]\ntopics_per_connexion = 10\n", "topics_per_connexion"),
+        "snapshots": (MINIMAL + "\n[snapshots]\ncadense = \"day\"\n", "cadense"),
+        "budget": (MINIMAL + "\n[budget]\nmonthly_g = 100\n", "monthly_g"),
+        "tier": (MINIMAL.replace('name = "deep"', 'name = "deep"\nfeed = ["trades"]'), "feed"),
+        "universe": (
+            MINIMAL.replace('kind = "symbols", symbols', 'kind = "symbols", symbol = ["X"], symbols'),
+            "symbol",
+        ),
+    }
+    for section, (text, key) in cases.items():
+        with pytest.raises(ConfigError, match=rf"\[{section}\] has no key '{key}'"):
+            parse(text)
+
+
+def test_the_storage_table_spells_exactly_the_settings_that_exist() -> None:
+    # The accepted key list is read off StorageSettings, so a new setting is
+    # spellable the moment it exists and no second list can go stale.
+    import dataclasses
+
+    from market_tape.config import TABLE_KEYS, StorageSettings
+
+    assert "storage" not in TABLE_KEYS, "the storage keys come from the dataclass, not a hand-kept set"
+    names = {field.name for field in dataclasses.fields(StorageSettings)}
+    body = "\n".join(f"{name} = 1" for name in sorted(names - {"root"}))
+    parse(MINIMAL + "\n[storage]\n" + body + "\n")
+
+
+def test_a_shipped_example_never_restates_a_default_it_could_go_stale_against() -> None:
+    # Examples teach. One that writes out a value equal to the shipped default
+    # teaches that number, and keeps teaching it after the default moves.
+    # Deploy configs are the opposite case and are excluded on purpose: every
+    # number that binds on the host stays written down where an operator reads it.
+    from market_tape.config import StorageSettings
+
+    defaults = StorageSettings()
+    stale = []
+    for path in sorted((ROOT / "market_tape" / "examples").glob("*.toml")):
+        storage = tomllib.loads(path.read_text(encoding="utf-8")).get("storage") or {}
+        for key, value in storage.items():
+            if key == "root":
+                continue
+            if value == getattr(defaults, key):
+                stale.append(f"{path.name}: {key} = {value} is already the default")
+    assert not stale, "an example restates a default:\n" + "\n".join(stale)

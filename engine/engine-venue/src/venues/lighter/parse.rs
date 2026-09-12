@@ -253,8 +253,6 @@ mod tests {
             index: 0,
             size_decimals: 5,
             price_decimals: 1,
-            min_base_amount: 0.0001,
-            min_quote_amount: 10.0,
             exact_spec: None,
         }])
     }

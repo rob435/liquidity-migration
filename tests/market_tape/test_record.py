@@ -1147,10 +1147,14 @@ def test_the_status_file_carries_what_the_host_watchdog_reads(tmp_path: Path) ->
     # failing zstd is visible while the recorder itself still looks alive.
     assert payload["compressor"] == {
         "pending": 0,
+        "pending_bytes": 0,
+        "backlog_max_bytes": 4294967296,
         "compressed": 0,
         "failed": 0,
+        "deferred": 0,
         "last_error": None,
         "last_error_ns": None,
+        "last_deferred_ns": None,
         "alive": False,
     }
     assert payload["venue"] == "bybit" and payload["market"] == "linear"

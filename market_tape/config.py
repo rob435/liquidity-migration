@@ -107,8 +107,9 @@ and no budget. See `examples/`.
 
 from __future__ import annotations
 
+import difflib
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -139,6 +140,53 @@ DEFAULT_STICKY_HOURS = 48.0
 
 class ConfigError(ValueError):
     """The configuration cannot be recorded from."""
+
+
+#: What each table may contain. `[storage]` is read off `StorageSettings`, so
+#: a new setting is spellable the moment it exists and no second list can go
+#: stale against it.
+TABLE_KEYS: Mapping[str, frozenset[str]] = {
+    "venue": frozenset({"name", "market", "ws_url", "rest_url"}),
+    "connection": frozenset({"topics_per_connection", "reanchor_books_each_hour"}),
+    "snapshots": frozenset({"cadence"}),
+    "budget": frozenset({"monthly_gb", "shed", "restore_below", "act_every_minutes"}),
+    "tier": frozenset({"name", "feeds", "universe"}),
+    "universe": frozenset(
+        {
+            "kind",
+            "exclude_tiers",
+            "symbols",
+            "path",
+            "quote",
+            "top",
+            "leave_top",
+            "sticky_hours",
+            "sticky_days",
+            "window_hours",
+            "threshold_bp",
+            "ratio",
+            "pct",
+        }
+    ),
+}
+
+
+def _only_known(table: Mapping[str, Any], section: str, *, known: Iterable[str] | None = None) -> None:
+    """Refuse a key the table does not have.
+
+    A mistyped setting that is merely ignored runs the recorder on a default
+    nobody chose and says nothing about it. `max_disk_bg = 18` leaves that
+    recorder on the 60 GB default while the very file it is written in says
+    the two recorders' caps must sum under the filesystem.
+    """
+
+    allowed = set(TABLE_KEYS[section] if known is None else known)
+    for key in table:
+        if key in allowed:
+            continue
+        near = difflib.get_close_matches(str(key), sorted(allowed), n=1)
+        hint = f"did you mean {near[0]!r}?" if near else f"keys are {', '.join(sorted(allowed))}"
+        raise ConfigError(f"[{section}] has no key {key!r}; {hint}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,6 +262,13 @@ class StorageSettings:
 
     `fsync_every_records` is the recovery point objective: a power loss loses at
     most that many acknowledged rows of each symbol's open segment, less one.
+
+    `compress_backlog_max_mb` is the compressor's work list ceiling, in raw
+    bytes awaiting compression. Above it a closed segment is left as `.jsonl`
+    for the next start's recovery instead of being queued: the frame loop
+    never waits on compression, no row is dropped, and a compressor that has
+    stopped keeping up cannot grow an unbounded work list behind a recorder
+    whose heartbeat is still fresh.
     """
 
     root: Path | None = None
@@ -224,6 +279,7 @@ class StorageSettings:
     min_free_disk_gb: float = 12.0
     queue_frames: int = 32_768
     status_interval_seconds: float = 30.0
+    compress_backlog_max_mb: float = 4_096.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,6 +388,7 @@ def _quote(raw: Mapping[str, Any]) -> str | None:
 def _universe(raw: Mapping[str, Any], *, tier: str, base_dir: Path) -> Universe:
     if not isinstance(raw, Mapping):
         raise ConfigError(f"tier {tier!r}: universe must be a table")
+    _only_known(raw, "universe")
     kind = str(raw.get("kind") or "")
     if kind not in UNIVERSE_KINDS:
         raise ConfigError(f"tier {tier!r}: unknown universe kind {kind!r}; kinds are {', '.join(UNIVERSE_KINDS)}")
@@ -404,6 +461,7 @@ def _positive(table: Mapping[str, Any], name: str, default: float, *, section: s
 def _budget(raw: Mapping[str, Any], tiers: Iterable[Tier]) -> BudgetSettings:
     if not isinstance(raw, Mapping):
         raise ConfigError("[budget] must be a table")
+    _only_known(raw, "budget")
     monthly = raw.get("monthly_gb")
     monthly_gb = None if monthly is None else _positive(raw, "monthly_gb", 0.0, section="budget")
     restore_below = float(raw.get("restore_below", 0.8))
@@ -430,6 +488,7 @@ def parse_config(data: Mapping[str, Any], *, base_dir: Path, source_path: Path |
     venue_table = data.get("venue")
     if not isinstance(venue_table, Mapping):
         raise ConfigError("config needs a [venue] table")
+    _only_known(venue_table, "venue")
     name = str(venue_table.get("name") or "")
     if name not in VENUES:
         raise ConfigError(f"unknown venue {name!r}; venues are {', '.join(VENUES)}")
@@ -446,6 +505,7 @@ def parse_config(data: Mapping[str, Any], *, base_dir: Path, source_path: Path |
     storage_table = data.get("storage") or {}
     if not isinstance(storage_table, Mapping):
         raise ConfigError("[storage] must be a table")
+    _only_known(storage_table, "storage", known={field.name for field in fields(StorageSettings)})
     root = storage_table.get("root")
     root_path = Path(str(root)) if root else None
     if root_path is not None and not root_path.is_absolute():
@@ -464,15 +524,20 @@ def parse_config(data: Mapping[str, Any], *, base_dir: Path, source_path: Path |
         status_interval_seconds=_positive(
             storage_table, "status_interval_seconds", defaults.status_interval_seconds, section="storage"
         ),
+        compress_backlog_max_mb=_positive(
+            storage_table, "compress_backlog_max_mb", defaults.compress_backlog_max_mb, section="storage"
+        ),
     )
 
     connection = data.get("connection") or {}
+    _only_known(connection, "connection")
     topics_per_connection = int(_positive(connection, "topics_per_connection", 150, section="connection"))
     reanchor = connection.get("reanchor_books_each_hour", True)
     if not isinstance(reanchor, bool):
         raise ConfigError("connection.reanchor_books_each_hour must be true or false")
 
     snapshots = data.get("snapshots") or {}
+    _only_known(snapshots, "snapshots")
     cadence = str(snapshots.get("cadence") or "day")
     if cadence not in SNAPSHOT_CADENCES:
         raise ConfigError(f"snapshots.cadence must be one of {SNAPSHOT_CADENCES}, got {cadence!r}")
@@ -485,6 +550,7 @@ def parse_config(data: Mapping[str, Any], *, base_dir: Path, source_path: Path |
     for raw in raw_tiers:
         if not isinstance(raw, Mapping):
             raise ConfigError("each [[tier]] must be a table")
+        _only_known(raw, "tier")
         tier_name = str(raw.get("name") or "")
         if not tier_name or tier_name in seen or ":" in tier_name:
             raise ConfigError(f"tier names must be unique, non-empty, and free of ':', got {tier_name!r}")

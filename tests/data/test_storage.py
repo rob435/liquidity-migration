@@ -1190,3 +1190,54 @@ def test_replace_dataset_leaves_the_previous_generation_intact_on_failure(tmp_pa
     assert survived["symbol"].to_list() == ["A"]
     leftovers = [p.name for p in tmp_path.iterdir() if p.name.startswith(".archive_trade_manifest")]
     assert leftovers == []
+
+
+def test_a_dataset_part_and_a_control_artifact_answer_a_bad_directory_the_same_way(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two durability implementations used to disagree here: the control
+    # artifact raised, the dataset part swallowed the failure and reported
+    # success. A rename is only durable once the parent directory is flushed,
+    # so a swallowed failure is a bucket whose name can vanish on power loss.
+    from liquidity_migration.core import durable_file
+
+    real_fsync = os.fsync
+    directories: list[int] = []
+
+    def refuse_directory_fsync(fd: int) -> None:
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            directories.append(fd)
+            raise OSError("directory entry not flushed")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", refuse_directory_fsync)
+
+    frame = pl.DataFrame({"symbol": ["BTCUSDT"], "ts_ms": [1], "value": [2.0]})
+    with pytest.raises(durable_file.ArtifactDurabilityError, match="not durable"):
+        write_dataset(frame, tmp_path / "ds", "funding", partition_by=("symbol",), append=False)
+    with pytest.raises(durable_file.ArtifactDurabilityError, match="not durable"):
+        durable_file.durable_atomic_replace(tmp_path / "control.json", b"{}")
+    assert directories, "the test never reached a directory fsync"
+
+    # The part is published either way: what a reader can already see is never
+    # removed to report a failure.
+    monkeypatch.setattr(os, "fsync", real_fsync)
+    written = list((tmp_path / "ds").rglob("*.parquet"))
+    assert written, "the dataset part was withdrawn instead of reported"
+    assert not list((tmp_path / "ds").rglob(".*.tmp")), "a temporary survived"
+
+
+def test_a_writer_that_fails_publishes_nothing_and_leaves_no_temporary(tmp_path: Path) -> None:
+    from liquidity_migration.core.durable_file import durable_atomic_write
+
+    target = tmp_path / "part.parquet"
+    target.write_bytes(b"the previous generation")
+
+    def explode(path: Path) -> None:
+        path.write_bytes(b"half a file")
+        raise RuntimeError("the writer gave up")
+
+    with pytest.raises(RuntimeError, match="gave up"):
+        durable_atomic_write(target, explode, label="dataset part")
+    assert target.read_bytes() == b"the previous generation"
+    assert not list(tmp_path.glob(".*.tmp"))

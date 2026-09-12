@@ -786,12 +786,52 @@ pub enum OrderUpdate {
 }
 
 /// Tick size, step size, and minimums for one instrument.
+///
+/// What a strategy sizes against. Sizing is statistical and works in floats;
+/// order terms are quantized against [`crate::numeric::ExactInstrumentSpec`]
+/// and never against this. Build it with [`InstrumentRule::from_exact`] so
+/// the venue's own decimals are parsed once and the two cannot drift.
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InstrumentRule {
     pub tick_size: f64,
     pub qty_step: f64,
     pub min_qty: f64,
     pub min_notional: f64,
+}
+
+impl InstrumentRule {
+    /// The sizing rule this instrument's exact spec implies.
+    ///
+    /// An absent minimum is no minimum, which is zero. An absent tick or step
+    /// has no float spelling to offer and yields `None`: a strategy sizing
+    /// against a guessed grid would round to a quantity the venue refuses.
+    /// The finer of the limit and market quantity steps is the one reported,
+    /// so sizing never proposes a quantity that is illegal on either.
+    pub fn from_exact(spec: &crate::numeric::ExactInstrumentSpec) -> Option<Self> {
+        fn positive(value: Option<&crate::numeric::Exact>) -> Option<f64> {
+            let value = value?.to_f64().ok()?;
+            (value.is_finite() && value > 0.0).then_some(value)
+        }
+        fn at_least_zero(value: Option<&crate::numeric::Exact>) -> Option<f64> {
+            match value {
+                None => Some(0.0),
+                Some(value) => {
+                    let value = value.to_f64().ok()?;
+                    (value.is_finite() && value >= 0.0).then_some(value)
+                }
+            }
+        }
+        let step = [
+            positive(spec.qty_step.as_ref()),
+            positive(spec.market_qty_step.as_ref()),
+        ];
+        Some(Self {
+            tick_size: positive(spec.tick_size.as_ref())?,
+            qty_step: step.into_iter().flatten().min_by(f64::total_cmp)?,
+            min_qty: at_least_zero(spec.min_qty.as_ref())?,
+            min_notional: at_least_zero(spec.min_notional.as_ref())?,
+        })
+    }
 }
 
 #[cfg(test)]

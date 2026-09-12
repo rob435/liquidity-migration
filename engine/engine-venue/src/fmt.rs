@@ -1,9 +1,15 @@
-//! Historical decimal formatting for requests without exact order terms.
-//! Prepared orders use `order_wire` and preserve their retained decimals.
+//! Decimal formatting for the venue scalars that are not order terms.
+//!
+//! Order terms do not come through here: `order_wire` renders them from the
+//! exact decimals they were quantized from and refuses a term that has none.
+//! What is left is the handful of numbers that were never a quantized order
+//! quantity or price — a leverage setting, a position-level stop trigger on a
+//! venue whose exact terms are absent, and the price and quantity Binance
+//! reads back off its own resting order to re-send in an amendment.
 
 use engine_types::VenueError;
 
-/// The legacy request formatter's fixed decimal ceiling.
+/// The fixed decimal ceiling these scalars are rendered to.
 const MAX_DECIMALS: usize = 10;
 
 /// Render a positive, finite number as a plain decimal string.

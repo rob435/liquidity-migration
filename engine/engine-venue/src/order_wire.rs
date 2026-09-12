@@ -16,13 +16,27 @@ pub(crate) fn terms(request: &OrderRequest) -> Result<Option<&ExactOrderTerms>, 
         })
         .transpose()
 }
+/// An order term that reached the wire without the exact decimal it was
+/// quantized from.
+///
+/// The engine does not produce one. It refuses a symbol whose exact
+/// instrument metadata it does not hold (`EXACT_INSTRUMENT_METADATA_
+/// UNAVAILABLE`), and every request it does admit carries the terms
+/// `apply_projection` attached; the one path that built an order without them
+/// was `#[cfg(test)]`. Refusing rather than formatting a float makes that a
+/// property of this boundary instead of a property of the caller.
+fn without_terms(field: &'static str) -> Result<String, VenueError> {
+    Err(error(format!(
+        "order {field} reached the wire with no exact term to send"
+    )))
+}
 pub(crate) fn quantity(request: &OrderRequest) -> Result<String, VenueError> {
     match terms(request)? {
         Some(terms) => decimal_wire(&terms.quantity).map_err(error),
-        None => crate::fmt::venue_num(request.qty),
+        None => without_terms("quantity"),
     }
 }
-pub(crate) fn price(request: &OrderRequest, legacy: f64) -> Result<String, VenueError> {
+pub(crate) fn price(request: &OrderRequest) -> Result<String, VenueError> {
     match terms(request)? {
         Some(terms) => decimal_wire(
             terms
@@ -31,10 +45,10 @@ pub(crate) fn price(request: &OrderRequest, legacy: f64) -> Result<String, Venue
                 .ok_or_else(|| error(OrderLegalityError::Projection))?,
         )
         .map_err(error),
-        None => crate::fmt::venue_num(legacy),
+        None => without_terms("price"),
     }
 }
-pub(crate) fn stop(request: &OrderRequest, legacy: f64) -> Result<String, VenueError> {
+pub(crate) fn stop(request: &OrderRequest) -> Result<String, VenueError> {
     match terms(request)? {
         Some(terms) => decimal_wire(
             terms
@@ -43,7 +57,7 @@ pub(crate) fn stop(request: &OrderRequest, legacy: f64) -> Result<String, VenueE
                 .ok_or_else(|| error(OrderLegalityError::Projection))?,
         )
         .map_err(error),
-        None => crate::fmt::venue_num(legacy),
+        None => without_terms("stop trigger"),
     }
 }
 #[cfg(feature = "lighter")]
@@ -80,7 +94,7 @@ pub(crate) fn amend_price(spec: &engine_types::AmendSpec) -> Result<Option<Strin
             .as_ref()
             .map(|value| decimal_wire(value).map_err(error))
             .transpose(),
-        None => spec.px.map(crate::fmt::venue_num).transpose(),
+        None => spec.px.map(|_| without_terms("amend price")).transpose(),
     }
 }
 pub(crate) fn amend_quantity(spec: &engine_types::AmendSpec) -> Result<Option<String>, VenueError> {
@@ -90,6 +104,9 @@ pub(crate) fn amend_quantity(spec: &engine_types::AmendSpec) -> Result<Option<St
             .as_ref()
             .map(|value| decimal_wire(value).map_err(error))
             .transpose(),
-        None => spec.qty.map(crate::fmt::venue_num).transpose(),
+        None => spec
+            .qty
+            .map(|_| without_terms("amend quantity"))
+            .transpose(),
     }
 }

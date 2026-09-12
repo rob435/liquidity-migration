@@ -29,9 +29,8 @@ pub struct Market {
     pub index: i16,
     pub size_decimals: u32,
     pub price_decimals: u32,
-    /// The venue's minimums, in ordinary decimal units.
-    pub min_base_amount: f64,
-    pub min_quote_amount: f64,
+    /// The venue's grid and minimums, as it spelled them. The float sizing
+    /// rule a strategy reads is derived from this and stored nowhere else.
     pub exact_spec: Option<engine_types::numeric::ExactInstrumentSpec>,
 }
 
@@ -90,11 +89,14 @@ impl Markets {
         Ok(out)
     }
 
+    /// A market whose metadata does not imply a whole sizing rule is left
+    /// out: a strategy skips a symbol it has no rule for, and sizing against
+    /// a guessed grid would round to a quantity the venue refuses.
     pub fn instrument_rules(&self) -> Vec<(Symbol, InstrumentRule)> {
         let mut out: Vec<(Symbol, InstrumentRule)> = self
             .by_symbol
             .values()
-            .map(|market| (engine_symbol(&market.symbol), instrument_rule(market)))
+            .filter_map(|market| Some((engine_symbol(&market.symbol), instrument_rule(market)?)))
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
@@ -119,13 +121,8 @@ pub fn engine_symbol(symbol: &str) -> Symbol {
     format!("{}USDT", symbol.trim().to_ascii_uppercase())
 }
 
-pub fn instrument_rule(market: &Market) -> InstrumentRule {
-    InstrumentRule {
-        tick_size: 10f64.powi(-(market.price_decimals as i32)),
-        qty_step: 10f64.powi(-(market.size_decimals as i32)),
-        min_qty: market.min_base_amount,
-        min_notional: market.min_quote_amount,
-    }
+pub fn instrument_rule(market: &Market) -> Option<InstrumentRule> {
+    InstrumentRule::from_exact(market.exact_spec.as_ref()?)
 }
 
 /// A price as the integer the transaction carries, rounded toward the passive
@@ -184,16 +181,19 @@ pub fn venue_size(qty: f64, market: &Market) -> Result<i64, VenueError> {
 mod tests {
     use super::*;
 
+    /// Built from the venue's own reply rather than by hand: the market's
+    /// grid and minimums have exactly one origin, and a fixture that set them
+    /// a second way could not catch the two disagreeing.
     fn market() -> Market {
-        Market {
-            symbol: "BTC".to_string(),
-            index: 0,
-            size_decimals: 5,
-            price_decimals: 1,
-            min_base_amount: 0.0001,
-            min_quote_amount: 10.0,
-            exact_spec: None,
-        }
+        let reply = serde_json::json!({"code":200,"order_book_details":[{
+            "symbol":"BTC","market_id":0,"status":"active",
+            "supported_size_decimals":5,"supported_price_decimals":1,
+            "min_base_amount":"0.0001","min_quote_amount":"10"
+        }]});
+        super::super::parse::parse_markets(&reply)
+            .expect("the venue listed one active market")
+            .pop()
+            .expect("one market")
     }
 
     #[test]
@@ -295,10 +295,40 @@ mod tests {
 
     #[test]
     fn the_instrument_rule_states_the_venues_own_minimums() {
-        let rule = instrument_rule(&market());
+        let market = market();
+        let rule = instrument_rule(&market).expect("a listed market has a sizing rule");
         assert!((rule.tick_size - 0.1).abs() < 1e-12);
         assert!((rule.qty_step - 1e-5).abs() < 1e-15);
         assert_eq!(rule.min_qty, 0.0001);
         assert_eq!(rule.min_notional, 10.0);
+    }
+
+    #[test]
+    fn the_sizing_rule_is_the_exact_specs_own_numbers_and_has_no_other_source() {
+        // The venue's decimals are parsed once. Every number a strategy sizes
+        // against has to be the same number the engine quantizes against, or
+        // an order sized on one grid is refused by the other.
+        let market = market();
+        let spec = market
+            .exact_spec
+            .as_ref()
+            .expect("a listed market is exact");
+        let rule = instrument_rule(&market).expect("a listed market has a sizing rule");
+        let exact = |value: &Option<engine_types::numeric::Exact>| {
+            value.as_ref().map_or(0.0, |v| v.to_f64().unwrap())
+        };
+        assert_eq!(rule.tick_size, exact(&spec.tick_size));
+        assert_eq!(rule.qty_step, exact(&spec.qty_step));
+        assert_eq!(rule.min_qty, exact(&spec.min_qty));
+        assert_eq!(rule.min_notional, exact(&spec.min_notional));
+
+        // And a market the venue described too thinly to size is left out
+        // rather than sized against a guessed grid.
+        let thin = Market {
+            exact_spec: None,
+            ..market
+        };
+        assert!(instrument_rule(&thin).is_none());
+        assert!(Markets::from_rows(vec![thin]).instrument_rules().is_empty());
     }
 }

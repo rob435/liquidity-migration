@@ -1365,7 +1365,8 @@ impl<W: Wal, R: RiskKernel, V: VenueGateway> Engine<W, R, V> {
         self.books.account = view;
         // A cover the fresh reading has caught up with is released, so the
         // strategies woken after this read one truthful in-flight number.
-        self.books.covers.absorb(&self.books.account);
+        let steps = crate::covers::steps_of(&self.instrument_specs);
+        self.books.covers.absorb(&self.books.account, &steps);
     }
 
     /// Stop trusting the account snapshot as soon as the private stream says

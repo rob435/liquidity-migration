@@ -115,6 +115,12 @@ _PROTECTIVE_BACKLOG_STUCK_MS = 60_000
 # `loop_iterations` must move between two readings of one process. The bound is
 # the engine-rate sampler's: at a 30-second timer a wider gap is not a pair.
 _LOOP_SAMPLE_MAX_GAP_SEC = 60.0
+#: How far the host wall clock may move against the engine's own monotonic
+#: uptime between two readings before it is a clock step rather than sampling
+#: jitter. `uptime_s` is whole seconds and the two readings are taken at
+#: slightly different points in each run, so a few seconds of disagreement is
+#: ordinary; a minute is not.
+_CLOCK_STEP_TOLERANCE_SEC = 60.0
 # A canary policy inside its last day: the realm stops opening when it expires,
 # and renewing it is an owner decision that needs more than a moment's notice.
 _CANARY_EXPIRY_WARN_SEC = 86_400
@@ -535,13 +541,64 @@ def _loop_prefix(unit: str) -> str:
     return f"engine-loop:{unit}:"
 
 
+def _clock_prefix(unit: str) -> str:
+    return f"engine-clock:{unit}:"
+
+
+def _engine_clock_alerts(
+    unit: str, payload: dict[str, object], *, now: float, counters: dict[str, float] | None
+) -> list[Alert]:
+    """Whether this host's wall clock still agrees with the engine's own.
+
+    Every age this watchdog reports — heartbeat staleness above all — is a
+    wall-clock subtraction, and a wall clock can step. The engine's `uptime_s`
+    comes from a monotonic clock that cannot, so the two readings together say
+    how much real time passed and how much the wall clock *claims* passed. A
+    gap between them is a clock step, and it is reported as itself.
+
+    It suppresses nothing. A stale heartbeat still pages: a clock step is a
+    reason an age may be wrong in either direction, and a missed dead engine
+    costs more than a page that names its own doubt.
+    """
+
+    uptime = _number(payload.get("uptime_s"))
+    if counters is None or uptime is None:
+        return []
+    prefix = _clock_prefix(unit)
+    previous, sampled_at = counters.get(prefix + "uptime"), counters.get(prefix + "time")
+    counters[prefix + "uptime"] = uptime
+    counters[prefix + "time"] = now
+    if previous is None or sampled_at is None:
+        return []
+    moved_uptime = uptime - previous
+    if moved_uptime < 0:
+        # The engine restarted, so this uptime is not the same count. The
+        # restart rule owns that; there is no clock claim to make.
+        return []
+    moved_wall = now - sampled_at
+    step = moved_wall - moved_uptime
+    if abs(step) <= _CLOCK_STEP_TOLERANCE_SEC:
+        return []
+    direction = "forward" if step > 0 else "backward"
+    return [
+        Alert(
+            f"engine-clock:{unit}",
+            "WARNING",
+            f"host clock stepped {direction} {abs(step):.0f}s against {unit}'s own uptime "
+            f"({moved_wall:.0f}s of wall clock over {moved_uptime:.0f}s of engine time); "
+            "every age in this report is a wall-clock subtraction",
+        )
+    ]
+
+
 def _forget_loop_samples(unit: str, counters: dict[str, float] | None) -> None:
     """A reading nobody took cannot be half of a pair."""
 
     if counters is None:
         return
-    for key in [key for key in counters if key.startswith(_loop_prefix(unit))]:
-        del counters[key]
+    for prefix in (_loop_prefix(unit), _clock_prefix(unit)):
+        for key in [key for key in counters if key.startswith(prefix)]:
+            del counters[key]
 
 
 def _engine_loop_alerts(
@@ -612,6 +669,8 @@ def _engine_runtime_alerts(
             )
         )
     alerts.extend(_engine_loop_alerts(unit, payload, now=now, counters=counters))
+    alerts.extend(_engine_clock_alerts(unit, payload, now=now, counters=counters))
+
     canary = payload.get("canary")
     if isinstance(canary, dict):
         blocked = canary.get("blocked")

@@ -762,23 +762,18 @@ impl BybitGateway {
             OrderKind::Market => {
                 body.insert("orderType".into(), "Market".into());
             }
-            OrderKind::Limit { px, tif } => {
+            OrderKind::Limit { tif, .. } => {
                 body.insert("orderType".into(), "Limit".into());
-                body.insert("price".into(), crate::order_wire::price(req, px)?.into());
+                body.insert("price".into(), crate::order_wire::price(req)?.into());
                 body.insert("timeInForce".into(), tif_str(tif).into());
             }
         }
-        if let Some(stop) = req.stop {
-            if !req.reduce_only {
-                body.insert("tpslMode".into(), "Full".into());
-                body.insert(
-                    "stopLoss".into(),
-                    crate::order_wire::stop(req, stop.trigger_px)?.into(),
-                );
-                body.insert("slTriggerBy".into(), "MarkPrice".into());
-                body.insert("slOrderType".into(), "Market".into());
-                body.insert("positionIdx".into(), 0.into());
-            }
+        if req.stop.is_some() && !req.reduce_only {
+            body.insert("tpslMode".into(), "Full".into());
+            body.insert("stopLoss".into(), crate::order_wire::stop(req)?.into());
+            body.insert("slTriggerBy".into(), "MarkPrice".into());
+            body.insert("slOrderType".into(), "Market".into());
+            body.insert("positionIdx".into(), 0.into());
         }
         Ok(Value::Object(body))
     }

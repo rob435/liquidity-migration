@@ -534,6 +534,79 @@ def test_barriers_on_the_engine_loop_warn_and_do_not_page(tmp_path: Path) -> Non
     assert "no durability thread" in paying[0].message
 
 
+def test_a_wall_clock_that_steps_against_the_engines_own_uptime_says_so(tmp_path: Path) -> None:
+    # Every age here is a wall-clock subtraction, and a wall clock can step.
+    # `uptime_s` comes from a monotonic clock that cannot, so the pair says
+    # how much real time passed against how much the wall clock claims did.
+    heartbeat = tmp_path / "heartbeat.json"
+    counters: dict[str, float] = {}
+
+    turns = iter(range(1, 100))
+
+    def alerts(uptime: object, *, at: float) -> list[liveness.Alert]:
+        # The loop keeps turning throughout, so nothing here but the clock
+        # can raise an alert.
+        return liveness.evaluate_engine_heartbeat(
+            ENGINE_UNIT,
+            _engine_beat(heartbeat, uptime_s=uptime, loop_iterations=next(turns)),
+            now=at,
+            counters=counters,
+        )
+
+    # One reading is not a comparison.
+    assert alerts(10_000, at=1_000.0) == []
+    # Wall clock and engine time advancing together is a healthy host.
+    assert alerts(10_030, at=1_030.0) == []
+    # Jitter inside the tolerance is sampling, not a step.
+    assert alerts(10_060, at=1_030.0 + 30.0 + liveness._CLOCK_STEP_TOLERANCE_SEC) == []
+
+    # An NTP step forward: the wall clock claims an hour the engine did not live.
+    base = 1_030.0 + 30.0 + liveness._CLOCK_STEP_TOLERANCE_SEC
+    stepped = alerts(10_090, at=base + 30.0 + 3_600.0)
+    assert [(alert.key, alert.severity) for alert in stepped] == [
+        (f"engine-clock:{ENGINE_UNIT}", "WARNING")
+    ]
+    assert "stepped forward 3600s" in stepped[0].message
+
+    # And backward, which is the direction that makes a dead engine look fresh.
+    back = base + 30.0 + 3_600.0
+    backward = alerts(10_120, at=back + 30.0 - 600.0)
+    assert [(alert.key, alert.severity) for alert in backward] == [
+        (f"engine-clock:{ENGINE_UNIT}", "WARNING")
+    ]
+    assert "stepped backward 600s" in backward[0].message
+
+    # A restart begins the count again and makes no clock claim.
+    assert alerts(5, at=back + 30.0 - 600.0 + 30.0) == []
+
+
+def test_a_clock_step_never_silences_a_stale_or_stalled_engine(tmp_path: Path) -> None:
+    # The clock alert names a doubt; it does not resolve one. A missed dead
+    # engine costs more than a page that says why its age may be wrong.
+    heartbeat = tmp_path / "heartbeat.json"
+    counters: dict[str, float] = {}
+
+    def keys(uptime: object, iterations: object, *, at: float) -> set[str]:
+        return {
+            alert.key
+            for alert in liveness.evaluate_engine_heartbeat(
+                ENGINE_UNIT,
+                _engine_beat(heartbeat, uptime_s=uptime, loop_iterations=iterations),
+                now=at,
+                counters=counters,
+            )
+        }
+
+    assert keys(10_000, 7, at=1_000.0) == set()
+    # Thirty seconds of wall clock against twelve minutes of engine time: the
+    # wall clock stepped backward, and the loop did not turn in either of
+    # them. Both are reported.
+    assert keys(10_700, 7, at=1_030.0) == {
+        f"engine-loop:{ENGINE_UNIT}",
+        f"engine-clock:{ENGINE_UNIT}",
+    }
+
+
 def test_a_loop_that_stops_turning_pages_on_the_second_reading(tmp_path: Path) -> None:
     heartbeat = tmp_path / "heartbeat.json"
     counters: dict[str, float] = {}

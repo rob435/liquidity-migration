@@ -25,7 +25,16 @@ impl DecimalField {
         self.optional(name)?
             .ok_or_else(|| VenueError::BadReply(format!("field {name} is missing or blank")))
     }
-    pub fn legacy(&self, name: &str) -> Result<f64, VenueError> {
+    /// The compatibility projection: this field as binary64, losing whatever
+    /// decimal the venue actually sent.
+    ///
+    /// Not the normal way to read a number. [`Self::required`] and
+    /// [`Self::optional`] keep the venue's own decimal, and everything that
+    /// prices, sizes, quantizes or accounts uses those. This exists for the
+    /// float-shaped structures still being migrated, and every call site is
+    /// listed in `tests/repo/test_engine_numeric_boundary.py` — a new one has
+    /// to be added there, in the same diff, on purpose.
+    pub fn compat_f64(&self, name: &str) -> Result<f64, VenueError> {
         self.required(name)?
             .value
             .to_f64()
@@ -128,7 +137,7 @@ mod tests {
         }
         let row: Row = serde_json::from_str(r#"{"amount":1e-400}"#).unwrap();
         assert!(!row.amount.required("amount").unwrap().value.is_zero());
-        assert!(row.amount.legacy("amount").is_err());
+        assert!(row.amount.compat_f64("amount").is_err());
     }
 }
 
